@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MaklyxaLauncher — лаунчер официального клиента Roblox</title>
+<meta name="description" content="MaklyxaLauncher — бесплатный настольный лаунчер для официального клиента Roblox: запуск игр по ссылке, FastFlags, панель Froststrap/Bloxstrap, три темы оформления.">
+<style>
+  :root {
+    --bg: #0d1524;
+    --bg2: #121b2c;
+    --surface: #1a2740;
+    --surface2: #22314e;
+    --border: #33476a;
+    --text: #eaf2ff;
+    --muted: #94a8c4;
+    --accent: #00c48c;
+    --accent-hover: #19d9a1;
+    --on-accent: #06231a;
+    --radius: 14px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { color: var(--accent-hover); }
+  .container { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---- шапка ---- */
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(13, 21, 36, 0.85);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav {
+    display: flex; align-items: center; justify-content: space-between;
+    height: 62px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; color: var(--text); }
+  .brand img { width: 30px; height: 30px; border-radius: 7px; }
+  .nav-links { display: flex; gap: 26px; }
+  .nav-links a { color: var(--muted); font-size: 15px; }
+  .nav-links a:hover { color: var(--text); }
+  @media (max-width: 720px) { .nav-links { display: none; } }
+
+  /* ---- кнопки ---- */
+  .btn {
+    display: inline-block;
+    background: var(--accent); color: var(--on-accent);
+    font-weight: 700; font-size: 16px;
+    padding: 13px 30px; border-radius: 10px;
+    transition: background .15s, transform .15s;
+  }
+  .btn:hover { background: var(--accent-hover); color: var(--on-accent); transform: translateY(-1px); }
+  .btn.small { font-size: 14px; padding: 9px 18px; }
+  .btn-ghost {
+    display: inline-block;
+    background: var(--surface2); color: var(--text);
+    font-weight: 600; font-size: 16px;
+    padding: 13px 30px; border-radius: 10px;
+    border: 1px solid var(--border);
+    transition: background .15s;
+  }
+  .btn-ghost:hover { background: var(--surface); color: var(--text); }
+
+  /* ---- герой ---- */
+  .hero { padding: 90px 0 70px; text-align: center; }
+  .hero h1 { font-size: 46px; line-height: 1.15; letter-spacing: -0.5px; }
+  .hero h1 .accent { color: var(--accent); }
+  .hero p.sub { font-size: 19px; color: var(--muted); max-width: 660px; margin: 18px auto 34px; }
+  .hero-actions { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+  .hero-meta { margin-top: 16px; font-size: 14px; color: var(--muted); }
+  @media (max-width: 720px) { .hero h1 { font-size: 32px; } .hero { padding: 60px 0 50px; } }
+
+  /* ---- секции ---- */
+  section { padding: 64px 0; }
+  section.alt { background: var(--bg2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  h2 { font-size: 30px; margin-bottom: 8px; letter-spacing: -0.3px; }
+  .section-sub { color: var(--muted); font-size: 16px; margin-bottom: 36px; }
+
+  /* ---- карточки ---- */
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 24px;
+  }
+  .card .icon { font-size: 26px; margin-bottom: 12px; }
+  .card h3 { font-size: 17px; margin-bottom: 8px; }
+  .card p { font-size: 14.5px; color: var(--muted); }
+
+  /* ---- скриншоты ---- */
+  .shots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  @media (max-width: 900px) { .shots { grid-template-columns: 1fr; } }
+  .shot {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden;
+    transition: transform .15s, border-color .15s;
+  }
+  .shot:hover { transform: translateY(-3px); border-color: var(--accent); }
+  .shot img { width: 100%; display: block; }
+  .shot .caption { padding: 12px 16px; font-size: 14px; color: var(--muted); }
+  .shot .caption b { color: var(--text); }
+
+  /* ---- как работает ---- */
+  .how { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; }
+  @media (max-width: 800px) { .how { grid-template-columns: 1fr; } }
+  .code {
+    background: #0a1120; border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 22px 24px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 15px; color: var(--accent);
+    overflow-x: auto; white-space: nowrap;
+  }
+  .how ul { list-style: none; margin-top: 18px; }
+  .how li { padding: 7px 0 7px 30px; position: relative; color: var(--muted); }
+  .how li::before { content: "✓"; position: absolute; left: 0; color: var(--accent); font-weight: 700; }
+
+  /* ---- скачивание ---- */
+  .download-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 40px; text-align: center;
+    max-width: 640px; margin: 0 auto;
+  }
+  .download-box .btn { font-size: 18px; padding: 15px 44px; }
+  .file-meta { margin-top: 18px; font-size: 13.5px; color: var(--muted); }
+  .file-meta code {
+    font-family: Consolas, monospace; font-size: 12.5px;
+    background: var(--bg2); border: 1px solid var(--border);
+    padding: 2px 8px; border-radius: 6px; word-break: break-all;
+  }
+
+  /* ---- FAQ ---- */
+  details {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px 22px; margin-bottom: 12px;
+  }
+  summary { font-weight: 600; cursor: pointer; font-size: 16px; }
+  details p { margin-top: 10px; color: var(--muted); font-size: 15px; }
+
+  /* ---- подвал ---- */
+  footer {
+    border-top: 1px solid var(--border); background: var(--bg2);
+    padding: 34px 0; text-align: center;
+  }
+  footer p { font-size: 13.5px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="container nav">
+    <div class="brand">
+      <img src="img/icon.png" alt="MaklyxaLauncher" onerror="this.style.display='none'">
+      MaklyxaLauncher
+    </div>
+    <nav class="nav-links">
+      <a href="#features">Возможности</a>
+      <a href="#screenshots">Скриншоты</a>
+      <a href="#how">Как работает</a>
+      <a href="#faq">Вопросы</a>
+      <a href="#download">Скачать</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="container">
+    <h1><span class="accent">MaklyxaLauncher</span><br>лаунчер Roblox по-человечески</h1>
+    <p class="sub">Бесплатный настольный лаунчер для <b>официального</b> клиента Roblox:
+      запуск игр по ссылке, FastFlags, панель Froststrap/Bloxstrap и три темы оформления.
+      Ничего не внедряет в игру и не обходит защиту.</p>
+    <div class="hero-actions">
+      <a class="btn" href="downloads/MaklyxaLauncher.exe" download>⬇ Скачать MaklyxaLauncher</a>
+      <a class="btn-ghost" href="#features">Возможности</a>
+    </div>
+    <p class="hero-meta">v1.3.0 · Windows 10/11 · 11.7 МБ · Python не нужен</p>
+  </div>
+</section>
+
+<section id="features" class="alt">
+  <div class="container">
+    <h2>Возможности</h2>
+    <p class="section-sub">Всё, что нужно для быстрого запуска игр — и ничего лишнего.</p>
+    <div class="grid">
+      <div class="card">
+        <div class="icon">▶</div>
+        <h3>Запуск по ссылке или ID</h3>
+        <p>Вставь любую ссылку Roblox или просто Place ID — лаунчер покажет название игры, автора, иконку и сколько людей сейчас в игре.</p>
+      </div>
+      <div class="card">
+        <div class="icon">🖥</div>
+        <h3>Запуск клиента без игры</h3>
+        <p>Открой сам клиент Roblox, чтобы выбрать игру внутри. Если клиент уже запущен — лаунчер выведет его окно на передний план.</p>
+      </div>
+      <div class="card">
+        <div class="icon">⬇</div>
+        <h3>Автоскачивание Roblox</h3>
+        <p>Если клиент не найден, лаунчер сам предложит скачать официальный установщик с прогресс-баром и запустит его.</p>
+      </div>
+      <div class="card">
+        <div class="icon">⚑</div>
+        <h3>FastFlags</h3>
+        <p>Ограничение FPS, графический API (D3D11/D3D12/Vulkan/OpenGL) и качество графики — пишутся слиянием, чужие флаги не затираются.</p>
+      </div>
+      <div class="card">
+        <div class="icon">⚙</div>
+        <h3>Панель Froststrap / Bloxstrap</h3>
+        <p>Регион сервера, Discord Rich Presence, детали сервера, счётчик времени и другие переключатели твоего бутстрапера — прямо в лаунчере.</p>
+      </div>
+      <div class="card">
+        <div class="icon">🎨</div>
+        <h3>Три темы и акценты</h3>
+        <p>Тёмная, светлая и «стекло» (полупрозрачное окно) + 5 акцентных цветов. Плюс избранное, история запусков и журнал действий.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="screenshots">
+  <div class="container">
+    <h2>Скриншоты</h2>
+    <p class="section-sub">Три встроенные темы оформления — переключаются в настройках.</p>
+    <div class="shots">
+      <div class="shot">
+        <img src="img/dark.png" alt="Тёмная тема MaklyxaLauncher" loading="lazy">
+        <div class="caption"><b>Тёмная</b> — основная тема</div>
+      </div>
+      <div class="shot">
+        <img src="img/light.png" alt="Светлая тема MaklyxaLauncher" loading="lazy">
+        <div class="caption"><b>Светлая</b> — для дневного света</div>
+      </div>
+      <div class="shot">
+        <img src="img/glass.png" alt="Тема «стекло» MaklyxaLauncher" loading="lazy">
+        <div class="caption"><b>Стекло</b> — полупрозрачное окно</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="how" class="alt">
+  <div class="container how">
+    <div>
+      <h2>Как это работает</h2>
+      <p class="section-sub">Честный запуск — без модификации клиента.</p>
+      <p style="color: var(--muted);">Лаунчер формирует стандартную системную ссылку,
+        которую подхватывает зарегистрированный обработчик — официальный клиент Roblox
+        или твой бутстрапер (Froststrap/Bloxstrap).</p>
+      <ul>
+        <li>Ничего не внедряется в игру</li>
+        <li>Не обходит защиту и античит</li>
+        <li>FastFlags — только твои ключи, чужие не трогаются</li>
+        <li>Настройки хранятся локально на твоём ПК</li>
+      </ul>
+    </div>
+    <div>
+      <div class="code">roblox://experiences/start?placeId=123456789</div>
+    </div>
+  </div>
+</section>
+
+<section id="download">
+  <div class="container">
+    <h2 style="text-align:center;">Скачать</h2>
+    <p class="section-sub" style="text-align:center;">Один файл, установка не нужна — просто запусти.</p>
+    <div class="download-box">
+      <a class="btn" href="downloads/MaklyxaLauncher.exe" download>⬇ Скачать MaklyxaLauncher v1.3.0</a>
+      <p class="file-meta">
+        Файл: <code>MaklyxaLauncher.exe</code> · 11.7 МБ · Windows 10/11<br><br>
+        SHA-256:<br>
+        <code>0E821B378B3A6CFE3B72E4D70F0FC5FE1709EB9F4DA56BD301883EF1A8B4BD24</code>
+      </p>
+    </div>
+  </div>
+</section>
+
+<section id="faq" class="alt">
+  <div class="container">
+    <h2>Частые вопросы</h2>
+    <p class="section-sub">&nbsp;</p>
+    <details>
+      <summary>Это читы или обход защиты?</summary>
+      <p>Нет. Лаунчер только передаёт системе стандартную ссылку roblox:// и записывает конфиги (FastFlags, настройки бутстрапера). Ничего в игру не внедряется и не модифицируется — работают те же mechanisms, что и в Bloxstrap/Froststrap.</p>
+    </details>
+    <details>
+      <summary>Нужно ли устанавливать Python?</summary>
+      <p>Нет. Лаунчер — один самостоятельный .exe-файл, Python на компьютере не требуется. Просто скачай и запусти.</p>
+    </details>
+    <details>
+      <summary>Мой антивирус ругается, это нормально?</summary>
+      <p>Такое бывает с программами, собранными PyInstaller (они «не подписаны»). Лаунчер открытый по коду и ничего вредоносного не делает — при сомнениях можно запустить самотест: <code>MaklyxaLauncher.exe --selftest</code>.</p>
+    </details>
+    <details>
+      <summary>Что такое FastFlags и панель бутстрапера?</summary>
+      <p>FastFlags — внутренние настройки клиента Roblox (лимит FPS, API графики, качество), которые официальный клиент не показывает в меню. Панель бутстрапера позволяет менять настройки Froststrap/Bloxstrap (регион, Discord RPC и другие), не открывая их отдельно.</p>
+    </details>
+    <details>
+      <summary>Где хранятся мои настройки?</summary>
+      <p>В папке <code>%APPDATA%\MaklyxaLauncher\config.json</code>: избранное, история, тема и остальные настройки. Всё локально, ничего никуда не отправляется.</p>
+    </details>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>MaklyxaLauncher v1.3.0 — независимый проект. Не связан с Roblox Corporation.</p>
+    <p style="margin-top:6px;">Лаунчер не является читом и не обходит защиту — только официальный запуск игр.</p>
+  </div>
+</footer>
+
+</body>
+</html>
