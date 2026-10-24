@@ -15,8 +15,8 @@ UI v3 (полный редизайн):
   * компактная статусная строка и переработанный экран запуска игры.
 
 Ядро (логика) — в core.py.
-Запуск: python launcher.py [--page game|favorites|flags|cursors|themes|
-                                   launchstyle|settings|log]
+Запуск: python launcher.py [--page game|favorites|gallery|flags|cursors|
+                                   themes|launchstyle|settings|log]
                             [--theme dark|light|glass]
 """
 
@@ -39,7 +39,7 @@ import tkinter.font as tkfont
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
 try:
-    from PIL import Image, ImageDraw, ImageFilter, ImageTk
+    from PIL import Image, ImageDraw, ImageFilter, ImageOps, ImageTk
     HAVE_PIL = True
 except Exception:  # Pillow не обязателен для запуска
     HAVE_PIL = False
@@ -56,15 +56,18 @@ from core import (
     account_avatar_path, account_session, accounts_state, add_account,
     acquire_single_instance, apply_cursor_set, apply_fastflags,
     apply_launch_icon_to_shortcuts, bootstrapper_running, browser_login,
-    build_theme_palette, check_launcher_update,
-    client_settings_paths, close_roblox_players, copy_current_cursor_set,
+    build_gallery_groups, build_theme_palette, check_launcher_update,
+    client_settings_paths, close_roblox_players, collect_play_sessions,
+    copy_current_cursor_set,
     create_cursor_set, create_theme_set, cursor_install_roots,
     cursor_set_files, cursor_set_warnings, cursor_slot_path,
     cursor_state_info, datacenter_regions, delete_cursor_set,
     delete_theme_set, ensure_cursor_sets_dir, ensure_theme_sets_dir,
     export_cursor_set, export_theme_set, fetch_game_icon, fetch_game_info,
     fastflag_values, find_bootstrapper_settings, find_player_exe,
-    focus_roblox_window, fmt_num, game_launch_url, hit_test, import_cursor_set,
+    focus_roblox_window, fmt_num, gallery_assign, gallery_cache_load,
+    gallery_cache_save, gallery_seed_places, gallery_stats,
+    gallery_thumb_path, game_launch_url, hit_test, import_cursor_set,
     import_launch_icon, import_launch_sound, import_theme_set,
     import_ui_font, inspect_ui_font, launch_game_as,
     launch_icon_state, launch_sound_path, list_cursor_sets, list_theme_sets,
@@ -74,8 +77,10 @@ from core import (
     remove_account, remove_cursor_slot, remove_launch_icon,
     remove_launch_sound, remove_theme_image, remove_ui_font,
     rename_cursor_set, rename_theme_set, resize_geometry,
-    restore_custom_cursors, restore_launch_icon_shortcuts, roblox_status,
-    save_config, set_active_account, set_cursor_slot, set_theme_image,
+    resolve_gallery_places, restore_custom_cursors,
+    restore_launch_icon_shortcuts, roblox_status, scan_screenshots,
+    screenshots_dir, save_config, set_active_account, set_cursor_slot,
+    set_theme_image,
     shade, shortcut_backup_count, stop_launch_sound, theme_set_info, trunc,
     ui_font_path, ui_font_state, unload_private_font, unprotect_secret,
     update_theme_set, valid_cursor_set_name, valid_discord_app_id,
@@ -93,6 +98,8 @@ DEFAULT_SIZE = (1080, 760)
 HEADER_H = 126
 HEADER_H_COMPACT = 76
 THEME_PREVIEW_H = 148
+GALLERY_TILE_W = 224
+GALLERY_TILE_H = 126
 
 UI_FONT = "Segoe UI"
 
@@ -148,6 +155,7 @@ NAV_ITEMS = [
     ("game", "▶", "Игра"),
     ("accounts", "◉", "Аккаунты"),
     ("favorites", "★", "Избранное"),
+    ("gallery", "▦", "Галерея"),
     ("flags", "⚑", "Флаги"),
     ("cursors", "◈", "Курсоры"),
     ("themes", "◐", "Темы"),
@@ -158,6 +166,7 @@ NAV_ITEMS = [
 
 NAV_GROUPS = [
     ("ЗАПУСК", ("game", "accounts", "favorites")),
+    ("МЕДИА", ("gallery",)),
     ("ПРЕДУСТАНОВЛЕННЫЕ\nМОДИФИКАЦИИ",
      ("flags", "cursors", "themes", "launchstyle")),
     ("СИСТЕМА", ("settings", "log")),
@@ -429,11 +438,11 @@ class SidebarItem(tk.Frame):
         self.icon = tk.Label(
             self, text=icon, bg=c["panel"], fg=c["muted"], width=2,
             font=(UI_FONT, 11), cursor="hand2", anchor="center")
-        self.icon.pack(side="left", padx=(11, 6), pady=10)
+        self.icon.pack(side="left", padx=(11, 6), pady=5)
         self.label = tk.Label(
             self, text=text, bg=c["panel"], fg=c["muted"], anchor="w",
             font=(UI_FONT, 10), cursor="hand2")
-        self.label.pack(side="left", fill="x", expand=True, pady=10)
+        self.label.pack(side="left", fill="x", expand=True, pady=5)
         for widget in (self, self.bar, self.icon, self.label):
             widget.bind("<Button-1>", self._click)
             widget.bind("<Enter>", self._enter)
@@ -867,6 +876,25 @@ class App:
         self._launch_splash_job = None
         self._launch_effect_ts = 0.0
         self._splash_icon_cache = {}
+        self._gallery_cache = None
+        self._gallery_groups = []
+        self._gallery_shots = []
+        self._gallery_group_key = ""
+        self._gallery_pending_key = ""
+        self._gallery_page = 0
+        self._gallery_page_size = 6
+        self._gallery_busy = False
+        self._gallery_refresh_token = 0
+        self._gallery_last_scan = 0.0
+        self._gallery_photo_cache = {}
+        self._gallery_thumb_jobs = set()
+        self._gallery_visible = []
+        self._gallery_tiles = []
+        self._gallery_viewer = None
+        self._gallery_viewer_group = None
+        self._gallery_viewer_index = 0
+        self._gallery_assign_dialog = None
+        self._gallery_clean_dialog = None
 
         self._debounce = None
         self._dl_active = False
@@ -905,6 +933,7 @@ class App:
         self._build_page_game()
         self._build_page_accounts()
         self._build_page_favorites()
+        self._build_page_gallery()
         self._build_page_flags()
         self._build_page_cursors()
         self._build_page_themes()
@@ -961,6 +990,11 @@ class App:
         self._boot_layout_done = False
         self.frameless.excluded = set()
         self.frameless._cursor = ""
+        self._gallery_viewer = None
+        self._gallery_assign_dialog = None
+        self._gallery_clean_dialog = None
+        self._gallery_tiles = []
+        self._gallery_photo_cache.clear()
         self._build(keep_page=keep)
 
     def _configure_window(self):
@@ -1166,8 +1200,8 @@ class App:
             tk.Label(nav, text=title, bg=c["panel"], fg=c["muted"],
                      font=(UI_FONT, 8, "bold"), anchor="w",
                      justify="left").pack(
-                         fill="x", padx=9, pady=(18 if title == "ЗАПУСК"
-                                               else 16, 6))
+                         fill="x", padx=9, pady=(8 if title == "ЗАПУСК"
+                                               else 7, 2))
             for key in keys:
                 icon, text = items[key]
                 item = SidebarItem(self, nav, key, icon, text)
@@ -1226,13 +1260,6 @@ class App:
                  font=(UI_FONT, 9, "bold"), anchor="w").pack(
                      fill="x", pady=(4, 0))
         self._refresh_sidebar_status()
-
-        tk.Label(sidebar, text=f"MaklyxaLauncher v{VERSION}",
-                 bg=c["panel"], fg=c["muted"], font=(UI_FONT, 8),
-                 anchor="w").pack(fill="x", padx=21, pady=(14, 2))
-        tk.Label(sidebar, text="официальный клиент Roblox",
-                 bg=c["panel"], fg=c["muted"], font=(UI_FONT, 8),
-                 anchor="w").pack(fill="x", padx=21, pady=(0, 16))
 
     def _refresh_sidebar_status(self):
         var = getattr(self, "sidebar_roblox_var", None)
@@ -1657,6 +1684,12 @@ class App:
                 pass
         for name, item in self.nav_buttons.items():
             item.set_active(name == key)
+        if (key == "gallery" and self.interactive
+                and not getattr(self, "_closing", False)):
+            try:
+                self.root.after(120, self._gallery_maybe_refresh)
+            except tk.TclError:
+                pass
 
     def _on_wheel(self, event):
         """Скролл страницы колесом; спискам и журналу даём скроллиться самим."""
@@ -4966,6 +4999,923 @@ class App:
         self._launch_splash_job = self.root.after(
             delay, self._finish_launch_effect)
 
+    # -- страница «Галерея» -------------------------------------------------------------
+
+    def _build_page_gallery(self):
+        c = self.c
+        pad = self._scroll_page("gallery", padx=26)
+
+        self._page_header(pad, "▦", "Галерея скриншотов")
+
+        bar = tk.Frame(pad, bg=c["bg"])
+        bar.pack(fill="x", pady=(0, 8))
+        self.gallery_refresh_btn = self._button(
+            bar, "↻  Обновить", self.refresh_gallery, kind="primary",
+            side="left")
+        self._button(bar, "Открыть папку", self.open_screenshots_folder,
+                     side="left", padx=8)
+        self._button(bar, "Назначить плейс…",
+                     self._open_gallery_assign_dialog, side="left")
+        self.gallery_status_var = tk.StringVar(
+            value="Галерея ещё не сканировалась")
+        tk.Label(pad, textvariable=self.gallery_status_var, bg=c["bg"],
+                 fg=c["muted"], font=(UI_FONT, 9), anchor="w",
+                 justify="left", wraplength=760).pack(fill="x",
+                                                      pady=(0, 10))
+
+        inner = self._card(
+            pad, title="Снимки по плейсам",
+            subtitle="Новые снимки появляются после «Обновить». "
+                     "Старые файлы без записи о запуске попадают в группы "
+                     "по дате — плейс можно назначить вручную.",
+            glyph="▦")
+
+        head = tk.Frame(inner, bg=c["surface"])
+        head.pack(fill="x", pady=(10, 0))
+        tk.Label(head, text="Группа", bg=c["surface"], fg=c["muted"],
+                 font=(UI_FONT, 9)).pack(side="left")
+        self.gallery_group_combo = ttk.Combobox(
+            head, state="readonly", width=44, font=(UI_FONT, 9))
+        self.gallery_group_combo.pack(side="left", fill="x", expand=True,
+                                       padx=(10, 0))
+        self.gallery_group_combo.bind(
+            "<<ComboboxSelected>>", self._gallery_group_changed)
+        self.gallery_group_meta_var = tk.StringVar(value="")
+        meta_row = tk.Frame(inner, bg=c["surface"])
+        meta_row.pack(fill="x", pady=(5, 0))
+        tk.Label(meta_row, textvariable=self.gallery_group_meta_var,
+                 bg=c["surface"], fg=c["muted"], font=(UI_FONT, 8),
+                 anchor="w").pack(side="left", fill="x", expand=True)
+        self.gallery_next_btn = self._button(
+            meta_row, "▶", self._gallery_next, side="right")
+        self.gallery_page_var = tk.StringVar(value="")
+        tk.Label(meta_row, textvariable=self.gallery_page_var,
+                 bg=c["surface"], fg=c["muted"], font=(UI_FONT, 8)).pack(
+                     side="right", padx=6)
+        self.gallery_prev_btn = self._button(
+            meta_row, "◀", self._gallery_prev, side="right")
+
+        self.gallery_grid = tk.Frame(inner, bg=c["surface"])
+        self.gallery_grid.pack(fill="x", pady=(8, 0))
+        for col in range(3):
+            self.gallery_grid.grid_columnconfigure(col, weight=1)
+        for slot in range(self._gallery_page_size):
+            outer = tk.Frame(self.gallery_grid, bg=c["border"])
+            tile = tk.Frame(outer, bg=c["surface2"])
+            tile.pack(fill="both", expand=True, padx=1, pady=1)
+            canvas = tk.Canvas(
+                tile, width=GALLERY_TILE_W, height=GALLERY_TILE_H,
+                bg=c["list"], highlightthickness=0, bd=0,
+                cursor="hand2")
+            canvas.pack(padx=6, pady=(6, 4))
+            image_item = canvas.create_image(
+                GALLERY_TILE_W // 2, GALLERY_TILE_H // 2, anchor="center")
+            text_item = canvas.create_text(
+                GALLERY_TILE_W // 2, GALLERY_TILE_H // 2, text="",
+                fill=c["muted"], font=(UI_FONT, 9),
+                width=GALLERY_TILE_W - 14, justify="center")
+            caption = tk.Label(
+                tile, text="", bg=c["surface2"], fg=c["muted"],
+                font=(UI_FONT, 8), anchor="w", cursor="hand2")
+            caption.pack(fill="x", padx=8, pady=(0, 7))
+            for widget in (outer, tile, canvas, caption):
+                widget.bind(
+                    "<Button-1>",
+                    lambda _e, index=slot: self._gallery_tile_click(index))
+            self._gallery_tiles.append({
+                "outer": outer, "tile": tile, "canvas": canvas,
+                "image": image_item, "text": text_item,
+                "caption": caption, "shot": None,
+            })
+
+        self.gallery_empty = tk.Label(
+            inner, text="Пока нет снимков. Сделай скриншот в Roblox "
+                        "и нажми «Обновить».",
+            bg=c["surface"], fg=c["muted"], font=(UI_FONT, 10),
+            anchor="w", justify="left", wraplength=700)
+        self.gallery_empty.pack(fill="x", pady=(18, 14))
+
+        clean = self._card(
+            pad, title="Очистить задний план",
+            subtitle="Убрать интерфейс Roblox на новых снимках",
+            glyph="✦")
+        tk.Label(
+            clean,
+            text="Готовый PNG уже содержит интерфейс — убрать его задним "
+                 "числом нельзя. Флаг DFIntCanHideGuiGroupId исключён "
+                 "Roblox из локального allowlist, поэтому лаунчер не "
+                 "записывает нерабочий FastFlag. Чистые кадры дают "
+                 "официальные «Записи» (Captures) Roblox: клиент сам "
+                 "скрывает UI во время съёмки.",
+            bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9), anchor="w",
+            justify="left", wraplength=720).pack(fill="x", pady=(10, 0))
+        row_clean = tk.Frame(clean, bg=c["surface"])
+        row_clean.pack(fill="x", pady=(10, 0))
+        self._button(row_clean, "Очистить задний план",
+                     self.open_clean_background_dialog, kind="primary",
+                     side="left")
+        self._button(row_clean, "Открыть папку снимков",
+                     self.open_screenshots_folder, side="left", padx=8)
+
+    def _gallery_maybe_refresh(self):
+        if (not self.interactive or self._closing
+                or self._gallery_busy):
+            return
+        if (not self._gallery_groups
+                or time.time() - self._gallery_last_scan > 60):
+            self.refresh_gallery()
+
+    def refresh_gallery(self, resolve=True):
+        if self._gallery_busy or getattr(self, "_closing", False):
+            return
+        self._gallery_busy = True
+        self._gallery_refresh_token += 1
+        token = self._gallery_refresh_token
+        try:
+            self.gallery_refresh_btn.configure(state="disabled")
+            self.gallery_status_var.set("Сканирую снимки Roblox…")
+        except tk.TclError:
+            pass
+        history = list(self.cfg.get("history") or [])
+
+        def work():
+            try:
+                shots = scan_screenshots()
+                sessions = collect_play_sessions(history)
+                cache = gallery_cache_load()
+                gallery_seed_places(cache, sessions)
+                groups = build_gallery_groups(shots, sessions, cache)
+                place_ids = [group["place_id"] for group in groups
+                             if group["kind"] == "place"]
+                if resolve and place_ids:
+                    self.q.put(lambda: self._gallery_status(
+                        "Уточняю названия плейсов…"))
+                    resolve_gallery_places(
+                        cache, place_ids, timeout=5, limit=30)
+                    groups = build_gallery_groups(shots, sessions, cache)
+                gallery_cache_save(cache)
+                data = {
+                    "groups": groups,
+                    "shots": shots,
+                    "stats": gallery_stats(groups),
+                    "cache": cache,
+                    "folder": str(screenshots_dir()),
+                }
+                self.q.put(
+                    lambda t=token, d=data: self._gallery_apply(t, d))
+            except Exception as exc:  # noqa: BLE001 — сеть и файлы
+                self.q.put(lambda t=token, e=exc: self._gallery_fail(t, e))
+
+        threading.Thread(target=work, daemon=True,
+                         name="gallery-scan").start()
+
+    def _gallery_status(self, text):
+        if getattr(self, "_closing", False):
+            return
+        try:
+            self.gallery_status_var.set(text)
+        except tk.TclError:
+            pass
+
+    def _gallery_apply(self, token, data):
+        if token != self._gallery_refresh_token or self._closing:
+            return
+        self._gallery_busy = False
+        self._gallery_last_scan = time.time()
+        try:
+            self.gallery_refresh_btn.configure(state="normal")
+        except tk.TclError:
+            return
+        groups = data.get("groups") or []
+        self._gallery_groups = groups
+        self._gallery_shots = data.get("shots") or []
+        self._gallery_cache = data.get("cache")
+        stats = data.get("stats") or gallery_stats(groups)
+        folder = data.get("folder") or str(screenshots_dir())
+        if not groups:
+            self._gallery_group_key = ""
+            self._gallery_visible = []
+            try:
+                self.gallery_group_combo.configure(values=[])
+                self.gallery_group_combo.set("")
+                self.gallery_group_meta_var.set("")
+                self.gallery_grid.pack_forget()
+                self.gallery_empty.pack(fill="x", pady=(18, 14))
+                self.gallery_page_var.set("")
+                self.gallery_prev_btn.configure(state="disabled")
+                self.gallery_next_btn.configure(state="disabled")
+            except tk.TclError:
+                return
+            self.gallery_status_var.set(
+                f"В папке {folder} пока нет снимков Roblox")
+            self._schedule_page_layout("gallery")
+            return
+        labels = [self._gallery_group_label(group) for group in groups]
+        keys = [group["key"] for group in groups]
+        try:
+            self.gallery_empty.pack_forget()
+            self.gallery_grid.pack(fill="x", pady=(8, 0))
+            self.gallery_group_combo.configure(values=labels)
+        except tk.TclError:
+            return
+        pending = self._gallery_pending_key
+        self._gallery_pending_key = ""
+        if pending in keys:
+            self._gallery_group_key = pending
+        elif self._gallery_group_key not in keys:
+            self._gallery_group_key = keys[0]
+        self._gallery_page = 0
+        try:
+            self.gallery_group_combo.current(keys.index(
+                self._gallery_group_key))
+        except (ValueError, tk.TclError):
+            pass
+        self.gallery_status_var.set(
+            f"Найдено {stats['total']} · определено {stats['known']} · "
+            f"без плейса {stats['unknown']} · групп {stats['groups']} · "
+            f"{folder}")
+        self._gallery_render()
+        self._schedule_page_layout("gallery")
+
+    def _gallery_fail(self, token, exc):
+        if token != self._gallery_refresh_token:
+            return
+        self._gallery_busy = False
+        try:
+            self.gallery_refresh_btn.configure(state="normal")
+            self.gallery_status_var.set(
+                f"Не удалось просканировать галерею: {exc}")
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _gallery_group_label(group):
+        count = len(group.get("shots") or [])
+        if group.get("kind") == "date":
+            return f"{group['title']} · без плейса ({count})"
+        return f"{group['title']} ({count})"
+
+    def _gallery_selected_group(self):
+        for group in self._gallery_groups:
+            if group["key"] == self._gallery_group_key:
+                return group
+        return None
+
+    def _gallery_group_changed(self, _event=None):
+        try:
+            index = self.gallery_group_combo.current()
+        except tk.TclError:
+            return
+        if 0 <= index < len(self._gallery_groups):
+            self._gallery_group_key = self._gallery_groups[index]["key"]
+            self._gallery_page = 0
+            self._gallery_render()
+
+    def _gallery_render(self):
+        group = self._gallery_selected_group()
+        if group is None:
+            self._gallery_visible = []
+            for slot in range(self._gallery_page_size):
+                self._gallery_clear_tile(slot)
+            try:
+                self.gallery_page_var.set("")
+                self.gallery_prev_btn.configure(state="disabled")
+                self.gallery_next_btn.configure(state="disabled")
+            except tk.TclError:
+                pass
+            return
+        shots = group.get("shots") or []
+        pages = max(1, (len(shots) + self._gallery_page_size - 1)
+                    // self._gallery_page_size)
+        self._gallery_page = max(0, min(self._gallery_page, pages - 1))
+        start = self._gallery_page * self._gallery_page_size
+        visible = shots[start:start + self._gallery_page_size]
+        self._gallery_visible = visible
+        for slot in range(self._gallery_page_size):
+            if slot < len(visible):
+                self._gallery_set_tile(slot, visible[slot])
+            else:
+                self._gallery_clear_tile(slot)
+        subtitle = group.get("subtitle") or ""
+        keys = [item["key"] for item in self._gallery_groups]
+        try:
+            if group["key"] in keys:
+                self.gallery_group_combo.current(keys.index(group["key"]))
+            self.gallery_group_meta_var.set(subtitle)
+            self.gallery_page_var.set(
+                f"{self._gallery_page + 1} / {pages} · {len(shots)} снимк.")
+            self.gallery_prev_btn.configure(
+                state="normal" if self._gallery_page > 0 else "disabled")
+            self.gallery_next_btn.configure(
+                state="normal" if self._gallery_page + 1 < pages
+                else "disabled")
+        except tk.TclError:
+            return
+        self._gallery_request_thumbs(visible)
+        self._schedule_page_layout("gallery")
+
+    def _gallery_set_tile(self, slot, shot):
+        if slot >= len(self._gallery_tiles):
+            return
+        tile = self._gallery_tiles[slot]
+        tile["shot"] = shot
+        photo = self._gallery_photo(shot)
+        canvas = tile["canvas"]
+        try:
+            canvas.itemconfigure(
+                tile["image"], image=photo if photo is not None else "")
+            canvas.itemconfigure(
+                tile["text"],
+                text="" if photo is not None else
+                ("…" if shot["name"] in self._gallery_thumb_jobs
+                 else "нет превью"))
+            tile["caption"].configure(
+                text=trunc(shot.get("time_label") or shot.get("name"), 30))
+            tile["outer"].grid(
+                row=slot // 3, column=slot % 3, sticky="w",
+                padx=5, pady=5)
+        except tk.TclError:
+            pass
+
+    def _gallery_clear_tile(self, slot):
+        if slot >= len(self._gallery_tiles):
+            return
+        tile = self._gallery_tiles[slot]
+        tile["shot"] = None
+        try:
+            tile["outer"].grid_remove()
+            tile["canvas"].itemconfigure(tile["image"], image="")
+            tile["canvas"].itemconfigure(tile["text"], text="")
+            tile["caption"].configure(text="")
+        except tk.TclError:
+            pass
+
+    def _gallery_tile_click(self, slot):
+        self._gallery_open_viewer(slot)
+
+    def _gallery_thumb_fresh(self, shot):
+        target = gallery_thumb_path(shot)
+        try:
+            if not target.is_file():
+                return False
+            return target.stat().st_mtime >= Path(shot["path"]).stat().st_mtime
+        except OSError:
+            return False
+
+    def _gallery_photo(self, shot):
+        target = gallery_thumb_path(shot)
+        key = f"{target}|{GALLERY_TILE_W}x{GALLERY_TILE_H}"
+        photo = self._gallery_photo_cache.get(key)
+        if photo is not None:
+            return photo
+        if not HAVE_PIL or not target.is_file():
+            return None
+        try:
+            with Image.open(target) as raw:
+                raw.load()
+                image = ImageOps.fit(
+                    raw.convert("RGB"),
+                    (GALLERY_TILE_W, GALLERY_TILE_H),
+                    method=getattr(getattr(Image, "Resampling", Image),
+                                   "LANCZOS"))
+            photo = ImageTk.PhotoImage(image)
+        except Exception:  # noqa: BLE001 — битый кэш не должен ломать UI
+            return None
+        self._gallery_photo_cache[key] = photo
+        while len(self._gallery_photo_cache) > 36:
+            self._gallery_photo_cache.pop(
+                next(iter(self._gallery_photo_cache)))
+        return photo
+
+    def _gallery_request_thumbs(self, shots):
+        if not HAVE_PIL or not shots:
+            return
+        missing = []
+        for shot in shots:
+            if self._gallery_thumb_fresh(shot):
+                continue
+            if shot["name"] in self._gallery_thumb_jobs:
+                continue
+            missing.append(shot)
+        if not missing:
+            return
+        names = {shot["name"] for shot in missing}
+        self._gallery_thumb_jobs |= names
+        token = self._gallery_refresh_token
+
+        def work():
+            made = set()
+            for shot in missing:
+                try:
+                    if self._gallery_make_thumb(shot):
+                        made.add(shot["name"])
+                except Exception:  # noqa: BLE001
+                    continue
+            self.q.put(
+                lambda t=token, n=made: self._gallery_thumbs_ready(t, n))
+
+        threading.Thread(target=work, daemon=True,
+                         name="gallery-thumbs").start()
+
+    @staticmethod
+    def _gallery_make_thumb(shot):
+        if not HAVE_PIL:
+            return False
+        source = Path(shot["path"])
+        target = gallery_thumb_path(shot)
+        try:
+            if (target.is_file()
+                    and target.stat().st_mtime >= source.stat().st_mtime):
+                return True
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with Image.open(source) as raw:
+                raw.load()
+                image = raw.convert("RGB")
+                image = ImageOps.fit(
+                    image, (400, 225),
+                    method=getattr(getattr(Image, "Resampling", Image),
+                                   "LANCZOS"))
+            temp = target.with_name(target.name + ".tmp")
+            image.save(temp, "JPEG", quality=84, optimize=True)
+            temp.replace(target)
+            return True
+        except Exception:  # noqa: BLE001
+            try:
+                target.with_name(target.name + ".tmp").unlink()
+            except OSError:
+                pass
+            return False
+
+    def _gallery_thumbs_ready(self, token, names):
+        self._gallery_thumb_jobs -= set(names or ())
+        if token != self._gallery_refresh_token or self._closing:
+            return
+        visible = {shot["name"] for shot in self._gallery_visible}
+        if visible & set(names or ()):
+            self._gallery_render()
+
+    def _gallery_prev(self):
+        if self._gallery_page <= 0:
+            return
+        self._gallery_page -= 1
+        self._gallery_render()
+
+    def _gallery_next(self):
+        group = self._gallery_selected_group()
+        if group is None:
+            return
+        pages = max(1, (len(group["shots"]) + self._gallery_page_size - 1)
+                    // self._gallery_page_size)
+        if self._gallery_page + 1 >= pages:
+            return
+        self._gallery_page += 1
+        self._gallery_render()
+
+    # -- просмотрщик снимков -----------------------------------------------------
+
+    def _gallery_open_viewer(self, slot):
+        group = self._gallery_selected_group()
+        if group is None:
+            return
+        index = self._gallery_page * self._gallery_page_size + slot
+        if not 0 <= index < len(group["shots"]):
+            return
+        self._gallery_viewer_group = group
+        self._gallery_viewer_index = index
+        if (self._gallery_viewer is None
+                or not self._gallery_viewer["win"].winfo_exists()):
+            self._gallery_build_viewer()
+        self._gallery_viewer_show(index)
+
+    def _gallery_build_viewer(self):
+        c = self.c
+        win = tk.Toplevel(self.root)
+        win.withdraw()
+        win.title("MaklyxaLauncher — просмотр снимка")
+        win.configure(bg=c["panel"])
+        win.transient(self.root)
+        self._gallery_viewer_title_var = tk.StringVar(value="")
+        self._gallery_viewer_caption_var = tk.StringVar(value="")
+        self._gallery_viewer_counter_var = tk.StringVar(value="")
+
+        top = tk.Frame(win, bg=c["panel"], padx=16, pady=10)
+        top.pack(fill="x")
+        tk.Label(top, textvariable=self._gallery_viewer_title_var,
+                 bg=c["panel"], fg=c["text"], font=(UI_FONT, 11, "bold"),
+                 anchor="w").pack(side="left", fill="x", expand=True)
+        close_btn = tk.Button(
+            top, text="✕", command=self._gallery_viewer_close,
+            relief="flat", bd=0, cursor="hand2", bg=c["surface2"],
+            fg=c["text"], activebackground=c["hover"],
+            activeforeground=c["text"], font=(UI_FONT, 10, "bold"),
+            padx=10, pady=3, highlightthickness=0)
+        close_btn.pack(side="right")
+
+        canvas = tk.Canvas(win, bg=c["list"], highlightthickness=0, bd=0)
+        canvas.pack(fill="both", expand=True)
+        bottom = tk.Frame(win, bg=c["panel"], padx=16, pady=10)
+        bottom.pack(fill="x")
+        self._button(bottom, "◀  Назад",
+                     lambda: self._gallery_viewer_step(-1), side="left")
+        self._button(bottom, "Вперёд  ▶",
+                     lambda: self._gallery_viewer_step(1), side="left",
+                     padx=8)
+        tk.Label(bottom, textvariable=self._gallery_viewer_counter_var,
+                 bg=c["panel"], fg=c["muted"], font=(UI_FONT, 9)).pack(
+                     side="left", padx=10)
+        self._button(bottom, "Назначить плейс…",
+                     self._gallery_viewer_assign, side="right")
+        self._button(bottom, "Папка", self._gallery_viewer_open_folder,
+                     side="right", padx=8)
+        self._button(bottom, "Открыть файл",
+                     self._gallery_viewer_open_file, side="right")
+
+        caption = tk.Label(win, textvariable=self._gallery_viewer_caption_var,
+                           bg=c["panel"], fg=c["muted"], font=(UI_FONT, 8),
+                           anchor="w", padx=16, pady=4)
+        caption.pack(fill="x")
+
+        viewer = {
+            "win": win, "canvas": canvas, "master": None, "photo": None,
+            "render_job": None,
+        }
+        self._gallery_viewer = viewer
+        canvas.bind("<Configure>", self._gallery_viewer_resize)
+        win.bind("<Escape>", lambda _e: self._gallery_viewer_close())
+        win.bind("<Left>", lambda _e: self._gallery_viewer_step(-1))
+        win.bind("<Right>", lambda _e: self._gallery_viewer_step(1))
+        win.protocol("WM_DELETE_WINDOW", self._gallery_viewer_close)
+
+        width = min(1240, max(760, int(win.winfo_screenwidth() * 0.82)))
+        height = min(840, max(520, int(win.winfo_screenheight() * 0.82)))
+        x = (win.winfo_screenwidth() - width) // 2
+        y = max(0, (win.winfo_screenheight() - height) // 2 - 20)
+        win.geometry(f"{width}x{height}+{x}+{y}")
+        win.deiconify()
+        win.lift()
+        try:
+            win.focus_force()
+        except tk.TclError:
+            pass
+
+    def _gallery_viewer_shot(self):
+        group = self._gallery_viewer_group
+        if group is None:
+            return None
+        shots = group.get("shots") or []
+        if not shots:
+            return None
+        self._gallery_viewer_index %= len(shots)
+        return shots[self._gallery_viewer_index]
+
+    def _gallery_viewer_show(self, index):
+        viewer = self._gallery_viewer
+        group = self._gallery_viewer_group
+        if viewer is None or group is None:
+            return
+        shots = group.get("shots") or []
+        if not shots:
+            return
+        self._gallery_viewer_index = index % len(shots)
+        shot = shots[self._gallery_viewer_index]
+        master = None
+        if HAVE_PIL:
+            try:
+                with Image.open(shot["path"]) as raw:
+                    raw.load()
+                    master = raw.convert("RGB")
+            except Exception:  # noqa: BLE001
+                master = None
+        viewer["master"] = master
+        try:
+            self._gallery_viewer_title_var.set(group["title"])
+            self._gallery_viewer_caption_var.set(
+                f"{shot.get('time_label') or ''} · {shot['name']}")
+            self._gallery_viewer_counter_var.set(
+                f"{self._gallery_viewer_index + 1} из {len(shots)}")
+        except tk.TclError:
+            return
+        self._gallery_viewer_render()
+
+    def _gallery_viewer_resize(self, _event=None):
+        viewer = self._gallery_viewer
+        if viewer is None:
+            return
+        if viewer.get("render_job") is not None:
+            try:
+                viewer["win"].after_cancel(viewer["render_job"])
+            except tk.TclError:
+                pass
+        try:
+            viewer["render_job"] = viewer["win"].after(
+                60, self._gallery_viewer_render)
+        except tk.TclError:
+            viewer["render_job"] = None
+
+    def _gallery_viewer_render(self):
+        viewer = self._gallery_viewer
+        if viewer is None or not viewer["win"].winfo_exists():
+            return
+        viewer["render_job"] = None
+        canvas = viewer["canvas"]
+        try:
+            width = max(80, canvas.winfo_width() - 18)
+            height = max(80, canvas.winfo_height() - 18)
+        except tk.TclError:
+            return
+        master = viewer.get("master")
+        canvas.delete("all")
+        viewer["photo"] = None
+        if master is None:
+            canvas.create_text(
+                width // 2, height // 2,
+                text="Не удалось открыть изображение.\n"
+                     "Используй «Открыть файл».",
+                fill=self.c["muted"], font=(UI_FONT, 11),
+                justify="center")
+            return
+        try:
+            image = master.copy()
+            image.thumbnail(
+                (width, height),
+                getattr(getattr(Image, "Resampling", Image), "LANCZOS"))
+            photo = ImageTk.PhotoImage(image)
+        except Exception:  # noqa: BLE001
+            return
+        viewer["photo"] = photo
+        canvas.create_image(width // 2 + 9, height // 2 + 9,
+                            image=photo, anchor="center")
+
+    def _gallery_viewer_step(self, step):
+        group = self._gallery_viewer_group
+        if group is None or not group.get("shots"):
+            return
+        index = (self._gallery_viewer_index + step) % len(group["shots"])
+        self._gallery_viewer_show(index)
+
+    def _gallery_viewer_close(self):
+        viewer = self._gallery_viewer
+        self._gallery_viewer = None
+        self._gallery_viewer_group = None
+        if viewer is None:
+            return
+        win = viewer.get("win")
+        if win is None:
+            return
+        try:
+            if viewer.get("render_job") is not None:
+                win.after_cancel(viewer["render_job"])
+        except tk.TclError:
+            pass
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
+
+    def _gallery_viewer_assign(self):
+        shot = self._gallery_viewer_shot()
+        if shot is None:
+            return
+        self._gallery_viewer_close()
+        self._open_gallery_assign_dialog(
+            names=[shot["name"]],
+            label=shot.get("time_label") or shot["name"])
+
+    def _gallery_viewer_open_file(self):
+        shot = self._gallery_viewer_shot()
+        if shot is None or not self.interactive:
+            return
+        try:
+            os.startfile(shot["path"])
+        except OSError as exc:
+            self.status_var.set(f"Не удалось открыть файл: {exc}")
+
+    def _gallery_viewer_open_folder(self):
+        self.open_screenshots_folder()
+
+    # -- назначение плейса и очистка фона -----------------------------------------
+
+    def _open_gallery_assign_dialog(self, names=None, label=None):
+        win = getattr(self, "_gallery_assign_dialog", None)
+        if win is not None:
+            try:
+                win.lift()
+                win.focus_force()
+                return
+            except tk.TclError:
+                self._gallery_assign_dialog = None
+        group = None
+        if names is None:
+            group = self._gallery_selected_group()
+            if group is None:
+                self.status_var.set("Сначала выбери группу снимков")
+                return
+            names = [shot["name"] for shot in group["shots"]]
+            label = label or group["title"]
+        names = [str(name) for name in names or [] if name]
+        if not names:
+            self.status_var.set("В этой группе нет снимков")
+            return
+        c = self.c
+        win = tk.Toplevel(self.root)
+        win.withdraw()
+        win.title("Назначить плейс")
+        win.configure(bg=c["bg"])
+        win.resizable(False, False)
+        win.transient(self.root)
+        self._gallery_assign_dialog = win
+        self._gallery_assign_names = names
+
+        body = tk.Frame(win, bg=c["bg"], padx=22, pady=18)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="Назначить плейс", bg=c["bg"], fg=c["text"],
+                 font=(UI_FONT, 16, "bold"), anchor="w").pack(fill="x")
+        tk.Label(
+            body,
+            text=f"Снимков: {len(names)} · {label or ''}\n"
+                 "Вставь ссылку на игру Roblox или Place ID. Название "
+                 "подтянется из публичного API и сохранится только в "
+                 "кэше лаунчера.",
+            bg=c["bg"], fg=c["muted"], font=(UI_FONT, 9), anchor="w",
+            justify="left", wraplength=460).pack(fill="x", pady=(5, 14))
+        self._gallery_assign_var = tk.StringVar(value="")
+        entry = ttk.Entry(body, textvariable=self._gallery_assign_var,
+                          font=(UI_FONT, 10))
+        entry.pack(fill="x")
+        entry.bind("<Return>", lambda _e: self._gallery_assign_submit())
+        self._gallery_assign_status_var = tk.StringVar(value="")
+        tk.Label(body, textvariable=self._gallery_assign_status_var,
+                 bg=c["bg"], fg=self._warn_fg(), font=(UI_FONT, 9),
+                 anchor="w", justify="left", wraplength=460).pack(
+                     fill="x", pady=(8, 12))
+        row = tk.Frame(body, bg=c["bg"])
+        row.pack(fill="x")
+        self._button(row, "Назначить", self._gallery_assign_submit,
+                     kind="primary", side="right")
+        self._button(row, "Отмена", self._close_gallery_assign_dialog,
+                     side="right", padx=8)
+        win.protocol("WM_DELETE_WINDOW", self._close_gallery_assign_dialog)
+        win.update_idletasks()
+        width = max(480, win.winfo_reqwidth())
+        height = win.winfo_reqheight()
+        try:
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            rw, rh = self.root.winfo_width(), self.root.winfo_height()
+        except tk.TclError:
+            rx = ry = rw = rh = 0
+        x = rx + max(0, (rw - width) // 2) if rw > 1 else 140
+        y = ry + max(0, (rh - height) // 2) if rh > 1 else 140
+        win.geometry(f"{width}x{height}+{x}+{y}")
+        win.deiconify()
+        try:
+            win.grab_set()
+            entry.focus_set()
+        except tk.TclError:
+            pass
+
+    def _close_gallery_assign_dialog(self):
+        win = getattr(self, "_gallery_assign_dialog", None)
+        self._gallery_assign_dialog = None
+        if win is None:
+            return
+        try:
+            win.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
+
+    def _gallery_assign_submit(self):
+        raw = self._gallery_assign_var.get().strip()
+        place_id = parse_place_id(raw)
+        if not place_id:
+            self._gallery_assign_status_var.set(
+                "Не понял ссылку или Place ID — нужен номер игры Roblox")
+            return
+        cache = self._gallery_cache
+        if not isinstance(cache, dict):
+            cache = gallery_cache_load()
+        names = list(self._gallery_assign_names or [])
+        count = gallery_assign(cache, names, place_id)
+        if not count or not gallery_cache_save(cache):
+            self._gallery_assign_status_var.set(
+                "Не удалось сохранить назначение в Gallery\\cache.json")
+            return
+        self._gallery_cache = cache
+        self._gallery_pending_key = f"place:{place_id}"
+        self._close_gallery_assign_dialog()
+        self.status_var.set(
+            f"Снимков привязано к Place {place_id}: {count}")
+        self.log(f"Галерея: {count} снимк. → Place {place_id}")
+        self.refresh_gallery()
+
+    def open_screenshots_folder(self):
+        if not self.interactive:
+            return
+        folder = screenshots_dir()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(folder))
+        except OSError as exc:
+            self.status_var.set(f"Не удалось открыть папку: {exc}")
+
+    def open_clean_background_dialog(self):
+        win = getattr(self, "_gallery_clean_dialog", None)
+        if win is not None:
+            try:
+                win.lift()
+                win.focus_force()
+                return
+            except tk.TclError:
+                self._gallery_clean_dialog = None
+        c = self.c
+        win = tk.Toplevel(self.root)
+        win.withdraw()
+        win.title("Очистить задний план")
+        win.configure(bg=c["bg"])
+        win.resizable(False, False)
+        win.transient(self.root)
+        self._gallery_clean_dialog = win
+
+        body = tk.Frame(win, bg=c["bg"], padx=22, pady=18)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="Очистить задний план", bg=c["bg"],
+                 fg=c["text"], font=(UI_FONT, 16, "bold"),
+                 anchor="w").pack(fill="x")
+        tk.Label(
+            body,
+            text="Уже сохранённый PNG содержит интерфейс как часть "
+                 "картинки: отдельных слоёв в нём нет, поэтому убрать UI "
+                 "задним числом нельзя.",
+            bg=c["bg"], fg=c["text"], font=(UI_FONT, 10), anchor="w",
+            justify="left", wraplength=500).pack(fill="x", pady=(8, 12))
+        tk.Label(
+            body,
+            text="Почему не через FastFlags\n"
+                 "Флаг DFIntCanHideGuiGroupId исключён Roblox из локального "
+                 "allowlist клиента, а сейчас клиент отклоняет и обычные "
+                 "локальные флаги. Запись такого флага ничего бы не "
+                 "изменила, поэтому лаунчер её не делает.",
+            bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9), anchor="w",
+            justify="left", wraplength=500, padx=14, pady=12).pack(
+                fill="x", pady=(0, 12))
+        tk.Label(
+            body,
+            text="Как получить чистый кадр\n"
+                 "• Делай новые снимки через официальные «Записи» "
+                 "(Captures) Roblox — клиент сам скрывает интерфейс.\n"
+                 "• Если в игре есть фоторежим, используй его.\n"
+                 "• Новые файлы из Pictures\\Roblox появятся здесь после "
+                 "«Обновить».",
+            bg=c["bg"], fg=c["text"], font=(UI_FONT, 9), anchor="w",
+            justify="left", wraplength=500).pack(fill="x")
+        row = tk.Frame(body, bg=c["bg"])
+        row.pack(fill="x", pady=(16, 0))
+        self._button(row, "Открыть папку снимков",
+                     self.open_screenshots_folder, kind="primary",
+                     side="left")
+        self._button(row, "Обновить галерею", self._clean_dialog_refresh,
+                     side="left", padx=8)
+        self._button(row, "Понятно", self._close_clean_background_dialog,
+                     side="right")
+        win.protocol("WM_DELETE_WINDOW", self._close_clean_background_dialog)
+        win.update_idletasks()
+        width = max(540, win.winfo_reqwidth())
+        height = win.winfo_reqheight()
+        try:
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            rw, rh = self.root.winfo_width(), self.root.winfo_height()
+        except tk.TclError:
+            rx = ry = rw = rh = 0
+        x = rx + max(0, (rw - width) // 2) if rw > 1 else 120
+        y = ry + max(0, (rh - height) // 2) if rh > 1 else 120
+        win.geometry(f"{width}x{height}+{x}+{y}")
+        win.deiconify()
+        try:
+            win.grab_set()
+        except tk.TclError:
+            pass
+
+    def _close_clean_background_dialog(self):
+        win = getattr(self, "_gallery_clean_dialog", None)
+        self._gallery_clean_dialog = None
+        if win is None:
+            return
+        try:
+            win.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
+
+    def _clean_dialog_refresh(self):
+        self._close_clean_background_dialog()
+        self.refresh_gallery()
+
     # -- страница «Настройки» ----------------------------------------------------------
 
     def _build_page_settings(self):
@@ -7094,6 +8044,253 @@ def run_selftest():
     except Exception as exc:  # noqa: BLE001
         failures.append(f"ui font test: {exc}")
 
+    # 6g) галерея: разбор снимков, сессии, группировка, кэш, миниатюры
+    try:
+        import core as core_module
+        from datetime import datetime as _dt
+
+        moment = core_module.parse_screenshot_time(
+            "RobloxScreenShot20240102_030405678.png")
+        expected = _dt(2024, 1, 2, 3, 4, 5, 678000).timestamp()
+        if moment is None or abs(moment - expected) > 0.5:
+            failures.append(f"галерея: время из имени {moment} != {expected}")
+        if core_module.parse_screenshot_time(
+                "RobloxScreenShot20241340_030405000.png", 123.0) != 123.0:
+            failures.append("галерея: битая дата не дала fallback")
+        if core_module.parse_screenshot_time("случайный.png") is not None:
+            failures.append("галерея: имя без даты дало время")
+
+        with tempfile.TemporaryDirectory(prefix="maklyxa-gallery-") as td:
+            base = Path(td)
+            shots_dir = base / "Pictures" / "Roblox"
+            shots_dir.mkdir(parents=True)
+            first = shots_dir / "RobloxScreenShot20240102_030405678.png"
+            second = shots_dir / "RobloxScreenShot20240103_030405678.png"
+            legacy = shots_dir / "старый.png"
+            ignored = shots_dir / "note.txt"
+            for path in (first, second, legacy, ignored):
+                path.write_bytes(b"png")
+            os.utime(legacy, (1_000_000_000, 1_000_000_000))
+            found = core_module.scan_screenshots(shots_dir)
+            if [item["name"] for item in found] != [
+                    second.name, first.name, legacy.name]:
+                failures.append(
+                    "галерея: порядок/фильтр снимков "
+                    f"{[item['name'] for item in found]}")
+            elif abs(found[-1]["ts"] - 1_000_000_000) > 3:
+                failures.append(f"галерея: fallback mtime {found[-1]['ts']}")
+            if core_module.scan_screenshots(base / "нет-папки"):
+                failures.append("галерея: несуществующая папка дала снимки")
+            history = base / "Froststrap" / "Cache" / "GameHistory.json"
+            history.parent.mkdir(parents=True)
+            history.write_text(json.dumps([{
+                "placeId": 920587237,
+                "servers": [{
+                    "joinedAt": "2026-10-21T10:00:00Z",
+                    "timeLeft": "2026-10-21T10:30:00Z",
+                }],
+            }]), encoding="utf-8")
+            history_sessions = core_module._sessions_from_history_file(history)
+            started = _dt.fromisoformat(
+                "2026-10-21T10:00:00+00:00").timestamp()
+            if (len(history_sessions) != 1
+                    or history_sessions[0]["place_id"] != "920587237"
+                    or abs(history_sessions[0]["start"] - started) > 0.5
+                    or history_sessions[0]["source"] != "Froststrap"):
+                failures.append(
+                    f"галерея: история Froststrap {history_sessions}")
+
+            log = base / "Bloxstrap_20261020.log"
+            log.write_text(
+                "2026-10-20T10:00:00.000Z  Joining Game (111/abc)\n"
+                "2026-10-20T10:15:00.000Z  Joining Game (222/def)\n",
+                encoding="utf-8")
+            log_sessions = core_module._sessions_from_bloxstrap_log(log)
+            if ([item["place_id"] for item in log_sessions] != ["111", "222"]
+                    or abs(log_sessions[0]["end"]
+                           - log_sessions[1]["start"]) > 0.5):
+                failures.append(f"галерея: лог Bloxstrap {log_sessions}")
+
+            merged = core_module._merge_sessions([
+                {"start": 1000, "end": 1100, "place_id": "1",
+                 "source": "a", "name": ""},
+                {"start": 1200, "end": 1300, "place_id": "1",
+                 "source": "b", "name": "Склеенный"},
+                {"start": 2000, "end": 2100, "place_id": "1",
+                 "source": "a", "name": ""},
+            ])
+            if (len(merged) != 2 or merged[0]["end"] != 1300
+                    or merged[0]["name"] != "Склеенный"):
+                failures.append(f"галерея: склейка сессий {merged}")
+
+            launcher_sessions = core_module.collect_play_sessions(
+                [{"place_id": "333333", "name": "[TITLE] Служебное",
+                  "ts": 1_700_000_000},
+                 {"place_id": "444444", "name": "Моя игра",
+                  "ts": 1_700_010_000}],
+                history_files=[], log_files=[])
+            if len(launcher_sessions) != 2:
+                failures.append(
+                    f"галерея: история лаунчера {launcher_sessions}")
+            else:
+                first_launch = core_module.find_session(
+                    1_700_000_000, launcher_sessions)
+                second_launch = core_module.find_session(
+                    1_700_010_000, launcher_sessions)
+                if (not first_launch or first_launch["name"] != ""
+                        or first_launch["source"] != "Лаунчер"):
+                    failures.append(
+                        f"галерея: сессия лаунчера {first_launch}")
+                if (not second_launch
+                        or second_launch["name"] != "Моя игра"):
+                    failures.append(
+                        f"галерея: имя из истории {second_launch}")
+
+            boundary = [{"start": 1000.0, "end": 2000.0, "place_id": "7",
+                         "source": "t", "name": ""}]
+            if core_module.find_session(820.0, boundary) is None:
+                failures.append("галерея: grace до начала сессии не работает")
+            if core_module.find_session(819.0, boundary) is not None:
+                failures.append("галерея: снимок вне grace привязан")
+            if core_module.find_session(2180.0, boundary) is None:
+                failures.append("галерея: grace после сессии не работает")
+            if core_module.find_session(2181.0, boundary) is not None:
+                failures.append("галерея: снимок после grace привязан")
+            cache_path = base / "Gallery" / "cache.json"
+            cache = {"version": 1,
+                     "places": {"111": {"name": "Тестовый плейс",
+                                        "creator": "Автор",
+                                        "checked": 42}},
+                     "assignments": {"shot.png": "111"}}
+            if not core_module.gallery_cache_save(cache, cache_path):
+                failures.append("галерея: кэш не сохранился")
+            loaded = core_module.gallery_cache_load(cache_path)
+            if (loaded["places"].get("111", {}).get("name")
+                    != "Тестовый плейс"
+                    or loaded["assignments"].get("shot.png") != "111"):
+                failures.append(f"галерея: кэш прочитан неверно {loaded}")
+            cache_path.write_text("не json", encoding="utf-8")
+            broken = core_module.gallery_cache_load(cache_path)
+            if broken["places"] or broken["assignments"]:
+                failures.append(f"галерея: битый кэш не обнулён {broken}")
+
+            thumb_a = core_module.gallery_thumb_path(
+                {"path": "C:/shots/a.png", "mtime": 10})
+            thumb_b = core_module.gallery_thumb_path(
+                {"path": "C:/shots/a.png", "mtime": 11})
+            if (thumb_a.suffix != ".jpg" or thumb_a == thumb_b
+                    or thumb_a != core_module.gallery_thumb_path(
+                        {"path": "C:/shots/a.png", "mtime": 10})):
+                failures.append("галерея: путь миниатюры нестабилен")
+
+            seed = {"version": 1, "places": {}, "assignments": {}}
+            core_module.gallery_seed_places(seed, [
+                {"place_id": "555", "name": "Из истории", "source": "x"}])
+            if seed["places"].get("555", {}).get("name") != "Из истории":
+                failures.append(f"галерея: сид плейсов {seed['places']}")
+            if core_module.gallery_assign(seed, ["x.png"], "abc"):
+                failures.append("галерея: назначен нечисловой Place ID")
+            if core_module.gallery_assign(
+                    seed, ["x.png", "y.png"], "920587237") != 2:
+                failures.append("галерея: назначение снимков не сработало")
+            if seed["assignments"].get("y.png") != "920587237":
+                failures.append(
+                    f"галерея: назначения {seed['assignments']}")
+
+            sessions = [
+                {"start": 1_700_000_000, "end": 1_700_003_600,
+                 "place_id": "111", "source": "t", "name": ""},
+                {"start": 1_700_100_000, "end": 1_700_103_600,
+                 "place_id": "222", "source": "t", "name": ""},
+                {"start": 1_700_200_000, "end": 1_700_203_600,
+                 "place_id": "333", "source": "t", "name": ""},
+            ]
+            group_cache = {
+                "version": 1,
+                "places": {
+                    "111": {"name": "Zeta", "creator": "", "checked": 0},
+                    "222": {"name": "Alpha", "creator": "Автор",
+                            "checked": 0},
+                },
+                "assignments": {"assigned.png": "222"},
+            }
+            group_shots = [
+                {"path": "a1.png", "name": "a1.png", "ts": 1_700_000_100,
+                 "mtime": 1},
+                {"path": "a2.png", "name": "a2.png", "ts": 1_700_000_200,
+                 "mtime": 2},
+                {"path": "b1.png", "name": "b1.png", "ts": 1_700_100_100,
+                 "mtime": 3},
+                {"path": "c1.png", "name": "c1.png", "ts": 1_700_200_100,
+                 "mtime": 4},
+                {"path": "assigned.png", "name": "assigned.png",
+                 "ts": 1_700_000_300, "mtime": 5},
+                {"path": "old.png", "name": "old.png", "ts": 1_600_000_000,
+                 "mtime": 6},
+            ]
+            groups = core_module.build_gallery_groups(
+                group_shots, sessions, group_cache)
+            titles = [group["title"] for group in groups]
+            if titles[:3] != ["Alpha", "Place 333", "Zeta"]:
+                failures.append(f"галерея: порядок групп {titles}")
+            if len(groups) == 4 and groups[-1]["kind"] == "date":
+                alpha = next(
+                    group for group in groups if group["place_id"] == "222")
+                zeta = next(
+                    group for group in groups if group["place_id"] == "111")
+                if [shot["name"] for shot in alpha["shots"]] != [
+                        "b1.png", "assigned.png"]:
+                    failures.append(
+                        "галерея: ручное назначение не сработало "
+                        f"{[shot['name'] for shot in alpha['shots']]}")
+                if [shot["name"] for shot in zeta["shots"]] != [
+                        "a2.png", "a1.png"]:
+                    failures.append(
+                        "галерея: сортировка снимков "
+                        f"{[shot['name'] for shot in zeta['shots']]}")
+                if (alpha["subtitle"] != "от Автор"
+                        or zeta["subtitle"] != "Place ID 111"):
+                    failures.append("галерея: подписи плейсов неверные")
+                stats = core_module.gallery_stats(groups)
+                if stats != {"total": 6, "known": 5, "unknown": 1,
+                             "groups": 4}:
+                    failures.append(f"галерея: статистика {stats}")
+
+            resolve_cache = {
+                "version": 1,
+                "places": {"777": {"name": "", "creator": "",
+                                   "checked": 0}},
+                "assignments": {},
+            }
+            calls = []
+
+            def fake_game_info(place_id, timeout=8):
+                calls.append((str(place_id), timeout))
+                if str(place_id) == "777":
+                    return {"name": "Из API", "creator": "Автор API"}
+                return None
+
+            original_fetch = core_module.fetch_game_info
+            try:
+                core_module.fetch_game_info = fake_game_info
+                result = core_module.resolve_gallery_places(
+                    resolve_cache, ["777", "888", "777"], timeout=1)
+                second_resolve = core_module.resolve_gallery_places(
+                    resolve_cache, ["777", "888"], timeout=1)
+            finally:
+                core_module.fetch_game_info = original_fetch
+            if (result != {"attempted": 2, "resolved": 1}
+                    or calls != [("777", 1), ("888", 1)]):
+                failures.append(
+                    f"галерея: API-названия {result} / {calls}")
+            if second_resolve["attempted"] != 0:
+                failures.append(
+                    f"галерея: повторный запрос к API {second_resolve}")
+            if resolve_cache["places"]["777"]["name"] != "Из API":
+                failures.append("галерея: название из API не сохранено")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"gallery test: {type(exc).__name__}: {exc}")
+
     # 7) пути записи флагов (регрессия на неверный путь Roblox/…)
     try:
         for path in client_settings_paths():
@@ -7144,6 +8341,13 @@ def run_selftest():
         core_module.LAUNCH_ICON_PREVIEW = ui_launch / "icon_preview.png"
         core_module.LAUNCH_SHORTCUT_BACKUP_DIR = ui_launch / "shortcuts_backup"
         core_module.LAUNCH_SHORTCUT_BACKUP_PATH = ui_launch / "shortcuts.json"
+        core_module.GALLERY_DIR = ui_data / "Gallery"
+        core_module.GALLERY_CACHE_PATH = (
+            core_module.GALLERY_DIR / "cache.json")
+        core_module.GALLERY_THUMBS_DIR = (
+            core_module.GALLERY_DIR / "Thumbnails")
+        core_module.SCREENSHOTS_DIR = ui_data / "Pictures" / "Roblox"
+        core_module.SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
         root = tk.Tk()
         root.withdraw()
@@ -7151,9 +8355,9 @@ def run_selftest():
         root.update_idletasks()
         root.update()
 
-        for page_key in ("game", "accounts", "favorites", "flags",
-                         "cursors", "themes", "launchstyle", "settings",
-                         "log"):
+        for page_key in ("game", "accounts", "favorites", "gallery",
+                         "flags", "cursors", "themes", "launchstyle",
+                         "settings", "log"):
             app.show_page(page_key)
             root.update()
             if app.current_page != page_key:
@@ -7439,6 +8643,189 @@ def run_selftest():
             app.set_theme(original_theme, save=False)
             root.update()
             delete_theme_set(photo_theme["name"])
+
+        # галерея: группировка, страницы, просмотрщик, назначение, фон
+        try:
+            shots_root = core_module.SCREENSHOTS_DIR
+            base_ts = 1_780_000_000.0
+            ui_shots = []
+            for index in range(7):
+                name = f"RobloxScreenShot20261021_120000{index:03d}.png"
+                path = shots_root / name
+                if HAVE_PIL:
+                    Image.new("RGB", (96, 54),
+                              (30 + index * 20, 70, 130)).save(path)
+                else:
+                    path.write_bytes(b"png")
+                st = path.stat()
+                ui_shots.append({
+                    "path": str(path), "name": name,
+                    "ts": base_ts + index * 10,
+                    "mtime": st.st_mtime, "size": st.st_size})
+            extra = shots_root / "RobloxScreenShot20260901_090000000.png"
+            if HAVE_PIL:
+                Image.new("RGB", (96, 54), (120, 40, 40)).save(extra)
+            else:
+                extra.write_bytes(b"png")
+            st = extra.stat()
+            ui_shots.append({
+                "path": str(extra), "name": extra.name,
+                "ts": base_ts - 10_000, "mtime": st.st_mtime,
+                "size": st.st_size})
+            ui_sessions = [{
+                "start": base_ts - 5, "end": base_ts + 700,
+                "place_id": "920587237", "source": "selftest",
+                "name": "UI Game"}]
+            ui_cache = {
+                "version": 1,
+                "places": {"920587237": {
+                    "name": "UI Place", "creator": "", "checked": 0}},
+                "assignments": {}}
+            ui_groups = build_gallery_groups(
+                ui_shots, ui_sessions, ui_cache)
+            if HAVE_PIL:
+                for shot in ui_shots:
+                    app._gallery_make_thumb(shot)
+            app.show_page("gallery")
+            root.update()
+            app._gallery_refresh_token += 1
+            app._gallery_apply(app._gallery_refresh_token, {
+                "groups": ui_groups, "shots": ui_shots,
+                "stats": gallery_stats(ui_groups), "cache": ui_cache,
+                "folder": str(shots_root)})
+            root.update()
+            if len(app._gallery_groups) != 2:
+                failures.append(
+                    f"UI галерея: групп {len(app._gallery_groups)}")
+            if app.gallery_group_combo.current() != 0:
+                failures.append(
+                    "UI галерея: комбобокс не выбран на первой группе")
+            if (app._gallery_page_size != 6
+                    or len(app._gallery_visible) != 6):
+                failures.append(
+                    f"UI галерея: видимых {len(app._gallery_visible)}")
+            if "1 / 2" not in app.gallery_page_var.get():
+                failures.append(
+                    f"UI галерея: страница {app.gallery_page_var.get()!r}")
+            if str(app.gallery_next_btn.cget("state")) != "normal":
+                failures.append("UI галерея: «вперёд» недоступна")
+            app._gallery_next()
+            root.update()
+            if (app._gallery_page != 1
+                    or len(app._gallery_visible) != 1):
+                failures.append(
+                    f"UI галерея: вторая страница {app._gallery_page} / "
+                    f"{len(app._gallery_visible)}")
+            if "2 / 2" not in app.gallery_page_var.get():
+                failures.append(
+                    f"UI галерея: страница 2 {app.gallery_page_var.get()!r}")
+            if str(app.gallery_next_btn.cget("state")) != "disabled":
+                failures.append("UI галерея: «вперёд» активна в конце")
+            if str(app.gallery_prev_btn.cget("state")) != "normal":
+                failures.append("UI галерея: «назад» недоступна")
+            app._gallery_prev()
+            root.update()
+            if HAVE_PIL:
+                thumb = gallery_thumb_path(ui_shots[0])
+                if not thumb.is_file():
+                    failures.append("UI галерея: миниатюра не создана")
+                elif app._gallery_photo(ui_shots[0]) is None:
+                    failures.append("UI галерея: превью не загрузилось")
+            app._gallery_open_viewer(0)
+            root.update()
+            viewer = app._gallery_viewer
+            if viewer is None or not viewer["win"].winfo_exists():
+                failures.append("UI галерея: просмотрщик не открылся")
+            else:
+                if app._gallery_viewer_counter_var.get() != "1 из 7":
+                    failures.append(
+                        "UI галерея: счётчик "
+                        f"{app._gallery_viewer_counter_var.get()!r}")
+                if app._gallery_viewer_title_var.get() != "UI Place":
+                    failures.append(
+                        "UI галерея: заголовок "
+                        f"{app._gallery_viewer_title_var.get()!r}")
+                app._gallery_viewer_step(1)
+                root.update()
+                if app._gallery_viewer_index != 1:
+                    failures.append(
+                        f"UI галерея: шаг {app._gallery_viewer_index}")
+                app._gallery_viewer_close()
+                root.update()
+                if app._gallery_viewer is not None:
+                    failures.append("UI галерея: просмотрщик не закрылся")
+
+            assigned_name = ui_shots[0]["name"]
+            app._open_gallery_assign_dialog(
+                names=[assigned_name], label="тест")
+            root.update()
+            if app._gallery_assign_dialog is None:
+                failures.append(
+                    "UI галерея: диалог назначения не открылся")
+            else:
+                app._gallery_assign_var.set("abc")
+                app._gallery_assign_submit()
+                if "Place ID" not in app._gallery_assign_status_var.get():
+                    failures.append("UI галерея: нет ошибки Place ID")
+                if app._gallery_assign_dialog is None:
+                    failures.append(
+                        "UI галерея: диалог закрылся при ошибке")
+                original_refresh = app.refresh_gallery
+                app.refresh_gallery = lambda *a, **k: None
+                try:
+                    app._gallery_assign_var.set(
+                        "https://www.roblox.com/games/920587237/Test")
+                    app._gallery_assign_submit()
+                finally:
+                    app.refresh_gallery = original_refresh
+                root.update()
+                if app._gallery_assign_dialog is not None:
+                    failures.append("UI галерея: диалог не закрылся")
+                if (app._gallery_cache or {}).get(
+                        "assignments", {}).get(assigned_name) != "920587237":
+                    failures.append(
+                        "UI галерея: назначение не сохранилось")
+                if gallery_cache_load()["assignments"].get(
+                        assigned_name) != "920587237":
+                    failures.append("UI галерея: назначения нет в кэше")
+            app.open_clean_background_dialog()
+            root.update()
+            clean = app._gallery_clean_dialog
+            texts = []
+            if clean is not None:
+                stack = [clean]
+                while stack:
+                    widget = stack.pop()
+                    stack.extend(widget.winfo_children())
+                    try:
+                        texts.append(str(widget.cget("text")))
+                    except tk.TclError:
+                        pass
+            if clean is None:
+                failures.append(
+                    "UI галерея: диалог очистки фона не открылся")
+            elif not any("DFIntCanHideGuiGroupId" in text for text in texts):
+                failures.append("UI галерея: нет объяснения про FastFlag")
+            else:
+                app._close_clean_background_dialog()
+                root.update()
+                if app._gallery_clean_dialog is not None:
+                    failures.append(
+                        "UI галерея: диалог очистки не закрылся")
+
+            app._gallery_refresh_token += 1
+            app._gallery_apply(app._gallery_refresh_token, {
+                "groups": [], "shots": [], "stats": gallery_stats([]),
+                "cache": ui_cache, "folder": str(shots_root)})
+            root.update()
+            if app.gallery_empty.winfo_manager() != "pack":
+                failures.append(
+                    "UI галерея: пустое состояние не показано")
+            if app.gallery_grid.winfo_manager() == "pack":
+                failures.append("UI галерея: сетка осталась при пустоте")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(
+                f"UI gallery test: {type(exc).__name__}: {exc}")
 
         root.withdraw()
         app._closing = True        # не пишем тестовую геометрию в конфиг

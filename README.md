@@ -1,8 +1,27 @@
-# MaklyxaLauncher v1.8.0
+# MaklyxaLauncher v1.8.1
 
 Настольный лаунчер для **официального** клиента Roblox: установщик `.msi`
 с выбором папки или портативный `.exe`. Своё окно без рамки, три темы
 оформления, боковое меню с группами разделов.
+
+## Что нового в v1.8.1
+
+- **Галерея снимков** — новый раздел «Медиа → Галерея»: все снимки
+  из `Pictures\Roblox` (включая OneDrive) в сетке миниатюр и
+  полноэкранный просмотрщик с листанием, открытием файла и папки
+- **Сортировка по плейсам** — снимки автоматически распределяются
+  по играм по истории запусков Froststrap/Bloxstrap и самого лаунчера;
+  названия подтягиваются из публичного API Roblox и кэшируются
+- **Старые снимки** — файлы без записи о запуске группируются по дате;
+  плейс можно назначить вручную по ссылке или Place ID. Назначение
+  хранится в `Gallery\cache.json` и не меняет сами изображения
+- **«Очистить задний план»** — раздел честно объясняет, почему готовый
+  PNG нельзя очистить задним числом и почему флаг
+  `DFIntCanHideGuiGroupId` не записывается: Roblox исключил его из
+  локального allowlist. Чистые кадры дают официальные «Записи»
+  (Captures) Roblox
+- Галерея не копирует и не изменяет снимки: она читает папку, а
+  миниатюры складывает в `%APPDATA%\MaklyxaLauncher\Gallery\Thumbnails`
 
 ## Что нового в v1.8.0
 
@@ -171,7 +190,7 @@
 
 ## Установка
 
-Скачайте `MaklyxaLauncher-1.8.0-x64.msi` со страницы
+Скачайте `MaklyxaLauncher-1.8.1-x64.msi` со страницы
 [релизов](https://github.com/qqew666/maklyxa-launcher/releases/latest)
 и запустите. Установщик позволяет выбрать папку (по умолчанию
 `C:\Program Files\MaklyxaLauncher`), создаёт ярлыки в меню «Пуск» и на
@@ -260,6 +279,26 @@
   это изменение файлов игры, которое может привести к блокировке.
   Лаунчер настраивает только собственный интерфейс и сигналы
 
+### Галерея скриншотов
+- **Встроенный просмотрщик** — раздел «Медиа → Галерея»: сетка
+  миниатюр, полноэкранный просмотр, листание стрелками ←/→ или
+  кнопками, Esc закрывает. Снимок можно открыть в системном
+  просмотрщике или показать папку
+- **Автосортировка по плейсам** — лаунчер сопоставляет время снимка
+  с сессиями из истории Froststrap, Bloxstrap и своих запусков;
+  названия и авторы игр подтягиваются из публичного API и кэшируются.
+  Файлы без сессии попадают в группы по дате
+- **Ручное назначение** — выбери группу и укажи ссылку на игру или
+  Place ID: снимки перейдут в нужный плейс. Это запись только
+  в `Gallery\cache.json`, исходные PNG не меняются
+- **«Очистить задний план»** — честное объяснение вместо нерабочего
+  флага: готовый PNG уже содержит UI, а `DFIntCanHideGuiGroupId`
+  исключён Roblox из allowlist. Для чистых кадров используй
+  официальные «Записи» (Captures) — клиент скрывает интерфейс сам
+- Миниатюры хранятся отдельно в
+  `%APPDATA%\MaklyxaLauncher\Gallery\Thumbnails`; папка снимков
+  только читается
+
 ### Стиль запуска
 - **Своя иконка** — PNG, JPG, WEBP, BMP или ICO; лаунчер кадрирует
   картинку в квадрат и сохраняет многоразмерный ICO (16–256 px) вместе
@@ -326,6 +365,14 @@ Froststrap/Bloxstrap Modifications, рядом с exe): чужие ключи н
 проигрывает звук, а на ярлыки ставит иконку только после копирования
 оригинальных `.lnk` в резервную папку.
 
+Галерея читает `Pictures\Roblox` (или `OneDrive\Pictures\Roblox`),
+не копируя снимки. Для сортировки используются только локальные записи
+о запусках: `GameHistory.json` Froststrap/Bloxstrap, журналы бутстрапера
+и история лаунчера. Названия плейсов запрашиваются у публичного API
+Roblox и сохраняются в `%APPDATA%\MaklyxaLauncher\Gallery\cache.json`.
+FastFlag для скрытия UI не записывается: Roblox исключил
+`DFIntCanHideGuiGroupId` из локального allowlist.
+
 Запуск под аккаунтом: лаунчер расшифровывает сессию из `accounts.json`,
 запрашивает одноразовый тикет у `auth.roblox.com/v1/authentication-ticket`
 и открывает ссылку `roblox-player:1+launchmode:play+gameinfo:<ticket>+...`.
@@ -346,7 +393,7 @@ build_msi.bat
 
 `build.bat` собирает `dist\MaklyxaLauncher.exe` (одиночный файл, Python не
 нужен). `build_msi.bat` упаковывает его в установщик
-`dist\MaklyxaLauncher-1.8.0-x64.msi` с выбором папки установки. Для MSI нужен
+`dist\MaklyxaLauncher-1.8.1-x64.msi` с выбором папки установки. Для MSI нужен
 [WiX Toolset 5](https://wixtoolset.org/): он ставится как .NET-инструмент
 и не требует прав администратора.
 
@@ -356,8 +403,9 @@ build_msi.bat
 python launcher.py                   # запуск приложения
 python launcher.py --selftest        # автотест без окна
 python launcher.py --page flags      # сразу открыть вкладку
-                                     # game/accounts/favorites/flags/cursors/
-                                     # themes/launchstyle/settings/log
+                                     # game/accounts/favorites/gallery/
+                                     # flags/cursors/themes/launchstyle/
+                                     # settings/log
 python launcher.py --theme glass     # тема без сохранения (dark/light/glass)
 ```
 
@@ -373,7 +421,7 @@ python launcher.py --theme glass     # тема без сохранения (dar
 | `installer\MaklyxaLauncher.wxs` | описание MSI: файлы, ярлыки, выбор папки |
 | `installer\license.rtf` | текст лицензии в установщике |
 | `dist\MaklyxaLauncher.exe` | готовое приложение (портативное) |
-| `dist\MaklyxaLauncher-1.8.0-x64.msi` | готовый установщик |
+| `dist\MaklyxaLauncher-1.8.1-x64.msi` | готовый установщик |
 
 Настройки и списки: `%APPDATA%\MaklyxaLauncher\config.json`
 (старый `%APPDATA%\RobloxLauncher\config.json` мигрируется автоматически)
@@ -391,6 +439,10 @@ DPAPI), аватары: `%APPDATA%\MaklyxaLauncher\avatars`.
 
 Шрифт лаунчера: `%APPDATA%\MaklyxaLauncher\Customize\Fonts` — `font.ttf`
 или `font.otf`; подключается только к процессу лаунчера.
+
+Галерея: `%APPDATA%\MaklyxaLauncher\Gallery` — `cache.json` с названиями
+плейсов и ручными назначениями, `Thumbnails` с миниатюрами. Сами снимки
+остаются в `Pictures\Roblox` и не изменяются.
 
 Стиль запуска: `%APPDATA%\MaklyxaLauncher\Launch` — `icon.ico`,
 `icon_preview.png`, `sound.wav` или `sound.mp3` (звук запуска),

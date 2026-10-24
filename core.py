@@ -10,6 +10,7 @@ MaklyxaLauncher — ядро лаунчера (логика без интерф�
   * FastFlags — запись слиянием в ClientAppSettings.json;
   * настройки Froststrap/Bloxstrap;
   * данные игры (название, автор, онлайн, иконка) из публичного API;
+  * галерея скриншотов Roblox: сессии, группировка по плейсам, кэш;
   * одноэкземплярность (mutex) и хелперы безрамочного окна.
 
 Лаунчер не внедряет код в игру и не обходит защиту — только стандартные
@@ -36,6 +37,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -45,7 +47,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -79,6 +81,11 @@ CUSTOMIZE_DIR = CONFIG_DIR / "Customize"
 UI_FONT_DIR = CUSTOMIZE_DIR / "Fonts"
 UI_FONT_MAX = 20 * 1024 * 1024
 UI_FONT_EXTS = (".ttf", ".otf")
+SCREENSHOTS_DIR = Path.home() / "Pictures" / "Roblox"
+GALLERY_DIR = CONFIG_DIR / "Gallery"
+GALLERY_CACHE_PATH = GALLERY_DIR / "cache.json"
+GALLERY_THUMBS_DIR = GALLERY_DIR / "Thumbnails"
+SCREENSHOT_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 CURSOR_SLOTS = (
     {"key": "shiftlock", "file": "MouseLockedCursor.png",
      "label": "ShiftLock",
@@ -634,16 +641,18 @@ def check_launcher_update(timeout=8):
     }
 
 
-def fetch_game_info(place_id):
+def fetch_game_info(place_id, timeout=8):
     """Название, автор, сколько в игре + universe_id для иконки."""
     try:
         uni = _get_json(
-            f"https://apis.roblox.com/universes/v1/places/{place_id}/universe")
+            "https://apis.roblox.com/universes/v1/places/"
+            f"{place_id}/universe", timeout=timeout)
         universe_id = uni.get("universeId")
         if not universe_id:
             return None
         data = _get_json(
-            f"https://games.roblox.com/v1/games?universeIds={universe_id}")
+            "https://games.roblox.com/v1/games?"
+            f"universeIds={universe_id}", timeout=timeout)
         rows = data.get("data") or []
         if not rows:
             return None
@@ -676,6 +685,483 @@ def fetch_game_icon(universe_id, size="250x250"):
             return resp.read()
     except Exception:
         return None
+
+
+# ---- галерея скриншотов ---------------------------------------------------------
+
+SCREENSHOT_RE = re.compile(
+    r"robloxscreenshot(\d{8})_(\d{6})(\d{3})", re.IGNORECASE)
+JOIN_LOG_RE = re.compile(r"Joining Game \((\d+)/")
+GALLERY_CACHE_VERSION = 1
+_RU_MONTHS = (
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+)
+
+
+def screenshots_dir():
+    """Папка снимков Roblox; учитывает перенос «Изображений» в OneDrive."""
+    for folder in (SCREENSHOTS_DIR,
+                   Path.home() / "OneDrive" / "Pictures" / "Roblox"):
+        try:
+            if folder.is_dir():
+                return folder
+        except OSError:
+            continue
+    return SCREENSHOTS_DIR
+
+
+def parse_screenshot_time(name, fallback=None):
+    """Время снимка из RobloxScreenShotYYYYMMDD_HHMMSSmmm; иначе fallback."""
+    match = SCREENSHOT_RE.search(Path(str(name)).name)
+    if match:
+        try:
+            moment = datetime.strptime(
+                match.group(1) + match.group(2), "%Y%m%d%H%M%S")
+            moment = moment.replace(microsecond=int(match.group(3)) * 1000)
+            return moment.timestamp()
+        except ValueError:
+            pass
+    try:
+        return float(fallback) if fallback is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def scan_screenshots(folder=None):
+    """Все снимки в папке Roblox, новые сверху."""
+    target = Path(folder) if folder is not None else screenshots_dir()
+    shots = []
+    try:
+        if not target.is_dir():
+            return shots
+        candidates = list(target.rglob("*"))
+    except OSError:
+        return shots
+    for path in candidates:
+        if len(shots) >= 5000:
+            break
+        try:
+            if (not path.is_file()
+                    or path.suffix.lower() not in SCREENSHOT_EXTS):
+                continue
+            stat = path.stat()
+        except OSError:
+            continue
+        shots.append({
+            "path": str(path),
+            "name": path.name,
+            "ts": parse_screenshot_time(path.name, stat.st_mtime),
+            "mtime": stat.st_mtime,
+            "size": stat.st_size,
+        })
+    shots.sort(key=lambda item: item["ts"], reverse=True)
+    return shots
+
+
+def _iso_epoch(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
+def _epoch_value(value):
+    if isinstance(value, (int, float)):
+        return float(value)
+    return _iso_epoch(value)
+
+
+def _make_session(start, end, place_id, source, name=""):
+    if start is None:
+        return None
+    if end is None or end <= start:
+        end = start + 1800
+    return {
+        "start": float(start),
+        "end": float(end),
+        "place_id": str(place_id),
+        "source": str(source),
+        "name": str(name or ""),
+    }
+
+
+def _merge_sessions(sessions, gap=180):
+    """Склеить соседние сессии одного плейса с коротким разрывом."""
+    sessions = sorted(sessions, key=lambda item: (item["place_id"],
+                                                  item["start"]))
+    merged = []
+    for session in sessions:
+        last = merged[-1] if merged else None
+        if (last is not None
+                and last["place_id"] == session["place_id"]
+                and session["start"] <= last["end"] + gap):
+            last["end"] = max(last["end"], session["end"])
+            if not last["name"] and session.get("name"):
+                last["name"] = session["name"]
+            continue
+        merged.append(dict(session))
+    merged.sort(key=lambda item: item["start"])
+    return merged
+
+
+def _sessions_from_history_file(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if isinstance(data, dict):
+        data = (data.get("history") or data.get("games")
+                or data.get("data") or [])
+    if not isinstance(data, list):
+        return []
+    label = Path(path).parent.name
+    if label.lower() == "cache":
+        label = Path(path).parent.parent.name
+    label = label or "История"
+    sessions = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        place_id = str(entry.get("placeId")
+                       or entry.get("place_id") or "").strip()
+        if not place_id.isdigit():
+            continue
+        servers = entry.get("servers")
+        if not isinstance(servers, list) or not servers:
+            servers = [entry]
+        for server in servers:
+            if not isinstance(server, dict):
+                continue
+            start = _epoch_value(server.get("joinedAt")
+                                 or server.get("start")
+                                 or server.get("ts"))
+            end = _epoch_value(server.get("timeLeft")
+                               or server.get("leftAt")
+                               or server.get("end"))
+            session = _make_session(start, end, place_id, label)
+            if session:
+                sessions.append(session)
+    return sessions
+
+
+def _sessions_from_bloxstrap_log(path):
+    try:
+        stamp = Path(path).stat().st_mtime
+        lines = Path(path).read_text(
+            encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    joins = []
+    for line in lines:
+        match = JOIN_LOG_RE.search(line)
+        if not match:
+            continue
+        head = line.strip().split(" ", 1)[0]
+        moment = _iso_epoch(head)
+        if moment is None:
+            moment = stamp
+        joins.append((moment, match.group(1)))
+    sessions = []
+    for index, (moment, place_id) in enumerate(joins):
+        if index + 1 < len(joins):
+            end = joins[index + 1][0]
+        else:
+            end = min(stamp, moment + 4 * 3600)
+        session = _make_session(moment, end, place_id, "Bloxstrap")
+        if session:
+            sessions.append(session)
+    return sessions
+
+
+def collect_play_sessions(config_history=None, history_files=None,
+                          log_files=None):
+    """Сессии из Froststrap/Bloxstrap и истории запусков лаунчера."""
+    local = Path(os.getenv("LOCALAPPDATA", str(Path.home() / "AppData"
+                                               / "Local")))
+    if history_files is None:
+        history_files = [
+            local / "Froststrap" / "Cache" / "GameHistory.json",
+            local / "Bloxstrap" / "Cache" / "GameHistory.json",
+            local / "Bloxstrap" / "GameHistory.json",
+        ]
+    if log_files is None:
+        try:
+            log_files = sorted(
+                (local / "Bloxstrap" / "Logs").glob("Bloxstrap_*.log"),
+                key=lambda item: item.stat().st_mtime, reverse=True)[:30]
+        except OSError:
+            log_files = []
+    sessions = []
+    for path in history_files or []:
+        try:
+            if Path(path).is_file():
+                sessions.extend(_sessions_from_history_file(path))
+        except OSError:
+            continue
+    for path in log_files or []:
+        sessions.extend(_sessions_from_bloxstrap_log(path))
+    entries = []
+    for entry in config_history or []:
+        if not isinstance(entry, dict):
+            continue
+        place_id = parse_place_id(
+            entry.get("place_id") or entry.get("placeId") or "")
+        try:
+            moment = float(entry.get("ts") or 0)
+        except (TypeError, ValueError):
+            moment = 0
+        if not place_id or moment <= 0:
+            continue
+        name = str(entry.get("name") or "").strip()
+        if name.upper().startswith("[TITLE") or name.lower() == "unknown":
+            name = ""
+        entries.append((moment, place_id, name))
+    entries.sort()
+    for index, (moment, place_id, name) in enumerate(entries):
+        if index + 1 < len(entries):
+            end = min(entries[index + 1][0], moment + 3 * 3600)
+        else:
+            end = moment + 2 * 3600
+        session = _make_session(moment, end, place_id, "Лаунчер", name)
+        if session:
+            sessions.append(session)
+    return _merge_sessions(sessions)
+
+
+def find_session(ts, sessions, grace=180):
+    """Сессия, в которую попал снимок; при пересечении — более поздняя."""
+    best = None
+    try:
+        moment = float(ts)
+    except (TypeError, ValueError):
+        return None
+    for session in sessions or []:
+        if (session["start"] - grace <= moment
+                <= session["end"] + grace):
+            if best is None or session["start"] > best["start"]:
+                best = session
+    return best
+
+
+def gallery_date_label(ts):
+    try:
+        moment = datetime.fromtimestamp(float(ts))
+    except (TypeError, ValueError, OSError):
+        return "Без даты"
+    return f"{moment.day} {_RU_MONTHS[moment.month - 1]} {moment.year}"
+
+
+def gallery_time_label(ts):
+    try:
+        moment = datetime.fromtimestamp(float(ts))
+    except (TypeError, ValueError, OSError):
+        return ""
+    return moment.strftime("%d.%m.%Y · %H:%M")
+
+
+def gallery_cache_load(path=None):
+    empty = {"version": GALLERY_CACHE_VERSION,
+             "places": {}, "assignments": {}}
+    target = Path(path) if path is not None else GALLERY_CACHE_PATH
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return empty
+    if not isinstance(data, dict):
+        return empty
+    raw_places = data.get("places")
+    raw_assign = data.get("assignments")
+    places = {}
+    if isinstance(raw_places, dict):
+        for place_id, info in raw_places.items():
+            place_id = str(place_id)
+            if not place_id.isdigit() or not isinstance(info, dict):
+                continue
+            try:
+                checked = float(info.get("checked") or 0)
+            except (TypeError, ValueError):
+                checked = 0
+            places[place_id] = {
+                "name": str(info.get("name") or "").strip(),
+                "creator": str(info.get("creator") or "").strip(),
+                "checked": checked,
+            }
+    assignments = {}
+    if isinstance(raw_assign, dict):
+        for name, value in raw_assign.items():
+            if isinstance(value, dict):
+                value = value.get("place_id") or value.get("placeId")
+            place_id = str(value or "").strip()
+            if name and place_id.isdigit():
+                assignments[str(name)] = place_id
+    return {"version": GALLERY_CACHE_VERSION,
+            "places": places, "assignments": assignments}
+
+
+def gallery_cache_save(cache, path=None):
+    target = Path(path) if path is not None else GALLERY_CACHE_PATH
+    payload = {
+        "version": GALLERY_CACHE_VERSION,
+        "places": cache.get("places") or {},
+        "assignments": cache.get("assignments") or {},
+    }
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_name(target.name + ".tmp")
+        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                        encoding="utf-8")
+        temp.replace(target)
+        return True
+    except OSError:
+        return False
+
+
+def gallery_seed_places(cache, sessions):
+    """Названия из истории лаунчера — без запросов к API."""
+    places = cache.setdefault("places", {})
+    for session in sessions or []:
+        place_id = str(session.get("place_id") or "")
+        name = str(session.get("name") or "").strip()
+        if not place_id.isdigit() or not name:
+            continue
+        info = places.setdefault(
+            place_id, {"name": "", "creator": "", "checked": 0})
+        if not info.get("name"):
+            info["name"] = name
+
+
+def resolve_gallery_places(cache, place_ids, timeout=6, limit=40):
+    """Дотянуть названия плейсов через публичный API и обновить кэш."""
+    places = cache.setdefault("places", {})
+    now = time.time()
+    attempted = resolved = 0
+    unique = []
+    for place_id in place_ids or []:
+        place_id = str(place_id)
+        if place_id.isdigit() and place_id not in unique:
+            unique.append(place_id)
+    for place_id in unique:
+        if attempted >= limit:
+            break
+        info = places.setdefault(
+            place_id, {"name": "", "creator": "", "checked": 0})
+        if info.get("name"):
+            continue
+        try:
+            checked = float(info.get("checked") or 0)
+        except (TypeError, ValueError):
+            checked = 0
+        if checked and now - checked < 6 * 3600:
+            continue
+        attempted += 1
+        game = fetch_game_info(place_id, timeout=timeout)
+        info["checked"] = time.time()
+        if game and game.get("name"):
+            info["name"] = str(game["name"])
+            info["creator"] = str(game.get("creator") or "")
+            resolved += 1
+    return {"attempted": attempted, "resolved": resolved}
+
+
+def gallery_assign(cache, names, place_id):
+    """Вручную привязать снимки к плейсу; возвращает число записей."""
+    place_id = parse_place_id(place_id)
+    if not place_id:
+        return 0
+    assignments = cache.setdefault("assignments", {})
+    count = 0
+    for name in names or []:
+        if name:
+            assignments[str(name)] = place_id
+            count += 1
+    return count
+
+
+def build_gallery_groups(screenshots, sessions, cache):
+    """Сгруппировать снимки по названию плейса, неизвестные — по дате."""
+    places = cache.get("places") or {}
+    assignments = cache.get("assignments") or {}
+    groups = {}
+    for shot in screenshots or []:
+        try:
+            moment = float(shot.get("ts"))
+        except (TypeError, ValueError):
+            moment = 0
+        name = str(shot.get("name") or Path(str(shot.get("path"))).name)
+        place_id = assignments.get(name)
+        if not place_id:
+            session = find_session(moment, sessions)
+            if session:
+                place_id = session["place_id"]
+        item = dict(shot)
+        item["name"] = name
+        item["time_label"] = gallery_time_label(moment)
+        item["date_label"] = gallery_date_label(moment)
+        if place_id:
+            place_id = str(place_id)
+            key = f"place:{place_id}"
+            info = places.get(place_id) or {}
+            title = str(info.get("name") or "").strip()
+            if not title:
+                session = find_session(moment, sessions)
+                title = str((session or {}).get("name") or "").strip()
+            if not title:
+                title = f"Place {place_id}"
+            creator = str(info.get("creator") or "").strip()
+            subtitle = f"от {creator}" if creator else (
+                "Place ID " + place_id)
+            group = groups.get(key)
+            if group is None:
+                group = {
+                    "key": key, "kind": "place", "place_id": place_id,
+                    "title": title, "subtitle": subtitle, "shots": [],
+                }
+                groups[key] = group
+        else:
+            key = "date:" + datetime.fromtimestamp(moment).strftime("%Y-%m-%d")
+            group = groups.get(key)
+            if group is None:
+                group = {
+                    "key": key, "kind": "date", "place_id": "",
+                    "title": gallery_date_label(moment),
+                    "subtitle": "Плейс не определён", "shots": [],
+                }
+                groups[key] = group
+        group["shots"].append(item)
+    place_groups = sorted(
+        (group for group in groups.values() if group["kind"] == "place"),
+        key=lambda group: (group["title"].casefold(), group["title"]))
+    date_groups = sorted(
+        (group for group in groups.values() if group["kind"] == "date"),
+        key=lambda group: group["shots"][0]["ts"], reverse=True)
+    result = place_groups + date_groups
+    for group in result:
+        group["shots"].sort(key=lambda shot: shot["ts"], reverse=True)
+        group["latest"] = group["shots"][0]["ts"] if group["shots"] else 0
+    return result
+
+
+def gallery_stats(groups):
+    total = sum(len(group["shots"]) for group in groups or [])
+    known = sum(len(group["shots"]) for group in groups or []
+                if group["kind"] == "place")
+    return {"total": total, "known": known, "unknown": total - known,
+            "groups": len(groups or [])}
+
+
+def gallery_thumb_path(shot, width=400, height=225):
+    source = Path(str(shot.get("path") or shot.get("name") or ""))
+    stamp = shot.get("mtime") or 0
+    key = f"{source}|{stamp}|{int(width)}x{int(height)}"
+    digest = hashlib.sha1(
+        key.encode("utf-8", "replace")).hexdigest()[:20]
+    return GALLERY_THUMBS_DIR / f"{digest}.jpg"
 
 
 # ---- FastFlags ------------------------------------------------------------------
