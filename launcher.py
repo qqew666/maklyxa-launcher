@@ -15,7 +15,8 @@ UI v3 (полный редизайн):
   * компактная статусная строка и переработанный экран запуска игры.
 
 Ядро (логика) — в core.py.
-Запуск: python launcher.py [--page game|favorites|flags|cursors|settings|log]
+Запуск: python launcher.py [--page game|favorites|flags|cursors|themes|
+                                   launchstyle|settings|log]
                             [--theme dark|light|glass]
 """
 
@@ -48,13 +49,13 @@ from core import (
     DEFAULT_CONFIG, DEFAULT_THEME,
     DISCORD_PORTAL_URL, DISCOVER_URL, FPS_CHOICES, FLAG_API, FLAG_FPS, FLAG_QUALITY,
     GRAPHICS_MODES, HTTP_HEADERS, INSTALLER_URL,
-    IMAGE_ONLY_ACCENT, IMAGE_ONLY_PALETTE, RELEASES_URL,
+    IMAGE_ONLY_ACCENT, IMAGE_ONLY_PALETTE, LAUNCH_DIR, RELEASES_URL,
     THEMES, THEME_ORDER, VERSION, WINDOW_TITLE,
     THEME_SETS_DIR, THEME_TINTS,
     account_avatar_path, account_session, accounts_state, add_account,
     acquire_single_instance, apply_cursor_set, apply_fastflags,
-    bootstrapper_running, browser_login, build_theme_palette,
-    check_launcher_update,
+    apply_launch_icon_to_shortcuts, bootstrapper_running, browser_login,
+    build_theme_palette, check_launcher_update,
     client_settings_paths, close_roblox_players, copy_current_cursor_set,
     create_cursor_set, create_theme_set, cursor_install_roots,
     cursor_set_files, cursor_set_warnings, cursor_slot_path,
@@ -63,15 +64,18 @@ from core import (
     export_cursor_set, export_theme_set, fetch_game_icon, fetch_game_info,
     fastflag_values, find_bootstrapper_settings, find_player_exe,
     focus_roblox_window, fmt_num, game_launch_url, hit_test, import_cursor_set,
-    import_theme_set, launch_game_as, list_cursor_sets, list_theme_sets,
+    import_launch_icon, import_launch_sound, import_theme_set, launch_game_as,
+    launch_icon_state, launch_sound_path, list_cursor_sets, list_theme_sets,
     load_config, load_theme_palette, mb, merge_flags_into,
     migrate_old_config, parse_place_id, png_info, player_pids,
-    probe_protocol, protect_secret, read_json_dict, remove_account,
-    remove_cursor_slot, remove_theme_image, rename_cursor_set,
+    play_launch_sound, probe_protocol, protect_secret, read_json_dict,
+    remove_account, remove_cursor_slot, remove_launch_icon,
+    remove_launch_sound, remove_theme_image, rename_cursor_set,
     rename_theme_set, resize_geometry, restore_custom_cursors,
-    roblox_status, save_config, set_active_account, set_cursor_slot,
-    set_theme_image, shade, theme_set_info, trunc, unprotect_secret,
-    update_theme_set, valid_cursor_set_name,
+    restore_launch_icon_shortcuts, roblox_status, save_config,
+    set_active_account, set_cursor_slot, set_theme_image, shade,
+    shortcut_backup_count, stop_launch_sound, theme_set_info, trunc,
+    unprotect_secret, update_theme_set, valid_cursor_set_name,
     valid_discord_app_id, valid_geometry, valid_theme_set_name,
     version_tuple, work_area,
     write_json_dict, DiscordPresence, discord_activity, discord_frame,
@@ -88,6 +92,14 @@ HEADER_H = 126
 HEADER_H_COMPACT = 76
 THEME_PREVIEW_H = 148
 
+LAUNCH_STYLE_LABELS = {"off": "Выкл", "minimal": "Минимальный",
+                       "card": "Карточка"}
+LAUNCH_STYLE_NOTES = {
+    "off": "Экран запуска не показывается — только звук, если включён.",
+    "minimal": "Узкая полоса с иконкой и названием игры.",
+    "card": "Карточка с иконкой, названием и статусом запуска.",
+}
+
 CURSORS = {
     "n": "sb_v_double_arrow", "s": "sb_v_double_arrow",
     "e": "sb_h_double_arrow", "w": "sb_h_double_arrow",
@@ -101,13 +113,15 @@ NAV_ITEMS = [
     ("flags", "⚑", "Флаги"),
     ("cursors", "◈", "Курсоры"),
     ("themes", "◐", "Темы"),
+    ("launchstyle", "✦", "Стиль запуска"),
     ("settings", "⚙", "Настройки"),
     ("log", "≡", "Журнал"),
 ]
 
 NAV_GROUPS = [
     ("ЗАПУСК", ("game", "accounts", "favorites")),
-    ("ПРЕДУСТАНОВЛЕННЫЕ\nМОДИФИКАЦИИ", ("flags", "cursors", "themes")),
+    ("ПРЕДУСТАНОВЛЕННЫЕ\nМОДИФИКАЦИИ",
+     ("flags", "cursors", "themes", "launchstyle")),
     ("СИСТЕМА", ("settings", "log")),
 ]
 
@@ -608,6 +622,130 @@ class ThinScrollbar(tk.Canvas):
 # ---- приложение ------------------------------------------------------------------
 
 
+class LaunchSplash:
+    """Экран запуска поверх окон: карточка или узкая полоса."""
+
+    def __init__(self, app, title, subtitle="Запускаю Roblox…", style="card"):
+        self.app = app
+        self.style = "minimal" if style == "minimal" else "card"
+        self.subtitle = subtitle or "Запускаю Roblox…"
+        self.win = None
+        self._photo = None
+        self._job = None
+        self._closed = False
+        c = app.c
+        card = self.style == "card"
+        width = 430 if card else 350
+        height = 172 if card else 86
+        win = tk.Toplevel(app.root)
+        self.win = win
+        win.withdraw()
+        win.overrideredirect(True)
+        win.configure(bg=c["border"])
+        try:
+            win.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        body = tk.Frame(win, bg=c["surface"])
+        body.pack(fill="both", expand=True, padx=1, pady=1)
+        tk.Frame(body, bg=app.accent, height=3).pack(fill="x", side="top")
+        content = tk.Frame(body, bg=c["surface"],
+                           padx=18 if card else 12,
+                           pady=14 if card else 8)
+        content.pack(fill="both", expand=True)
+        size = 58 if card else 36
+        icon_box = tk.Frame(content, bg=c["surface2"], width=size,
+                            height=size, highlightthickness=1,
+                            highlightbackground=c["border"])
+        icon_box.pack(side="left", anchor="center")
+        icon_box.pack_propagate(False)
+        icon_lbl = tk.Label(icon_box, text="▶", bg=c["surface2"],
+                            fg=app.accent,
+                            font=("Segoe UI", 18 if card else 12, "bold"))
+        icon_lbl.pack(fill="both", expand=True)
+        photo = app._splash_icon_photo(size - 8)
+        if photo is not None:
+            icon_lbl.configure(image=photo, text="")
+            self._photo = photo
+        text = tk.Frame(content, bg=c["surface"])
+        text.pack(side="left", fill="both", expand=True,
+                  padx=(14 if card else 10, 0))
+        brand = tk.Label(text, text="MAKLYXA LAUNCHER", bg=c["surface"],
+                         fg=app.accent,
+                         font=("Segoe UI", 7, "bold"))
+        if card:
+            brand.pack(anchor="w")
+        title_lbl = tk.Label(
+            text, text=trunc(title or "Roblox", 52 if card else 40),
+            bg=c["surface"], fg=c["text"],
+            font=("Segoe UI", 14 if card else 11, "bold"),
+            anchor="w", justify="left",
+            wraplength=310 if card else 250)
+        title_lbl.pack(anchor="w", pady=(2, 0))
+        self.status_lbl = tk.Label(
+            text, text=self.subtitle, bg=c["surface"], fg=c["muted"],
+            font=("Segoe UI", 9), anchor="w", justify="left",
+            wraplength=310 if card else 250)
+        self.status_lbl.pack(anchor="w", pady=(4 if card else 1, 0))
+        close_lbl = tk.Label(text, text="клик — скрыть", bg=c["surface"],
+                             fg=c["muted"], font=("Segoe UI", 7),
+                             anchor="w")
+        if card:
+            close_lbl.pack(anchor="w", pady=(5, 0))
+        for widget in (win, body, content, icon_box, icon_lbl, text, brand,
+                       title_lbl, self.status_lbl, close_lbl):
+            widget.bind("<Button-1>", lambda _e: self.close())
+        win.update_idletasks()
+        try:
+            screen_w = win.winfo_screenwidth()
+            screen_h = win.winfo_screenheight()
+            x = max(0, (screen_w - width) // 2)
+            y = max(0, (screen_h - height) // 3)
+            win.geometry(f"{width}x{height}+{x}+{y}")
+            win.deiconify()
+        except tk.TclError:
+            self.close()
+            return
+        self._animate()
+
+    def _animate(self):
+        if self.win is None or self._closed:
+            return
+        dots = "." * (1 + (int(time.monotonic() * 2.5) % 3))
+        try:
+            self.status_lbl.configure(text=f"{self.subtitle}{dots}")
+            self._job = self.win.after(360, self._animate)
+        except tk.TclError:
+            self._job = None
+
+    def set_status(self, text):
+        if text:
+            self.subtitle = text
+        if self.win is None:
+            return
+        try:
+            self.status_lbl.configure(text=self.subtitle)
+        except tk.TclError:
+            pass
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        if self._job is not None:
+            try:
+                self.win.after_cancel(self._job)
+            except (tk.TclError, AttributeError):
+                pass
+            self._job = None
+        win, self.win = self.win, None
+        if win is not None:
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+
 class App:
     def __init__(self, root, interactive=True, start_page=None):
         self.root = root
@@ -675,6 +813,16 @@ class App:
         self._login_cancel = None
         self._login_dialog = None
         self._login_busy = False
+        self.launch_icon_status_var = tk.StringVar(value="")
+        self.launch_sound_status_var = tk.StringVar(value="")
+        self.launch_shortcut_status_var = tk.StringVar(value="")
+        self.launch_style_note_var = tk.StringVar(value="")
+        self._launch_icon_photo_ref = None
+        self._shortcut_busy = False
+        self._launch_splash = None
+        self._launch_splash_job = None
+        self._launch_effect_ts = 0.0
+        self._splash_icon_cache = {}
 
         self._debounce = None
         self._dl_active = False
@@ -716,6 +864,7 @@ class App:
         self._build_page_flags()
         self._build_page_cursors()
         self._build_page_themes()
+        self._build_page_launchstyle()
         self._build_page_settings()
         self._build_page_log()
         self._load_into_ui()
@@ -4026,6 +4175,490 @@ class App:
         except tk.TclError:
             pass
 
+    # -- страница «Стиль запуска» --------------------------------------------------------
+
+    def _build_page_launchstyle(self):
+        c = self.c
+        pad = self._scroll_page("launchstyle")
+
+        self._page_header(
+            pad, "✦", "Стиль запуска",
+            "Своя иконка, звук и экран при запуске. Файлы Roblox "
+            "не изменяются — только ярлыки, и их можно вернуть.")
+
+        inner = self._card(
+            pad, title="Иконка",
+            subtitle="Превью экрана запуска и иконка для ярлыков Roblox",
+            glyph="◈")
+        row = tk.Frame(inner, bg=c["surface"])
+        row.pack(fill="x", pady=(10, 0))
+        self.launch_icon_box = tk.Frame(
+            row, bg=c["surface2"], width=96, height=96,
+            highlightthickness=1, highlightbackground=c["border"])
+        self.launch_icon_box.pack(side="left")
+        self.launch_icon_box.pack_propagate(False)
+        self.launch_icon_label = tk.Label(
+            self.launch_icon_box, text="✦", bg=c["surface2"],
+            fg=c["muted"], font=("Segoe UI", 26, "bold"))
+        self.launch_icon_label.pack(fill="both", expand=True)
+        info = tk.Frame(row, bg=c["surface"])
+        info.pack(side="left", fill="both", expand=True, padx=(16, 0))
+        tk.Label(info, textvariable=self.launch_icon_status_var,
+                 bg=c["surface"], fg=c["text"],
+                 font=("Segoe UI", 11, "bold"), anchor="w",
+                 justify="left", wraplength=520).pack(fill="x")
+        self._hint(
+            info, "PNG, JPG, WEBP, BMP или ICO. Лаунчер сам сделает "
+                  "многоразмерную иконку 16–256 px.", wrap=520)
+        row_btns = tk.Frame(inner, bg=c["surface"])
+        row_btns.pack(fill="x", pady=(12, 0))
+        self._button(row_btns, "Выбрать иконку", self.choose_launch_icon,
+                     kind="primary", side="left")
+        self.btn_launch_icon_remove = self._button(
+            row_btns, "Убрать", self.remove_launch_icon_ui,
+            side="left", padx=8)
+        row_short = tk.Frame(inner, bg=c["surface"])
+        row_short.pack(fill="x", pady=(8, 0))
+        self.btn_shortcut_apply = self._button(
+            row_short, "Применить к ярлыкам",
+            self.apply_launch_shortcut_icon, side="left")
+        self.btn_shortcut_restore = self._button(
+            row_short, "Вернуть ярлыки", self.restore_launch_shortcuts,
+            side="left", padx=8)
+        tk.Label(inner, textvariable=self.launch_shortcut_status_var,
+                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                 anchor="w", wraplength=560, justify="left").pack(
+                     fill="x", pady=(9, 0))
+        self._hint(
+            inner,
+            "Меняются только ярлыки Roblox на рабочем столе, в «Пуске» "
+            "и на панели задач. Перед заменой каждый ярлык копируется "
+            "в Launch\\shortcuts_backup, «Вернуть ярлыки» откатывает "
+            "изменения.", wrap=560)
+
+        inner2 = self._card(
+            pad, title="Звук запуска",
+            subtitle="Короткий сигнал при старте игры", glyph="♪")
+        self.var_launch_sound = tk.BooleanVar(
+            value=bool(self.cfg.get("launch_sound", True)))
+        self._checkbox(
+            inner2, "Играть звук при запуске игры",
+            self.var_launch_sound,
+            command=self._save_launch_sound_flag).pack(
+                anchor="w", pady=(6, 8))
+        tk.Label(inner2, textvariable=self.launch_sound_status_var,
+                 bg=c["surface"], fg=c["text"],
+                 font=("Segoe UI", 10, "bold"), anchor="w",
+                 wraplength=560).pack(fill="x")
+        row_sound = tk.Frame(inner2, bg=c["surface"])
+        row_sound.pack(fill="x", pady=(9, 0))
+        self._button(row_sound, "Выбрать звук", self.choose_launch_sound,
+                     kind="primary", side="left")
+        self._button(row_sound, "Послушать",
+                     self.play_launch_sound_preview, side="left", padx=8)
+        self._button(row_sound, "Стоп", self.stop_launch_sound_preview,
+                     side="left")
+        self._button(row_sound, "Убрать", self.remove_launch_sound_ui,
+                     side="left", padx=8)
+        self._hint(
+            inner2, "WAV или MP3 до 12 МБ. Звук проигрывает лаунчер "
+                    "через Windows; звуки и файлы Roblox не заменяются.",
+            wrap=560)
+
+        inner3 = self._card(
+            pad, title="Экран запуска",
+            subtitle="Что показывать, пока Roblox открывается",
+            glyph="✦")
+        row_style = tk.Frame(inner3, bg=c["surface"])
+        row_style.pack(fill="x", pady=(9, 0))
+        self.launch_style_buttons = {}
+        for key in ("off", "minimal", "card"):
+            btn = self._button(
+                row_style, LAUNCH_STYLE_LABELS[key],
+                lambda k=key: self.set_launch_splash(k),
+                side="left", padx=(0, 8))
+            self.launch_style_buttons[key] = btn
+        self._button(row_style, "Показать",
+                     self.preview_launch_splash, kind="primary",
+                     side="left", padx=(10, 0))
+        tk.Label(inner3, textvariable=self.launch_style_note_var,
+                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                 anchor="w", justify="left", wraplength=560).pack(
+                     fill="x", pady=(9, 0))
+        self._hint(
+            inner3, "Экран — отдельное окно лаунчера поверх игры. "
+                    "Он закрывается сам или по клику; клиент Roblox "
+                    "не патчится.", wrap=560)
+
+        inner4 = self._card(pad, title="Файлы", glyph="ⓘ")
+        tk.Label(inner4, text=str(LAUNCH_DIR), bg=c["surface"],
+                 fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+                 wraplength=560, justify="left").pack(fill="x")
+        row_files = tk.Frame(inner4, bg=c["surface"])
+        row_files.pack(fill="x", pady=(10, 0))
+        self._button(row_files, "Открыть папку стиля",
+                     self.open_launch_dir, side="left")
+        self._hint(inner4, "Иконка, звук и резервные копии ярлыков "
+                           "хранятся локально.", wrap=560)
+
+        self._refresh_launch_style_ui()
+
+    def _refresh_launch_style_ui(self):
+        self._refresh_launch_icon()
+        self._refresh_launch_sound()
+        self._refresh_launch_style_buttons()
+
+    def _refresh_launch_style_buttons(self):
+        active = self.cfg.get("launch_splash") or "card"
+        if active not in LAUNCH_STYLE_LABELS:
+            active = "card"
+        for key, btn in getattr(self, "launch_style_buttons", {}).items():
+            try:
+                btn.configure(
+                    text=("● " if key == active else "")
+                    + LAUNCH_STYLE_LABELS[key],
+                    highlightthickness=2 if key == active else 0,
+                    highlightbackground=(self.accent if key == active
+                                         else self.c["surface2"]))
+            except tk.TclError:
+                pass
+        try:
+            self.launch_style_note_var.set(LAUNCH_STYLE_NOTES[active])
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _splash_icon_photo(self, size=56):
+        if not HAVE_PIL:
+            return None
+        state = launch_icon_state()
+        source = state.get("preview") or state.get("icon")
+        if source is None and ICON_PNG.exists():
+            source = ICON_PNG
+        if source is None:
+            return None
+        try:
+            stamp = Path(source).stat().st_mtime_ns
+        except OSError:
+            stamp = 0
+        key = (str(source), stamp, int(size))
+        photo = self._splash_icon_cache.get(key)
+        if photo is not None:
+            return photo
+        try:
+            with Image.open(source) as raw:
+                image = raw.convert("RGBA").resize(
+                    (int(size), int(size)),
+                    getattr(getattr(Image, "Resampling", Image), "LANCZOS"))
+            photo = ImageTk.PhotoImage(image)
+        except Exception:  # noqa: BLE001 — битая картинка не должна ломать UI
+            return None
+        self._splash_icon_cache[key] = photo
+        if len(self._splash_icon_cache) > 6:
+            self._splash_icon_cache.pop(next(iter(self._splash_icon_cache)))
+        return photo
+
+    def _refresh_launch_icon(self):
+        state = launch_icon_state()
+        if state["custom"]:
+            self.launch_icon_status_var.set(
+                f"Своя иконка · {Path(state['icon']).name}")
+        else:
+            self.launch_icon_status_var.set(
+                "Стандартная — выбери PNG, JPG или ICO")
+        photo = self._splash_icon_photo(84)
+        self._launch_icon_photo_ref = photo
+        try:
+            if photo is not None:
+                self.launch_icon_label.configure(image=photo, text="")
+            else:
+                self.launch_icon_label.configure(image="", text="✦")
+        except tk.TclError:
+            pass
+        count = shortcut_backup_count()
+        self.launch_shortcut_status_var.set(
+            f"Резервных копий ярлыков: {count}" if count
+            else "Ярлыки пока не менялись")
+
+    def _refresh_launch_sound(self):
+        path = launch_sound_path()
+        if hasattr(self, "var_launch_sound"):
+            try:
+                self.var_launch_sound.set(
+                    bool(self.cfg.get("launch_sound", True)))
+            except tk.TclError:
+                pass
+        if path is None:
+            self.launch_sound_status_var.set("Свой звук не выбран")
+            return
+        try:
+            size = mb(path.stat().st_size)
+        except OSError:
+            size = "?"
+        name = str(self.cfg.get("launch_sound_name") or path.name)
+        self.launch_sound_status_var.set(f"Звук: {name} · {size} МБ")
+
+    def _launch_action_error(self, message):
+        self.status_var.set(message)
+        self.log(f"Стиль запуска: {message}")
+        if self.interactive:
+            messagebox.showwarning(APP_NAME, message, parent=self.root)
+
+    def choose_launch_icon(self):
+        path = filedialog.askopenfilename(
+            parent=self.root, title="Иконка запуска",
+            filetypes=[("Иконки и картинки",
+                        "*.png *.ico *.jpg *.jpeg *.webp *.bmp"),
+                       ("Все файлы", "*.*")])
+        if not path:
+            return
+        result = import_launch_icon(path)
+        if not result["ok"]:
+            self._launch_action_error(
+                f"Не удалось добавить иконку: {result['error']}")
+            return
+        self._refresh_launch_icon()
+        self.status_var.set("Иконка запуска обновлена")
+        self.log(f"Иконка запуска: {Path(path).name}")
+        if shortcut_backup_count():
+            self.apply_launch_shortcut_icon()
+
+    def remove_launch_icon_ui(self):
+        had_shortcuts = shortcut_backup_count() > 0
+        result = remove_launch_icon()
+        if had_shortcuts:
+            restored = restore_launch_icon_shortcuts()
+        else:
+            restored = None
+        self._refresh_launch_icon()
+        if not result["ok"]:
+            self._launch_action_error(
+                f"Иконка не удалилась: {result['error']}")
+            return
+        if restored is not None and not restored["ok"]:
+            self._launch_action_error(
+                "Иконка убрана, но ярлыки не вернулись: "
+                + "; ".join(restored["errors"][:2]))
+            return
+        if had_shortcuts:
+            text = "Своя иконка убрана, ярлыки восстановлены"
+        else:
+            text = "Своя иконка убрана"
+        self.status_var.set(text)
+        self.log(text)
+
+    def choose_launch_sound(self):
+        path = filedialog.askopenfilename(
+            parent=self.root, title="Звук запуска",
+            filetypes=[("Звуки WAV и MP3", "*.wav *.mp3"),
+                       ("Все файлы", "*.*")])
+        if not path:
+            return
+        result = import_launch_sound(path)
+        if not result["ok"]:
+            self._launch_action_error(
+                f"Не удалось добавить звук: {result['error']}")
+            return
+        self.cfg["launch_sound_name"] = Path(path).name[:80]
+        self.cfg["launch_sound"] = True
+        save_config(self.cfg)
+        self._refresh_launch_sound()
+        self.status_var.set("Звук запуска сохранён")
+        self.log(f"Звук запуска: {Path(path).name}")
+
+    def remove_launch_sound_ui(self):
+        result = remove_launch_sound()
+        self.cfg["launch_sound_name"] = ""
+        save_config(self.cfg)
+        self._refresh_launch_sound()
+        if result["ok"]:
+            self.status_var.set("Звук запуска убран")
+            self.log("Звук запуска удалён")
+        else:
+            self._launch_action_error(
+                f"Звук не удалился: {result['error']}")
+
+    def _save_launch_sound_flag(self):
+        self.cfg["launch_sound"] = bool(self.var_launch_sound.get())
+        save_config(self.cfg)
+        if self.cfg["launch_sound"]:
+            self.status_var.set("Звук при запуске включён")
+            self.log("Звук при запуске включён")
+        else:
+            stop_launch_sound()
+            self.status_var.set("Звук при запуске выключен")
+            self.log("Звук при запуске выключен")
+
+    def play_launch_sound_preview(self):
+        path = launch_sound_path()
+        if path is None:
+            self.launch_sound_status_var.set("Сначала выбери WAV или MP3")
+            return
+        if not play_launch_sound(path):
+            self.launch_sound_status_var.set(
+                "Не удалось проиграть — проверь формат файла")
+            return
+        self.status_var.set("Проигрываю звук запуска")
+        self.root.after(3500, self._refresh_launch_sound)
+
+    def stop_launch_sound_preview(self):
+        stop_launch_sound()
+        self._refresh_launch_sound()
+        self.status_var.set("Звук остановлен")
+
+    def set_launch_splash(self, style):
+        if style not in LAUNCH_STYLE_LABELS:
+            return
+        self.cfg["launch_splash"] = style
+        save_config(self.cfg)
+        self._refresh_launch_style_buttons()
+        self.status_var.set(
+            f"Экран запуска: {LAUNCH_STYLE_LABELS[style].lower()}")
+        self.log(f"Стиль запуска: {LAUNCH_STYLE_LABELS[style]}")
+
+    def preview_launch_splash(self):
+        style = self.cfg.get("launch_splash") or "card"
+        if style == "off":
+            style = "card"
+        self._show_launch_splash(
+            "Тестовая игра", "Так выглядит экран запуска",
+            duration=2800, force_style=style)
+
+    def open_launch_dir(self):
+        try:
+            LAUNCH_DIR.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(LAUNCH_DIR))
+        except OSError as exc:
+            self._launch_action_error(
+                f"Не удалось открыть папку: {exc}")
+
+    # -- ярлыки и эффект запуска -----------------------------------------------------
+
+    def apply_launch_shortcut_icon(self):
+        if self._shortcut_busy:
+            return
+        if not launch_icon_state()["custom"]:
+            self._launch_action_error("Сначала выбери свою иконку")
+            return
+        self._shortcut_busy = True
+        self._btn_state(self.btn_shortcut_apply, "ghost", False,
+                        text="Применяю…")
+        self.launch_shortcut_status_var.set("Ищу ярлыки Roblox…")
+        self.status_var.set("Меняю иконки ярлыков Roblox…")
+
+        def worker():
+            result = apply_launch_icon_to_shortcuts()
+            self.q.put(lambda: self._shortcut_apply_done(result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _shortcut_apply_done(self, result):
+        self._shortcut_busy = False
+        if self._closing:
+            return
+        try:
+            self._btn_state(self.btn_shortcut_apply, "ghost", True,
+                            text="Применить к ярлыкам")
+        except tk.TclError:
+            pass
+        self._refresh_launch_icon()
+        changed = int(result.get("changed") or 0)
+        errors = result.get("errors") or []
+        if changed:
+            text = f"Готово: обновлено ярлыков — {changed}"
+            if errors:
+                text += f", ошибок — {len(errors)}"
+            self.status_var.set(text)
+            self.log(f"Иконка ярлыков: {text}")
+            self.launch_shortcut_status_var.set(text)
+        else:
+            error = result.get("error") or "ярлыки не изменены"
+            self.status_var.set(error)
+            self.log(f"Иконка ярлыков: {error}")
+            self.launch_shortcut_status_var.set(error)
+
+    def restore_launch_shortcuts(self):
+        if self._shortcut_busy:
+            return
+        if not shortcut_backup_count():
+            self.launch_shortcut_status_var.set(
+                "Резервных копий нет — ярлыки не менялись")
+            self.status_var.set("Нечего восстанавливать")
+            return
+        if self.interactive and not messagebox.askyesno(
+                APP_NAME, "Вернуть исходные иконки ярлыков Roblox?",
+                parent=self.root):
+            return
+        result = restore_launch_icon_shortcuts()
+        self._refresh_launch_icon()
+        if result["ok"]:
+            text = f"Исходные ярлыки восстановлены: {result['restored']}"
+            self.status_var.set(text)
+            self.log(text)
+            self.launch_shortcut_status_var.set(text)
+        else:
+            text = ("Часть ярлыков не вернулась: "
+                    + "; ".join(result["errors"][:3]))
+            self.status_var.set("Не удалось вернуть все ярлыки")
+            self.log(f"Ярлыки: {text}")
+            self.launch_shortcut_status_var.set(text)
+
+    def _show_launch_splash(self, title, subtitle="Запускаю Roblox…",
+                            duration=None, force_style=None):
+        style = force_style or self.cfg.get("launch_splash") or "card"
+        if style == "off":
+            return None
+        self._hide_launch_splash()
+        try:
+            splash = LaunchSplash(self, title, subtitle, style)
+        except tk.TclError:
+            return None
+        if splash.win is None:
+            return None
+        self._launch_splash = splash
+        if duration is not None:
+            self._launch_splash_job = self.root.after(
+                duration, self._finish_launch_effect)
+        return splash
+
+    def _hide_launch_splash(self):
+        if self._launch_splash_job is not None:
+            try:
+                self.root.after_cancel(self._launch_splash_job)
+            except tk.TclError:
+                pass
+            self._launch_splash_job = None
+        splash, self._launch_splash = self._launch_splash, None
+        if splash is not None:
+            splash.close()
+
+    def _finish_launch_effect(self):
+        self._launch_splash_job = None
+        self._hide_launch_splash()
+
+    def _begin_launch_effect(self, title, subtitle="Запускаю Roblox…"):
+        self._launch_effect_ts = time.monotonic()
+        self._show_launch_splash(title, subtitle)
+        if self.cfg.get("launch_sound") and self.interactive:
+            path = launch_sound_path()
+            if path is not None:
+                play_launch_sound(path)
+
+    def _end_launch_effect(self, status=None):
+        if self._launch_splash is None:
+            return
+        if status:
+            self._launch_splash.set_status(status)
+        elapsed = time.monotonic() - (self._launch_effect_ts
+                                      or time.monotonic())
+        delay = max(450, 1700 - int(elapsed * 1000))
+        if self._launch_splash_job is not None:
+            try:
+                self.root.after_cancel(self._launch_splash_job)
+            except tk.TclError:
+                pass
+        self._launch_splash_job = self.root.after(
+            delay, self._finish_launch_effect)
+
     # -- страница «Настройки» ----------------------------------------------------------
 
     def _build_page_settings(self):
@@ -4262,6 +4895,8 @@ class App:
         self.var_default.set(self.cfg["default_place_id"])
         self.var_discord_rpc.set(bool(self.cfg.get("discord_rpc", True)))
         self.var_discord_id.set(self.cfg.get("discord_app_id") or "")
+        if hasattr(self, "var_launch_sound"):
+            self.var_launch_sound.set(bool(self.cfg.get("launch_sound", True)))
 
         start = ""
         if self.cfg["remember_last"] and self.cfg["last_place_id"]:
@@ -4478,6 +5113,8 @@ class App:
             return
         self._closing = True
         self._stop_presence()
+        self._hide_launch_splash()
+        stop_launch_sound()
         try:
             self.cfg["window_geometry"] = self.root.geometry()
         except tk.TclError:
@@ -4968,6 +5605,7 @@ class App:
                         text="Ищу Roblox…")
         self.status_var.set("Ищу Roblox…")
         self._rpc_set("Клиент Roblox", "Открываю клиент…")
+        self._begin_launch_effect("Roblox", "Ищу клиент Roblox…")
         threading.Thread(target=self._client_worker, daemon=True).start()
 
     def _client_worker(self):
@@ -5054,6 +5692,10 @@ class App:
             self.status_var.set("Не удалось — открыл Roblox в браузере")
             self.log("Прямой запуск не сработал, открыт сайт Roblox")
             webbrowser.open(DISCOVER_URL)
+        self._end_launch_effect(
+            "Roblox уже запущен" if outcome == "already"
+            else "Roblox запущен" if outcome in ("exe", "protocol")
+            else "Открываю сайт Roblox…")
 
     def _client_missing(self):
         if self._closing:
@@ -5063,6 +5705,7 @@ class App:
                         text="▶   ПРОСТО В ROBLOX")
         self._rpc_set("В меню", "Roblox не установлен")
         self.log("Клиент не найден — предлагаю скачать")
+        self._end_launch_effect("Roblox не установлен")
         if self.interactive and messagebox.askyesno(
                 APP_NAME, "Roblox не установлен.\n"
                 "Скачать официальный установщик?",
@@ -5142,12 +5785,15 @@ class App:
             return
         url = f"roblox://experiences/start?placeId={pid}"
         self._rpc_set(game, "Запускаю игру…")
+        self._begin_launch_effect(game or name or "Roblox",
+                                  "Передаю ссылку Roblox…")
         try:
             os.startfile(url)
         except OSError as exc:
             self.log(f"Ошибка запуска: {exc}")
             self.status_var.set("Ошибка запуска")
             self._rpc_set("В меню", "Ошибка запуска")
+            self._end_launch_effect("Ошибка запуска")
             if self.interactive:
                 messagebox.showerror(
                     APP_NAME,
@@ -5157,6 +5803,7 @@ class App:
         self.entry_var.set(pid)
         self.status_var.set(f"Запускаю {name or pid}…")
         self.log(f"Ссылка передана системе: {url}")
+        self._end_launch_effect(f"Запускаю {name or pid}…")
         self.root.after(
             10000, lambda g=game: self._rpc_set(g, "Играет в Roblox"))
         self._after_game_launch(pid, name)
@@ -5172,6 +5819,8 @@ class App:
         self.status_var.set(f"Вхожу под «{who}»…")
         self.log(f"Запуск под аккаунтом @{account.get('name')} "
                  f"(place {pid})")
+        self._begin_launch_effect(game or name or "Roblox",
+                                  "Подключаю аккаунт…")
         threading.Thread(
             target=self._account_launch_worker,
             args=(pid, name, game, account), daemon=True).start()
@@ -5202,12 +5851,14 @@ class App:
             self._rpc_set(game, "Играет в Roblox")
             self.root.after(
                 10000, lambda g=game: self._rpc_set(g, "Играет в Roblox"))
+            self._end_launch_effect(f"Запускаю {name or pid}…")
             self._after_game_launch(pid, name)
             return
         error = result.get("error") or "Не удалось войти под аккаунтом."
         self.log(f"Аккаунт: {error}")
         self.status_var.set("Не удалось войти под аккаунтом")
         self._rpc_set("В меню", "Ошибка аккаунта")
+        self._end_launch_effect("Не удалось войти")
         if self.interactive and messagebox.askyesno(
                 APP_NAME,
                 f"{error}\n\nЗапустить игру без аккаунта, как обычно?",
@@ -5953,6 +6604,116 @@ def run_selftest():
     except Exception as exc:  # noqa: BLE001
         failures.append(f"accounts test: {exc}")
 
+    # 6e) стиль запуска: иконка, звук, ярлыки с резервной копией
+    try:
+        import core as core_module
+        import wave
+
+        tiny_png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
+            "2mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "icon.png"
+            if ICON_PNG.exists():
+                source.write_bytes(ICON_PNG.read_bytes())
+            else:
+                source.write_bytes(tiny_png)
+            icon = root / "Launch" / "icon.ico"
+            preview = root / "Launch" / "icon_preview.png"
+            added = import_launch_icon(source, icon, preview)
+            if not added["ok"] or not icon.exists() or not preview.exists():
+                failures.append(f"стиль: иконка не импортирована {added}")
+            elif icon.stat().st_size <= 0:
+                failures.append("стиль: ICO записан пустым")
+            if not launch_icon_state(icon, preview)["custom"]:
+                failures.append("стиль: состояние иконки неверное")
+            bad_icon = root / "bad.png"
+            bad_icon.write_text("not an image", encoding="utf-8")
+            if import_launch_icon(bad_icon, icon, preview)["ok"]:
+                failures.append("стиль: текст принят за иконку")
+            removed_icon = remove_launch_icon(icon, preview)
+            if not removed_icon["ok"] or removed_icon["removed"] != 2:
+                failures.append(f"стиль: иконка не удалилась {removed_icon}")
+
+            sound_dir = root / "Launch"
+            wav = root / "sound.wav"
+            with wave.open(str(wav), "wb") as fh:
+                fh.setnchannels(1)
+                fh.setsampwidth(2)
+                fh.setframerate(8000)
+                fh.writeframes(b"\x00\x00" * 800)
+            added_sound = import_launch_sound(wav, sound_dir)
+            if (not added_sound["ok"]
+                    or launch_sound_path(sound_dir) is None):
+                failures.append(f"стиль: звук не импортирован {added_sound}")
+            else:
+                played = play_launch_sound(added_sound["path"])
+                stop_launch_sound()
+                if not played and os.name == "nt":
+                    print("  note: MCI не проиграл тестовый WAV — пропуск")
+            bad_sound = root / "bad.mp3"
+            bad_sound.write_bytes(b"not a sound")
+            if import_launch_sound(bad_sound, sound_dir)["ok"]:
+                failures.append("стиль: мусор принят за звук")
+            removed_sound = remove_launch_sound(sound_dir)
+            if not removed_sound["ok"] or removed_sound["removed"] < 1:
+                failures.append(f"стиль: звук не удалился {removed_sound}")
+
+            if os.name == "nt":
+                lnk = root / "Roblox Test.lnk"
+                made = core_module._run_powershell(
+                    "[Console]::OutputEncoding=[Text.Encoding]::UTF8\n"
+                    "$s=New-Object -ComObject WScript.Shell\n"
+                    f"$l=$s.CreateShortcut('{lnk}')\n"
+                    "$l.TargetPath='C:\\Windows\\notepad.exe'\n"
+                    "$l.IconLocation='C:\\Windows\\notepad.exe,0'\n"
+                    "$l.Save()\n")
+                if not made["ok"] or not lnk.exists():
+                    print("  note: тестовый ярлык не создан — "
+                          "проверка ярлыков пропущена")
+                else:
+                    found = core_module.find_roblox_shortcuts([root])
+                    if not found["ok"] or not found["items"]:
+                        failures.append(f"стиль: ярлык не найден {found}")
+                    else:
+                        original = lnk.read_bytes()
+                        shortcut_icon = root / "Launch" / "shortcut.ico"
+                        import_launch_icon(source, shortcut_icon, preview)
+                        state = root / "state.json"
+                        backups = root / "backup"
+                        applied = core_module.apply_launch_icon_to_shortcuts(
+                            [root], shortcut_icon, state, backups)
+                        if not applied["ok"] or applied["changed"] != 1:
+                            failures.append(
+                                f"стиль: иконка ярлыка не применена {applied}")
+                        elif core_module.shortcut_backup_count(state) != 1:
+                            failures.append(
+                                "стиль: резервная копия ярлыка не создана")
+                        check = core_module._run_powershell(
+                            "[Console]::OutputEncoding="
+                            "[Text.Encoding]::UTF8\n"
+                            "$s=New-Object -ComObject WScript.Shell\n"
+                            f"$l=$s.CreateShortcut('{lnk}')\n"
+                            "Write-Output $l.IconLocation\n")
+                        if str(shortcut_icon).lower() not in \
+                                check["output"].lower():
+                            failures.append(
+                                "стиль: иконка не попала в ярлык "
+                                f"{check['output']!r}")
+                        restored = (
+                            core_module.restore_launch_icon_shortcuts(
+                                state, backups))
+                        if (not restored["ok"]
+                                or restored["restored"] != 1):
+                            failures.append(
+                                f"стиль: ярлык не восстановлен {restored}")
+                        elif lnk.read_bytes() != original:
+                            failures.append(
+                                "стиль: ярлык отличается от исходного")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"launch style test: {exc}")
+
     # 7) пути записи флагов (регрессия на неверный путь Roblox/…)
     try:
         for path in client_settings_paths():
@@ -5996,6 +6757,12 @@ def run_selftest():
         core_module.ACCOUNTS_PATH = ui_data / "accounts.json"
         core_module.AVATARS_DIR = ui_data / "avatars"
         core_module.CONFIG_PATH = ui_data / "config.json"
+        ui_launch = ui_data / "Launch"
+        core_module.LAUNCH_DIR = ui_launch
+        core_module.LAUNCH_ICON_PATH = ui_launch / "icon.ico"
+        core_module.LAUNCH_ICON_PREVIEW = ui_launch / "icon_preview.png"
+        core_module.LAUNCH_SHORTCUT_BACKUP_DIR = ui_launch / "shortcuts_backup"
+        core_module.LAUNCH_SHORTCUT_BACKUP_PATH = ui_launch / "shortcuts.json"
 
         root = tk.Tk()
         root.withdraw()
@@ -6004,7 +6771,8 @@ def run_selftest():
         root.update()
 
         for page_key in ("game", "accounts", "favorites", "flags",
-                         "cursors", "themes", "settings", "log"):
+                         "cursors", "themes", "launchstyle", "settings",
+                         "log"):
             app.show_page(page_key)
             root.update()
             if app.current_page != page_key:
@@ -6015,6 +6783,12 @@ def run_selftest():
             failures.append("UI: нет списка аккаунтов")
         if not hasattr(app, "theme_sets_box"):
             failures.append("UI: нет списка своих тем")
+        if not hasattr(app, "launch_icon_status_var"):
+            failures.append("UI: нет статуса иконки запуска")
+        if not hasattr(app, "var_launch_sound"):
+            failures.append("UI: нет настройки звука запуска")
+        if not hasattr(app, "launch_style_buttons"):
+            failures.append("UI: нет выбора экрана запуска")
         if app._rpc is not None:
             failures.append("UI: presence запустился без интерактива")
         if app.discord_status_var.get() == "":
@@ -6138,6 +6912,27 @@ def run_selftest():
             if "последняя" not in app.update_status_var.get():
                 failures.append("UI: нет статуса последней версии")
 
+        # стиль запуска: переключение экрана и заставка
+        app.set_launch_splash("minimal")
+        root.update()
+        if app.cfg.get("launch_splash") != "minimal":
+            failures.append("UI: стиль запуска не сохранился")
+        if "●" not in app.launch_style_buttons["minimal"].cget("text"):
+            failures.append("UI: активный стиль запуска не отмечен")
+        splash = app._show_launch_splash(
+            "Тестовая игра", "Проверка экрана", force_style="card",
+            duration=500)
+        root.update()
+        if splash is None or splash.win is None:
+            failures.append("UI: экран запуска не открылся")
+        else:
+            app._hide_launch_splash()
+            root.update()
+            if splash.win is not None:
+                failures.append("UI: экран запуска не закрылся")
+        app.set_launch_splash("card")
+        root.update()
+
         # фото-фон, режим «только картинка» и вход через сайт
         photo_theme = create_theme_set(
             "Фото-тема", base="dark", tint="#00c48c", accent="#00c48c",
@@ -6233,7 +7028,7 @@ def run_selftest():
             print("  -", item)
         return 1
     print("SELFTEST OK: core, themes, accounts, frameless window, flags, "
-          "cursors, updates, UI rebuild — all good")
+          "cursors, launch style, updates, UI rebuild — all good")
     return 0
 
 

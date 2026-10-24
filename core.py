@@ -45,7 +45,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -69,6 +69,12 @@ THEME_SETS_DIR = CONFIG_DIR / "ThemeSets"
 ACCOUNTS_PATH = CONFIG_DIR / "accounts.json"
 AVATARS_DIR = CONFIG_DIR / "avatars"
 BROWSER_PROFILE_DIR = CONFIG_DIR / "browser_profile"
+LAUNCH_DIR = CONFIG_DIR / "Launch"
+LAUNCH_ICON_PATH = LAUNCH_DIR / "icon.ico"
+LAUNCH_ICON_PREVIEW = LAUNCH_DIR / "icon_preview.png"
+LAUNCH_SHORTCUT_BACKUP_DIR = LAUNCH_DIR / "shortcuts_backup"
+LAUNCH_SHORTCUT_BACKUP_PATH = LAUNCH_DIR / "shortcuts.json"
+LAUNCH_SOUND_MAX = 12 * 1024 * 1024
 CURSOR_SLOTS = (
     {"key": "shiftlock", "file": "MouseLockedCursor.png",
      "label": "ShiftLock",
@@ -171,6 +177,8 @@ ACCENT_PRESETS = [
     ("#ff5f9e", "Розовый"),
 ]
 
+SPLASH_STYLES = ("off", "minimal", "card")
+
 DEFAULT_CONFIG = {
     "auto_close": False,
     "save_history": True,
@@ -191,6 +199,9 @@ DEFAULT_CONFIG = {
     "window_geometry": "",
     "discord_rpc": True,
     "discord_app_id": "",
+    "launch_sound": True,
+    "launch_sound_name": "",
+    "launch_splash": "card",
 }
 
 # ---- FastFlags и бутстраперы -----------------------------------------------
@@ -315,9 +326,12 @@ def load_config(path=None):
 
     for flag in ("auto_close", "save_history", "remember_last",
                  "apply_flags_on_launch", "use_custom_cursors",
-                 "discord_rpc"):
+                 "discord_rpc", "launch_sound"):
         cfg[flag] = bool(cfg.get(flag))
     cfg["discord_app_id"] = valid_discord_app_id(cfg.get("discord_app_id"))
+    cfg["launch_sound_name"] = str(cfg.get("launch_sound_name") or "").strip()[:80]
+    splash = str(cfg.get("launch_splash") or "").lower()
+    cfg["launch_splash"] = splash if splash in SPLASH_STYLES else "card"
     try:
         cfg["fps_limit"] = max(0, min(1000, int(cfg.get("fps_limit") or 0)))
     except (TypeError, ValueError):
@@ -1915,6 +1929,515 @@ def datacenter_regions():
     except Exception:
         pass
     return ["Auto"]
+
+
+# ---- стиль запуска: иконка, звук, ярлыки --------------------------------------
+
+LAUNCH_ICON_MAX = 8 * 1024 * 1024
+LAUNCH_ICON_SIZES = ((256, 256), (128, 128), (64, 64),
+                     (48, 48), (32, 32), (16, 16))
+LAUNCH_SOUND_EXTS = (".wav", ".mp3")
+MCI_ALIAS = "maklyxa_launch_sound"
+_mci_lock = threading.Lock()
+
+
+def _launch_error(message):
+    return {"ok": False, "error": str(message), "path": None}
+
+
+def import_launch_icon(source, icon_path=None, preview_path=None):
+    """Сделать из картинки многоразмерный ICO и превью для интерфейса."""
+    source = Path(source)
+    icon_path = Path(icon_path or LAUNCH_ICON_PATH)
+    preview_path = Path(preview_path or LAUNCH_ICON_PREVIEW)
+    if not source.is_file():
+        return _launch_error("файл не найден")
+    try:
+        if source.stat().st_size > LAUNCH_ICON_MAX:
+            return _launch_error("иконка больше 8 МБ")
+    except OSError as exc:
+        return _launch_error(exc)
+    try:
+        from PIL import Image
+    except ImportError:
+        return _launch_error("нужен модуль Pillow")
+    try:
+        with Image.open(source) as raw:
+            image = raw.convert("RGBA")
+    except Exception:  # noqa: BLE001 — Pillow бросает разные типы
+        return _launch_error("не удалось прочитать картинку")
+    side = min(image.size)
+    if side <= 0:
+        return _launch_error("пустая картинка")
+    left = (image.width - side) // 2
+    top = (image.height - side) // 2
+    image = image.crop((left, top, left + side, top + side))
+    resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+    image = image.resize((256, 256), resample)
+    try:
+        icon_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(icon_path, format="ICO", sizes=list(LAUNCH_ICON_SIZES))
+        image.resize((112, 112), resample).save(preview_path, format="PNG")
+    except (OSError, ValueError) as exc:
+        return _launch_error(exc)
+    return {"ok": True, "error": "", "path": icon_path,
+            "preview": preview_path, "name": source.name}
+
+
+def remove_launch_icon(icon_path=None, preview_path=None):
+    removed = 0
+    errors = []
+    paths = (Path(icon_path or LAUNCH_ICON_PATH),
+             Path(preview_path or LAUNCH_ICON_PREVIEW))
+    for path in paths:
+        try:
+            if path.exists():
+                path.unlink()
+                removed += 1
+        except OSError as exc:
+            errors.append(str(exc))
+    return {"ok": not errors, "removed": removed,
+            "error": errors[0] if errors else ""}
+
+
+def launch_icon_state(icon_path=None, preview_path=None):
+    icon = Path(icon_path or LAUNCH_ICON_PATH)
+    preview = Path(preview_path or LAUNCH_ICON_PREVIEW)
+    custom = icon.is_file()
+    return {"custom": custom,
+            "icon": icon if custom else None,
+            "preview": preview if preview.is_file() else None}
+
+
+def _sound_signature_ok(path, ext):
+    try:
+        with Path(path).open("rb") as fh:
+            head = fh.read(12)
+    except OSError:
+        return False
+    if ext == ".wav":
+        return (len(head) >= 12 and head[:4] == b"RIFF"
+                and head[8:12] == b"WAVE")
+    if ext == ".mp3":
+        if head[:3] == b"ID3":
+            return True
+        return (len(head) >= 2 and head[0] == 0xFF
+                and (head[1] & 0xE0) == 0xE0)
+    return False
+
+
+def launch_sound_path(sound_dir=None):
+    base = Path(sound_dir or LAUNCH_DIR)
+    for name in ("sound.wav", "sound.mp3"):
+        path = base / name
+        if path.is_file():
+            return path
+    return None
+
+
+def import_launch_sound(source, sound_dir=None):
+    source = Path(source)
+    base = Path(sound_dir or LAUNCH_DIR)
+    ext = source.suffix.lower()
+    if not source.is_file():
+        return _launch_error("файл не найден")
+    if ext not in LAUNCH_SOUND_EXTS:
+        return _launch_error("нужен звук WAV или MP3")
+    try:
+        if source.stat().st_size > LAUNCH_SOUND_MAX:
+            return _launch_error("звук больше 12 МБ")
+    except OSError as exc:
+        return _launch_error(exc)
+    if not _sound_signature_ok(source, ext):
+        return _launch_error("файл не похож на WAV или MP3")
+    dest = base / f"sound{ext}"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        stop_launch_sound()
+        if source.resolve() != dest.resolve():
+            shutil.copyfile(source, dest)
+    except OSError as exc:
+        return _launch_error(exc)
+    for other in LAUNCH_SOUND_EXTS:
+        old = base / f"sound{other}"
+        if old != dest:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    return {"ok": True, "error": "", "path": dest, "name": source.name}
+
+
+def remove_launch_sound(sound_dir=None):
+    stop_launch_sound()
+    base = Path(sound_dir or LAUNCH_DIR)
+    removed = 0
+    errors = []
+    for ext in LAUNCH_SOUND_EXTS:
+        path = base / f"sound{ext}"
+        try:
+            if path.exists():
+                path.unlink()
+                removed += 1
+        except OSError as exc:
+            errors.append(str(exc))
+    return {"ok": not errors, "removed": removed,
+            "error": errors[0] if errors else ""}
+
+
+def _mci_send(command):
+    if os.name != "nt":
+        return 1
+    try:
+        winmm = ctypes.windll.winmm
+        winmm.mciSendStringW.argtypes = [
+            ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint,
+            ctypes.c_void_p]
+        winmm.mciSendStringW.restype = ctypes.c_uint
+        return winmm.mciSendStringW(command, None, 0, None)
+    except (AttributeError, OSError):
+        return 1
+
+
+def _mci_close():
+    _mci_send(f"stop {MCI_ALIAS}")
+    _mci_send(f"close {MCI_ALIAS}")
+
+
+def play_launch_sound(path=None):
+    """Проиграть WAV/MP3 асинхронно через Windows MCI."""
+    target = Path(path) if path else launch_sound_path()
+    if target is None or not target.is_file():
+        return False
+    kind = "mpegvideo" if target.suffix.lower() == ".mp3" else "waveaudio"
+    with _mci_lock:
+        _mci_close()
+        if _mci_send(f'open "{target}" type {kind} alias {MCI_ALIAS}'):
+            return False
+        if _mci_send(f"play {MCI_ALIAS} from 0"):
+            _mci_send(f"close {MCI_ALIAS}")
+            return False
+    return True
+
+
+def stop_launch_sound():
+    with _mci_lock:
+        _mci_close()
+
+
+def refresh_shell_icons():
+    if os.name != "nt":
+        return False
+    try:
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+        return True
+    except (AttributeError, OSError):
+        return False
+
+
+def _run_powershell(script, timeout=30):
+    if os.name != "nt":
+        return {"ok": False, "returncode": -1, "output": "",
+                "error": "только Windows"}
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+            capture_output=True, timeout=timeout,
+            creationflags=CREATE_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "returncode": -1, "output": "",
+                "error": str(exc)}
+    return {"ok": proc.returncode == 0, "returncode": proc.returncode,
+            "output": proc.stdout.decode("utf-8", "replace").strip(),
+            "error": proc.stderr.decode("utf-8", "replace").strip()}
+
+
+def _ps_payload(data):
+    raw = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    return base64.b64encode(raw).decode("ascii")
+
+
+def _shortcut_roots():
+    roots = []
+
+    def add(path):
+        if not path:
+            return
+        try:
+            value = Path(os.path.expandvars(str(path)))
+        except (OSError, ValueError):
+            return
+        if value not in roots:
+            roots.append(value)
+
+    if winreg is not None:
+        try:
+            with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion"
+                    r"\Explorer\User Shell Folders") as key:
+                for name in ("Desktop", "Programs", "Start Menu"):
+                    try:
+                        value, _kind = winreg.QueryValueEx(key, name)
+                    except OSError:
+                        continue
+                    add(value)
+        except OSError:
+            pass
+    home = Path.home()
+    add(home / "Desktop")
+    add(home / "OneDrive" / "Desktop")
+    public = os.getenv("PUBLIC")
+    if public:
+        add(Path(public) / "Desktop")
+    appdata = os.getenv("APPDATA")
+    if appdata:
+        add(Path(appdata) / "Microsoft" / "Windows" / "Start Menu"
+            / "Programs")
+        add(Path(appdata) / "Microsoft" / "Internet Explorer" / "Quick Launch"
+            / "User Pinned" / "TaskBar")
+    programdata = os.getenv("PROGRAMDATA")
+    if programdata:
+        add(Path(programdata) / "Microsoft" / "Windows" / "Start Menu"
+            / "Programs")
+    return roots
+
+
+_SHORTCUT_FIND_SCRIPT = """\
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$roots = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}')) | ConvertFrom-Json
+$found = @()
+foreach ($root in @($roots)) {
+  if (-not (Test-Path -LiteralPath $root)) { continue }
+  Get-ChildItem -LiteralPath $root -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+    $name = $_.BaseName
+    if ($name -notmatch '(?i)roblox') { return }
+    if ($name -match '(?i)studio|uninstall|deinstall') { return }
+    $found += [pscustomobject]@{ path = $_.FullName; name = $name }
+  }
+}
+if ($found.Count -eq 0) { Write-Output '[]' } else { Write-Output (ConvertTo-Json -InputObject $found -Compress -Depth 2) }
+"""
+
+_SHORTCUT_ICON_SCRIPT = """\
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$items = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}')) | ConvertFrom-Json
+$changed = 0
+$errors = @()
+$shell = New-Object -ComObject WScript.Shell
+foreach ($item in @($items)) {
+  try {
+    $lnk = $shell.CreateShortcut([string]$item.path)
+    $lnk.IconLocation = [string]$item.icon + ',0'
+    $lnk.Save()
+    $changed++
+  } catch {
+    $errors += [string]$item.path
+  }
+}
+$shell = $null
+[pscustomobject]@{ changed = $changed; errors = @($errors) } | ConvertTo-Json -Compress
+"""
+
+
+def find_roblox_shortcuts(roots=None, timeout=30):
+    """Найти ярлыки Roblox на рабочем столе, в «Пуске» и на панели задач."""
+    if os.name != "nt":
+        return {"ok": False, "items": [], "error": "только Windows"}
+    candidates = _shortcut_roots() if roots is None else list(roots)
+    existing = [str(Path(path)) for path in candidates
+                if Path(path).is_dir()]
+    if not existing:
+        return {"ok": True, "items": [], "error": ""}
+    script = _SHORTCUT_FIND_SCRIPT.replace("{payload}",
+                                           _ps_payload(existing))
+    result = _run_powershell(script, timeout=timeout)
+    if not result["ok"]:
+        return {"ok": False, "items": [],
+                "error": result["error"] or "PowerShell не сработал"}
+    try:
+        data = json.loads(result["output"] or "[]")
+    except ValueError:
+        return {"ok": False, "items": [],
+                "error": "не удалось разобрать ответ PowerShell"}
+    if isinstance(data, dict):
+        data = [data]
+    items = []
+    seen = set()
+    for entry in data if isinstance(data, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path") or "")
+        if not path.lower().endswith(".lnk"):
+            continue
+        key = os.path.normcase(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({"path": path,
+                      "name": str(entry.get("name")
+                                  or Path(path).stem)})
+    return {"ok": True, "items": items, "error": ""}
+
+
+def _set_shortcuts_icon(entries, timeout=30):
+    if not entries:
+        return {"ok": True, "changed": 0, "errors": []}
+    script = _SHORTCUT_ICON_SCRIPT.replace("{payload}",
+                                           _ps_payload(entries))
+    result = _run_powershell(script, timeout=timeout)
+    if not result["ok"]:
+        return {"ok": False, "changed": 0,
+                "errors": [result["error"] or "PowerShell не сработал"]}
+    try:
+        data = json.loads(result["output"] or "{}")
+    except ValueError:
+        return {"ok": False, "changed": 0,
+                "errors": ["не удалось разобрать ответ PowerShell"]}
+    if not isinstance(data, dict):
+        data = {}
+    errors = data.get("errors") or []
+    if isinstance(errors, str):
+        errors = [errors]
+    try:
+        changed = int(data.get("changed") or 0)
+    except (TypeError, ValueError):
+        changed = 0
+    return {"ok": not errors, "changed": changed,
+            "errors": [str(item) for item in errors]}
+
+
+def _load_launch_shortcut_state(state_path=None):
+    data = read_json_dict(Path(state_path or LAUNCH_SHORTCUT_BACKUP_PATH))
+    raw = data.get("items")
+    if not isinstance(raw, list):
+        return []
+    items = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        path = str(entry.get("path") or "")
+        backup = str(entry.get("backup") or "")
+        if not path or not backup:
+            continue
+        items.append({"path": path, "backup": backup,
+                      "name": str(entry.get("name") or Path(path).stem)})
+    return items
+
+
+def _save_launch_shortcut_state(items, state_path=None):
+    return write_json_dict(
+        Path(state_path or LAUNCH_SHORTCUT_BACKUP_PATH), {"items": items})
+
+
+def shortcut_backup_count(state_path=None):
+    return len(_load_launch_shortcut_state(state_path))
+
+
+def _shortcut_backup_file(target, backup_dir):
+    digest = hashlib.sha1(
+        os.path.normcase(str(target)).encode("utf-8")).hexdigest()[:20]
+    return Path(backup_dir) / f"{digest}_{Path(target).name}"
+
+
+def apply_launch_icon_to_shortcuts(roots=None, icon_path=None,
+                                   state_path=None, backup_dir=None,
+                                   timeout=30):
+    """Поставить свою иконку на ярлыки Roblox, сохранив копии оригиналов."""
+    icon = Path(icon_path or LAUNCH_ICON_PATH)
+    if not icon.is_file():
+        return {"ok": False, "found": 0, "changed": 0, "errors": [],
+                "error": "сначала добавь свою иконку"}
+    found = find_roblox_shortcuts(roots, timeout=timeout)
+    if not found["ok"]:
+        return {"ok": False, "found": 0, "changed": 0, "errors": [],
+                "error": found["error"]}
+    items = found["items"]
+    if not items:
+        return {"ok": False, "found": 0, "changed": 0, "errors": [],
+                "error": "ярлыки Roblox не найдены"}
+    state_path = Path(state_path or LAUNCH_SHORTCUT_BACKUP_PATH)
+    backup_dir = Path(backup_dir or LAUNCH_SHORTCUT_BACKUP_DIR)
+    state = _load_launch_shortcut_state(state_path)
+    known = {os.path.normcase(item["path"]) for item in state}
+    errors = []
+    added = 0
+    for entry in items:
+        key = os.path.normcase(entry["path"])
+        if key in known:
+            continue
+        backup = _shortcut_backup_file(entry["path"], backup_dir)
+        try:
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(entry["path"], backup)
+        except OSError as exc:
+            errors.append(f"{entry['name']}: {exc}")
+            continue
+        state.append({"path": entry["path"], "backup": str(backup),
+                      "name": entry["name"]})
+        known.add(key)
+        added += 1
+    if added:
+        ok, err = _save_launch_shortcut_state(state, state_path)
+        if not ok:
+            errors.append(f"резервная копия: {err}")
+    result = _set_shortcuts_icon(
+        [{"path": entry["path"], "icon": str(icon)} for entry in items],
+        timeout=timeout)
+    errors.extend(result["errors"])
+    if result["changed"]:
+        refresh_shell_icons()
+    return {"ok": not errors and result["changed"] > 0,
+            "found": len(items), "changed": result["changed"],
+            "errors": errors,
+            "error": errors[0] if errors else ""}
+
+
+def restore_launch_icon_shortcuts(state_path=None, backup_dir=None):
+    """Вернуть ярлыки из резервных копий и очистить состояние."""
+    state_path = Path(state_path or LAUNCH_SHORTCUT_BACKUP_PATH)
+    backup_dir = Path(backup_dir or LAUNCH_SHORTCUT_BACKUP_DIR)
+    items = _load_launch_shortcut_state(state_path)
+    if not items:
+        return {"ok": True, "restored": 0, "errors": [], "error": ""}
+    errors = []
+    restored = 0
+    for item in items:
+        target = Path(item["path"])
+        backup = Path(item["backup"])
+        try:
+            if not target.parent.is_dir():
+                raise OSError("папка ярлыка недоступна")
+            if not backup.is_file():
+                raise OSError("резервная копия не найдена")
+            shutil.copy2(backup, target)
+            try:
+                backup.unlink()
+            except OSError:
+                pass
+            restored += 1
+        except OSError as exc:
+            errors.append(f"{target.name}: {exc}")
+    if restored:
+        refresh_shell_icons()
+    if not errors:
+        try:
+            state_path.unlink()
+        except OSError:
+            _save_launch_shortcut_state([], state_path)
+        try:
+            if backup_dir.is_dir() and not any(backup_dir.iterdir()):
+                backup_dir.rmdir()
+        except OSError:
+            pass
+    else:
+        _save_launch_shortcut_state(
+            [item for item in items if Path(item["backup"]).exists()],
+            state_path)
+    return {"ok": not errors, "restored": restored, "errors": errors,
+            "error": errors[0] if errors else ""}
 
 
 # ---- аккаунты Roblox ---------------------------------------------------------
