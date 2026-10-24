@@ -17,17 +17,22 @@ MaklyxaLauncher — ядро лаунчера (логика без интерф�
 замена PNG-курсоров клиента.
 """
 
+import base64
 import ctypes
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
+import socket
 import struct
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import zipfile
@@ -40,7 +45,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.6.3"
+VERSION = "1.6.4"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -54,6 +59,11 @@ OLD_CONFIG_PATH = OLD_CONFIG_DIR / "config.json"
 CURSOR_SETS_DIR = CONFIG_DIR / "CursorSets"
 CURSOR_STATE_PATH = CONFIG_DIR / "cursor_state.json"
 CURSOR_BACKUP_DIR = CONFIG_DIR / "cursor_backup"
+
+THEME_SETS_DIR = CONFIG_DIR / "ThemeSets"
+ACCOUNTS_PATH = CONFIG_DIR / "accounts.json"
+AVATARS_DIR = CONFIG_DIR / "avatars"
+BROWSER_PROFILE_DIR = CONFIG_DIR / "browser_profile"
 CURSOR_SLOTS = (
     {"key": "shiftlock", "file": "MouseLockedCursor.png",
      "label": "ShiftLock",
@@ -172,6 +182,7 @@ DEFAULT_CONFIG = {
     "cursor_set": "",
     "accent": "#00c48c",
     "theme": DEFAULT_THEME,
+    "custom_theme": "",
     "window_geometry": "",
     "discord_rpc": True,
     "discord_app_id": "",
@@ -317,8 +328,12 @@ def load_config(path=None):
     cfg["accent"] = (accent.lower()
                      if re.fullmatch(r"#[0-9a-fA-F]{6}", accent)
                      else DEFAULT_CONFIG["accent"])
+    cfg["custom_theme"] = str(cfg.get("custom_theme") or "").strip()[:48]
     theme = str(cfg.get("theme") or "").lower()
-    cfg["theme"] = theme if theme in THEMES else DEFAULT_THEME
+    if theme == "custom" and cfg["custom_theme"]:
+        cfg["theme"] = "custom"
+    else:
+        cfg["theme"] = theme if theme in THEMES else DEFAULT_THEME
     cfg["window_geometry"] = (str(cfg.get("window_geometry") or "")
                               if valid_geometry(cfg.get("window_geometry"))
                               else "")
@@ -1258,6 +1273,513 @@ def import_cursor_set(zip_path, name=None, sets_dir=None):
             "skipped": skipped, "error": ""}
 
 
+# ---- свои темы оформления -----------------------------------------------------
+
+THEME_TINTS = [
+    ("#00c48c", "Зелёная"),
+    ("#3b9eff", "Синяя"),
+    ("#a06bff", "Фиолетовая"),
+    ("#ff9f43", "Оранжевая"),
+    ("#ff5f9e", "Розовая"),
+    ("#e5484d", "Красная"),
+    ("#16c6c6", "Бирюзовая"),
+    ("#e8b93b", "Золотая"),
+]
+THEME_PALETTE_KEYS = ("bg", "panel", "surface", "surface2", "hover", "entry",
+                      "list", "border", "text", "muted", "on_accent",
+                      "titlebar")
+THEME_IMAGE_MAX = 20 * 1024 * 1024
+THEME_README = """\
+MaklyxaLauncher — свои темы
+===========================
+
+Каждая тема — папка внутри ThemeSets:
+  theme.json     цвета и настройки
+  background.*   картинка для шапки (PNG, JPG, WEBP, BMP или GIF)
+
+Тему можно создать в лаунчере (раздел «Темы»), поменять цвета,
+поставить свою картинку и экспортировать ZIP-архивом.
+
+Цвета задаются в theme.json в формате #RRGGBB. Картинка
+показывается в верхней части окна лаунчера.
+"""
+
+
+def _hex_ok(value):
+    return bool(re.fullmatch(r"#[0-9a-fA-F]{6}", str(value or "")))
+
+
+def mix_hex(first, second, ratio):
+    """Смешать два цвета; ratio — доля second."""
+    try:
+        a = [int(str(first).lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)]
+        b = [int(str(second).lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)]
+    except (ValueError, TypeError):
+        return first if _hex_ok(first) else "#000000"
+    ratio = max(0.0, min(1.0, float(ratio)))
+    return "#%02x%02x%02x" % tuple(
+        int(round(a[i] + (b[i] - a[i]) * ratio)) for i in range(3))
+
+
+def _luma(hex_color):
+    try:
+        r, g, b = (int(str(hex_color).lstrip("#")[i:i + 2], 16)
+                   for i in (0, 2, 4))
+    except (ValueError, TypeError):
+        return 0.5
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+
+
+def build_theme_palette(base="dark", tint="#00c48c", accent="#00c48c"):
+    """Палитра своей темы: базовая тёмная/светлая + оттенок и акцент."""
+    base_key = "light" if str(base).lower() == "light" else "dark"
+    tint = str(tint).lower() if _hex_ok(tint) else "#00c48c"
+    accent = str(accent).lower() if _hex_ok(accent) else "#00c48c"
+    source = THEMES[base_key]
+    ratios = ({
+        "bg": 0.06, "panel": 0.10, "surface": 0.14, "surface2": 0.20,
+        "hover": 0.26, "entry": 0.16, "list": 0.10, "border": 0.34,
+        "titlebar": 0.10,
+    } if base_key == "dark" else {
+        "bg": 0.035, "panel": 0.045, "surface": 0.035, "surface2": 0.075,
+        "hover": 0.12, "entry": 0.055, "list": 0.05, "border": 0.16,
+        "titlebar": 0.03,
+    })
+    palette = {key: mix_hex(source[key], tint, ratio)
+               for key, ratio in ratios.items()}
+    palette.update({
+        "text": source["text"],
+        "muted": source["muted"],
+        "on_accent": "#071510" if _luma(accent) > 0.5 else "#ffffff",
+        "alpha": 1.0,
+        "label": "",
+        "base": base_key,
+        "tint": tint,
+        "accent": accent,
+    })
+    return palette
+
+
+def valid_theme_set_name(name):
+    return valid_cursor_set_name(name)
+
+
+def ensure_theme_sets_dir(folder=None):
+    folder = Path(folder or THEME_SETS_DIR)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    readme = folder / "README.txt"
+    if not readme.exists():
+        try:
+            readme.write_text(THEME_README, encoding="utf-8-sig")
+        except OSError:
+            pass
+    return folder
+
+
+def _theme_sets_base(sets_dir=None):
+    return Path(sets_dir) if sets_dir is not None else THEME_SETS_DIR
+
+
+def list_theme_sets(sets_dir=None):
+    base = ensure_theme_sets_dir(sets_dir)
+    if base is None:
+        return []
+    try:
+        return sorted(
+            (p.name for p in base.iterdir()
+             if p.is_dir() and (p / "theme.json").is_file()),
+            key=str.lower)
+    except OSError:
+        return []
+
+
+def _unique_theme_set_name(base, wanted):
+    wanted = str(wanted or "").strip()
+    if not valid_theme_set_name(wanted):
+        wanted = "Моя тема"
+    name = wanted
+    index = 2
+    while (Path(base) / name).exists():
+        name = f"{wanted} ({index})"
+        index += 1
+    return name
+
+
+def theme_image_kind(path):
+    """Расширение по сигнатуре картинки или ''."""
+    try:
+        data = Path(path).read_bytes()[:32]
+    except OSError:
+        return ""
+    if data.startswith(PNG_SIGNATURE):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if data.startswith(b"BM"):
+        return ".bmp"
+    if (len(data) >= 12 and data[:4] == b"RIFF"
+            and data[8:12] == b"WEBP"):
+        return ".webp"
+    return ""
+
+
+def theme_image_kind_bytes(data):
+    if data.startswith(PNG_SIGNATURE):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if data.startswith(b"BM"):
+        return ".bmp"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    return ""
+
+
+def theme_image_file(name, sets_dir=None):
+    """Путь к картинке темы внутри папки набора (или None)."""
+    if not valid_theme_set_name(name):
+        return None
+    base = _theme_sets_base(sets_dir)
+    set_dir = base / str(name)
+    raw = read_json_dict(set_dir / "theme.json")
+    image = str(raw.get("image") or "")
+    if not image:
+        return None
+    candidate = set_dir / Path(image).name
+    try:
+        if candidate.is_file() and set_dir in candidate.resolve().parents:
+            return candidate
+    except OSError:
+        pass
+    return None
+
+
+def load_theme_palette(name, sets_dir=None):
+    """Палитра своей темы для интерфейса; None — темы нет."""
+    if not valid_theme_set_name(name):
+        return None
+    base = _theme_sets_base(sets_dir)
+    set_dir = base / str(name)
+    raw = read_json_dict(set_dir / "theme.json")
+    if not raw:
+        return None
+    base_key = "light" if str(raw.get("base")).lower() == "light" else "dark"
+    tint = str(raw.get("tint") or "").lower()
+    accent = str(raw.get("accent") or "").lower()
+    palette = raw.get("palette")
+    valid = (isinstance(palette, dict)
+             and all(_hex_ok(palette.get(key)) for key in THEME_PALETTE_KEYS))
+    if not valid or not _hex_ok(tint) or not _hex_ok(accent):
+        tint = tint if _hex_ok(tint) else "#00c48c"
+        accent = accent if _hex_ok(accent) else tint
+        palette = build_theme_palette(base_key, tint, accent)
+    else:
+        palette = dict(palette)
+    palette.update({
+        "label": str(name),
+        "base": base_key,
+        "tint": tint,
+        "accent": accent,
+        "alpha": 1.0,
+        "custom": True,
+        "image": None,
+    })
+    image = theme_image_file(name, sets_dir)
+    if image is not None:
+        palette["image"] = str(image)
+    return palette
+
+
+def theme_set_info(name, sets_dir=None):
+    palette = load_theme_palette(name, sets_dir)
+    if palette is None:
+        return {"ok": False, "error": "тема не найдена"}
+    image = palette.get("image")
+    width = height = 0
+    if image:
+        try:
+            width, height, _alpha = png_info(image)
+        except ValueError:
+            width = height = 0
+    return {"ok": True, "name": str(name), "base": palette["base"],
+            "tint": palette["tint"], "accent": palette["accent"],
+            "image": Path(image) if image else None,
+            "width": width, "height": height, "error": ""}
+
+
+def _write_theme_json(set_dir, name, base, tint, accent, palette, image=""):
+    data = {
+        "version": 1,
+        "name": str(name),
+        "base": base,
+        "tint": tint,
+        "accent": accent,
+        "image": image,
+        "palette": palette,
+    }
+    return write_json_dict(Path(set_dir) / "theme.json", data)
+
+
+def set_theme_image(name, source, sets_dir=None):
+    if not valid_theme_set_name(name):
+        return {"ok": False, "error": "тема не найдена", "image": ""}
+    base = ensure_theme_sets_dir(sets_dir)
+    if base is None:
+        return {"ok": False, "error": "папка тем недоступна", "image": ""}
+    set_dir = base / str(name)
+    if not (set_dir / "theme.json").is_file():
+        return {"ok": False, "error": "тема не найдена", "image": ""}
+    source = Path(source)
+    if not source.is_file():
+        return {"ok": False, "error": "файл не найден", "image": ""}
+    try:
+        if source.stat().st_size > THEME_IMAGE_MAX:
+            return {"ok": False, "error": "картинка больше 20 МБ",
+                    "image": ""}
+    except OSError as exc:
+        return {"ok": False, "error": str(exc), "image": ""}
+    kind = theme_image_kind(source)
+    if not kind:
+        return {"ok": False, "image": "",
+                "error": "нужна картинка PNG, JPG, WEBP, BMP или GIF"}
+    for old in set_dir.glob("background.*"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    filename = f"background{kind}"
+    try:
+        shutil.copyfile(source, set_dir / filename)
+    except OSError as exc:
+        return {"ok": False, "error": str(exc), "image": ""}
+    raw = read_json_dict(set_dir / "theme.json")
+    raw["image"] = filename
+    ok, err = write_json_dict(set_dir / "theme.json", raw)
+    if not ok:
+        return {"ok": False, "error": err, "image": ""}
+    return {"ok": True, "error": "", "image": filename,
+            "path": set_dir / filename}
+
+
+def remove_theme_image(name, sets_dir=None):
+    if not valid_theme_set_name(name):
+        return {"ok": False, "error": "тема не найдена"}
+    base = _theme_sets_base(sets_dir)
+    set_dir = base / str(name)
+    if not (set_dir / "theme.json").is_file():
+        return {"ok": False, "error": "тема не найдена"}
+    for old in set_dir.glob("background.*"):
+        try:
+            old.unlink()
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+    raw = read_json_dict(set_dir / "theme.json")
+    raw["image"] = ""
+    write_json_dict(set_dir / "theme.json", raw)
+    return {"ok": True, "error": ""}
+
+
+def create_theme_set(name=None, base="dark", tint="#00c48c",
+                     accent="#00c48c", image=None, sets_dir=None):
+    base_dir = ensure_theme_sets_dir(sets_dir)
+    if base_dir is None:
+        return {"ok": False, "name": "", "error": "папка тем недоступна"}
+    if name:
+        if not valid_theme_set_name(name):
+            return {"ok": False, "name": "", "error": "недопустимое имя темы"}
+        if (base_dir / str(name)).exists():
+            return {"ok": False, "name": "", "error": "тема уже существует"}
+        final_name = str(name).strip()
+    else:
+        final_name = _unique_theme_set_name(base_dir, "Моя тема")
+    base_key = "light" if str(base).lower() == "light" else "dark"
+    tint = str(tint).lower() if _hex_ok(tint) else "#00c48c"
+    accent = str(accent).lower() if _hex_ok(accent) else tint
+    set_dir = base_dir / final_name
+    try:
+        set_dir.mkdir()
+    except OSError as exc:
+        return {"ok": False, "name": "", "error": str(exc)}
+    palette = build_theme_palette(base_key, tint, accent)
+    ok, err = _write_theme_json(set_dir, final_name, base_key, tint, accent,
+                                palette)
+    if not ok:
+        shutil.rmtree(set_dir, ignore_errors=True)
+        return {"ok": False, "name": "", "error": err}
+    if image:
+        added = set_theme_image(final_name, image, sets_dir)
+        if not added["ok"]:
+            shutil.rmtree(set_dir, ignore_errors=True)
+            return {"ok": False, "name": "", "error": added["error"]}
+    return {"ok": True, "name": final_name, "error": ""}
+
+
+def update_theme_set(name, base=None, tint=None, accent=None, image=None,
+                     remove_image=False, sets_dir=None):
+    palette = load_theme_palette(name, sets_dir)
+    if palette is None:
+        return {"ok": False, "error": "тема не найдена"}
+    base_key = (str(base).lower() if base else palette["base"])
+    base_key = "light" if base_key == "light" else "dark"
+    tint = str(tint).lower() if tint and _hex_ok(tint) else palette["tint"]
+    accent = (str(accent).lower() if accent and _hex_ok(accent)
+              else palette["accent"])
+    new_palette = build_theme_palette(base_key, tint, accent)
+    set_dir = _theme_sets_base(sets_dir) / str(name)
+    raw = read_json_dict(set_dir / "theme.json")
+    image_name = str(raw.get("image") or "")
+    if remove_image:
+        removed = remove_theme_image(name, sets_dir)
+        if not removed["ok"]:
+            return removed
+        image_name = ""
+    elif image:
+        added = set_theme_image(name, image, sets_dir)
+        if not added["ok"]:
+            return added
+        image_name = added["image"]
+    ok, err = _write_theme_json(set_dir, name, base_key, tint, accent,
+                                new_palette, image_name)
+    return {"ok": ok, "name": str(name), "error": err}
+
+
+def rename_theme_set(old, new, sets_dir=None):
+    base = _theme_sets_base(sets_dir)
+    if not valid_theme_set_name(old):
+        return {"ok": False, "name": "", "error": "тема не найдена"}
+    old_path = base / str(old)
+    new = str(new or "").strip()
+    if not old_path.is_dir():
+        return {"ok": False, "name": "", "error": "тема не найдена"}
+    if not valid_theme_set_name(new):
+        return {"ok": False, "name": "", "error": "недопустимое имя темы"}
+    if new == old:
+        return {"ok": True, "name": new, "error": ""}
+    if (base / new).exists():
+        return {"ok": False, "name": "", "error": "тема с таким именем уже есть"}
+    try:
+        old_path.rename(base / new)
+    except OSError as exc:
+        return {"ok": False, "name": "", "error": str(exc)}
+    raw = read_json_dict(base / new / "theme.json")
+    raw["name"] = new
+    write_json_dict(base / new / "theme.json", raw)
+    return {"ok": True, "name": new, "error": ""}
+
+
+def delete_theme_set(name, sets_dir=None):
+    base = _theme_sets_base(sets_dir)
+    if not valid_theme_set_name(name):
+        return {"ok": False, "error": "тема не найдена"}
+    target = base / str(name)
+    if not target.is_dir():
+        return {"ok": False, "error": "тема не найдена"}
+    try:
+        shutil.rmtree(target)
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "error": ""}
+
+
+def export_theme_set(name, zip_path, sets_dir=None):
+    palette = load_theme_palette(name, sets_dir)
+    if palette is None:
+        return {"ok": False, "error": "тема не найдена", "files": 0}
+    set_dir = _theme_sets_base(sets_dir) / str(name)
+    zip_path = Path(zip_path)
+    files = 1
+    try:
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(set_dir / "theme.json", "theme.json")
+            image = theme_image_file(name, sets_dir)
+            if image is not None:
+                zf.write(image, image.name)
+                files += 1
+    except (OSError, zipfile.BadZipFile) as exc:
+        return {"ok": False, "error": str(exc), "files": 0}
+    return {"ok": True, "error": "", "files": files, "path": zip_path}
+
+
+def import_theme_set(zip_path, name=None, sets_dir=None):
+    base = ensure_theme_sets_dir(sets_dir)
+    if base is None:
+        return {"ok": False, "name": "", "error": "папка тем недоступна"}
+    zip_path = Path(zip_path)
+    if not zip_path.is_file():
+        return {"ok": False, "name": "", "error": "архив не найден"}
+    raw, image_data, image_ext = None, None, ""
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            members = [m for m in zf.infolist()
+                       if not m.is_dir() and m.file_size <= THEME_IMAGE_MAX]
+            theme_members = [m for m in members
+                             if m.filename.replace("\\", "/").rsplit("/", 1)[-1]
+                             == "theme.json"
+                             and m.filename.count("/") <= 1]
+            if not theme_members:
+                return {"ok": False, "name": "",
+                        "error": "в архиве нет theme.json"}
+            raw = json.loads(zf.read(theme_members[0]).decode("utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("theme.json повреждён")
+            image_name = str(raw.get("image") or "").rsplit("/", 1)[-1]
+            candidates = [m for m in members
+                          if m.filename.replace("\\", "/").rsplit("/", 1)[-1]
+                          == image_name and image_name]
+            if not candidates:
+                candidates = [m for m in members
+                              if m.filename.replace("\\", "/")
+                              .rsplit("/", 1)[-1].startswith("background.")]
+            if candidates:
+                image_data = zf.read(candidates[0])
+                image_ext = theme_image_kind_bytes(image_data)
+                if not image_ext:
+                    image_data = None
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        return {"ok": False, "name": "", "error": str(exc)}
+
+    wanted = str(name or raw.get("name") or zip_path.stem).strip()
+    if not valid_theme_set_name(wanted):
+        wanted = "Импорт"
+    final_name = _unique_theme_set_name(base, wanted)
+    base_key = "light" if str(raw.get("base")).lower() == "light" else "dark"
+    tint = str(raw.get("tint") or "").lower()
+    accent = str(raw.get("accent") or "").lower()
+    tint = tint if _hex_ok(tint) else "#00c48c"
+    accent = accent if _hex_ok(accent) else tint
+    palette = raw.get("palette")
+    if not (isinstance(palette, dict)
+            and all(_hex_ok(palette.get(key)) for key in THEME_PALETTE_KEYS)):
+        palette = build_theme_palette(base_key, tint, accent)
+    set_dir = base / final_name
+    try:
+        set_dir.mkdir()
+    except OSError as exc:
+        return {"ok": False, "name": "", "error": str(exc)}
+    image_name = f"background{image_ext}" if image_data else ""
+    try:
+        if image_data:
+            (set_dir / image_name).write_bytes(image_data)
+    except OSError as exc:
+        shutil.rmtree(set_dir, ignore_errors=True)
+        return {"ok": False, "name": "", "error": str(exc)}
+    ok, err = _write_theme_json(set_dir, final_name, base_key, tint, accent,
+                                palette, image_name)
+    if not ok:
+        shutil.rmtree(set_dir, ignore_errors=True)
+        return {"ok": False, "name": "", "error": err}
+    return {"ok": True, "name": final_name, "error": "",
+            "image": bool(image_data)}
+
+
 def find_bootstrapper_settings():
     """('froststrap'|'bloxstrap', путь к Settings.json) или (None, None)."""
     local_env = os.getenv("LOCALAPPDATA")
@@ -1285,6 +1807,850 @@ def datacenter_regions():
     except Exception:
         pass
     return ["Auto"]
+
+
+# ---- аккаунты Roblox ---------------------------------------------------------
+
+ROBLOX_COOKIE_NAME = ".ROBLOSECURITY"
+ROBLOX_LOGIN_URL = "https://auth.roblox.com/v2/login"
+ROBLOX_AUTHENTICATED_URL = "https://users.roblox.com/v1/users/authenticated"
+ROBLOX_TICKET_URL = "https://auth.roblox.com/v1/authentication-ticket"
+ROBLOX_AVATAR_URL = ("https://thumbnails.roblox.com/v1/users/"
+                     "avatar-headshot")
+
+_AUTH_BASE_HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "User-Agent": f"Mozilla/5.0 ({APP_NAME}/{VERSION})",
+    "Referer": "https://www.roblox.com/",
+    "Origin": "https://www.roblox.com",
+}
+
+
+def _http_request(url, method="GET", headers=None, body=None, cookie="",
+                  timeout=15):
+    """(status, headers, body). Сетевые ошибки — status 0."""
+    hdrs = dict(HTTP_HEADERS)
+    hdrs.update(headers or {})
+    if cookie:
+        hdrs["Cookie"] = f"{ROBLOX_COOKIE_NAME}={cookie}"
+    request = urllib.request.Request(url, data=body, headers=hdrs,
+                                     method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            return resp.status, resp.headers, resp.read()
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, exc.headers, exc.read()
+        except Exception:
+            return exc.code, exc.headers, b""
+    except Exception:
+        return 0, {}, b""
+
+
+def _json_body(body):
+    try:
+        data = json.loads(body.decode("utf-8", "replace"))
+        return data if isinstance(data, dict) else {}
+    except (ValueError, AttributeError):
+        return {}
+
+
+def _extract_roblox_cookie(headers):
+    try:
+        rows = headers.get_all("Set-Cookie") or []
+    except AttributeError:
+        rows = []
+    for row in rows:
+        match = re.search(
+            r"(?:^|;\s*)\.?ROBLOSECURITY=([^;]+)", str(row), re.I)
+        if match:
+            return match.group(1).strip().strip('"')
+    return ""
+
+
+def verify_roblox_cookie(cookie, timeout=15):
+    """Проверить сессию и получить id/имя аккаунта."""
+    if not cookie:
+        return {"ok": False, "error": "пустая сессия"}
+    status, _headers, body = _http_request(
+        ROBLOX_AUTHENTICATED_URL, headers={"Accept": "application/json"},
+        cookie=cookie, timeout=timeout)
+    if status != 200:
+        return {"ok": False,
+                "error": "Сессия Roblox недействительна — войди заново."}
+    data = _json_body(body)
+    user_id = str(data.get("id") or "")
+    name = str(data.get("name") or "")
+    if not user_id or not name:
+        return {"ok": False, "error": "Roblox не вернул данные аккаунта."}
+    return {"ok": True, "id": user_id, "name": name,
+            "display": str(data.get("displayName") or name)}
+
+
+def _login_error_text(status, headers, body):
+    data = _json_body(body)
+    detail = ""
+    for err in data.get("errors") or []:
+        if isinstance(err, dict):
+            detail = str(err.get("userFacingMessage")
+                         or err.get("message") or "")
+            if detail:
+                break
+    lowered = detail.lower()
+    challenge = ""
+    try:
+        challenge = str(headers.get("rblx-challenge-type") or "").lower()
+    except AttributeError:
+        pass
+    if status == 429 or "too many" in lowered or "rate limit" in lowered:
+        return ("Слишком много попыток входа. Подожди немного "
+                "или войди через браузер.")
+    if ("captcha" in lowered or "challenge" in lowered or challenge
+            or "funCaptcha".lower() in lowered):
+        return ("Roblox просит капчу или проверку. Войди через браузер — "
+                "это надёжнее.")
+    if "two" in lowered and "step" in lowered or "verification" in lowered:
+        return ("На аккаунте включена двухфакторная защита. "
+                "Войди через браузер.")
+    if status in (400, 401) or "incorrect" in lowered or "invalid" in lowered:
+        return "Неверный логин или пароль."
+    if status == 0:
+        return "Нет связи с Roblox. Проверь интернет."
+    if detail:
+        return f"Roblox: {detail}"
+    return f"Не удалось войти (HTTP {status})."
+
+
+def _post_with_csrf(url, payload, cookie="", timeout=20):
+    headers = dict(_AUTH_BASE_HEADERS)
+    status, resp_headers, body = _http_request(
+        url, "POST", headers, payload, cookie, timeout)
+    if status in (401, 403):
+        try:
+            token = resp_headers.get("x-csrf-token")
+        except AttributeError:
+            token = ""
+        if token:
+            headers["X-CSRF-TOKEN"] = token
+            status, resp_headers, body = _http_request(
+                url, "POST", headers, payload, cookie, timeout)
+    return status, resp_headers, body
+
+
+def roblox_login(username, password, timeout=20):
+    """Вход по логину и паролю. Пароль не сохраняется."""
+    username = str(username or "").strip()
+    password = str(password or "")
+    if not username or not password:
+        return {"ok": False, "error": "Введи логин и пароль."}
+    payload = json.dumps({
+        "ctype": "Username",
+        "cusername": username,
+        "cpassword": password,
+    }).encode("utf-8")
+    status, headers, body = _post_with_csrf(
+        ROBLOX_LOGIN_URL, payload, timeout=timeout)
+    cookie = _extract_roblox_cookie(headers)
+    if status == 200 and cookie:
+        profile = verify_roblox_cookie(cookie, timeout=timeout)
+        if profile.get("ok"):
+            return {"ok": True, "cookie": cookie, "profile": profile,
+                    "error": ""}
+        return {"ok": False, "error": profile.get("error") or
+                "Не удалось проверить аккаунт."}
+    return {"ok": False, "needs_browser": True,
+            "error": _login_error_text(status, headers, body)}
+
+
+def roblox_auth_ticket(cookie, timeout=20):
+    """Одноразовый тикет для запуска игры под аккаунтом."""
+    if not cookie:
+        return {"ok": False, "error": "Нет сессии аккаунта."}
+    status, headers, body = _post_with_csrf(
+        ROBLOX_TICKET_URL, b"{}", cookie, timeout)
+    try:
+        ticket = headers.get("rbx-authentication-ticket") or ""
+    except AttributeError:
+        ticket = ""
+    if status in (200, 204) and ticket:
+        return {"ok": True, "ticket": ticket, "error": ""}
+    if status in (401, 403):
+        return {"ok": False,
+                "error": "Сессия аккаунта истекла — войди заново."}
+    data = _json_body(body)
+    detail = ""
+    for err in data.get("errors") or []:
+        if isinstance(err, dict):
+            detail = str(err.get("userFacingMessage")
+                         or err.get("message") or "")
+            if detail:
+                break
+    return {"ok": False,
+            "error": f"Roblox не выдал тикет входа. {detail}".strip()}
+
+
+def game_launch_url(place_id, ticket):
+    """Ссылка roblox-player с тикетом аккаунта."""
+    tracker = random.randint(1000000000, 9999999999)
+    launcher = ("https://assetgame.roblox.com/game/PlaceLauncher.ashx"
+                f"?request=RequestGame&browserTrackerId={tracker}"
+                f"&placeId={place_id}&isPlayTogetherGame=false")
+    return ("roblox-player:1+launchmode:play+gameinfo:" + str(ticket)
+            + "+launchtime:" + str(int(time.time() * 1000))
+            + "+placelauncherurl:" + urllib.parse.quote(launcher, safe="")
+            + "+browsertrackerid:" + str(tracker)
+            + "+robloxLocale:ru_ru+gameLocale:ru_ru"
+            + "+channel:+LaunchExp:InApp")
+
+
+def fetch_roblox_avatar(user_id, timeout=12):
+    """PNG-аватар аккаунта (bytes) или None."""
+    if not str(user_id or "").isdigit():
+        return None
+    status, _headers, body = _http_request(
+        ROBLOX_AVATAR_URL + f"?userIds={user_id}&size=150x150"
+        "&format=Png&isCircular=true",
+        headers={"Accept": "application/json"}, timeout=timeout)
+    if status != 200:
+        return None
+    data = _json_body(body)
+    rows = data.get("data") or []
+    if not rows or not rows[0].get("imageUrl"):
+        return None
+    status, _headers, image = _http_request(
+        rows[0]["imageUrl"], headers={"Accept": "image/png"},
+        timeout=timeout)
+    if status == 200 and image.startswith(PNG_SIGNATURE):
+        return image
+    return None
+
+
+def _dpapi_call(data, protect):
+    if sys.platform != "win32":
+        return None
+    try:
+        from ctypes import wintypes
+
+        class DataBlob(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD),
+                        ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+        crypt32 = ctypes.windll.crypt32
+        kernel32 = ctypes.windll.kernel32
+        function = (crypt32.CryptProtectData if protect
+                    else crypt32.CryptUnprotectData)
+        function.argtypes = [
+            ctypes.POINTER(DataBlob), wintypes.LPCWSTR,
+            ctypes.POINTER(DataBlob), ctypes.c_void_p, ctypes.c_void_p,
+            wintypes.DWORD, ctypes.POINTER(DataBlob)]
+        function.restype = wintypes.BOOL
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        buffer = ctypes.create_string_buffer(data, len(data))
+        blob_in = DataBlob(len(data),
+                           ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char)))
+        blob_out = DataBlob()
+        if not function(ctypes.byref(blob_in), None, None, None, None, 0,
+                        ctypes.byref(blob_out)):
+            return None
+        try:
+            return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        finally:
+            kernel32.LocalFree(blob_out.pbData)
+    except Exception:
+        return None
+
+
+def protect_secret(text):
+    """DPAPI-шифрование секрета. (строка, ошибка) — ошибка пустая при успехе."""
+    raw = str(text or "").encode("utf-8")
+    if not raw:
+        return "", "пустой секрет"
+    blob = _dpapi_call(raw, True)
+    if blob:
+        return "dpapi:" + base64.b64encode(blob).decode("ascii"), ""
+    if sys.platform == "win32":
+        return "", "Не удалось зашифровать сессию Windows."
+    return "b64:" + base64.b64encode(raw).decode("ascii"), ""
+
+
+def unprotect_secret(value):
+    value = str(value or "")
+    try:
+        if value.startswith("dpapi:"):
+            blob = base64.b64decode(value[6:])
+            raw = _dpapi_call(blob, False)
+            return raw.decode("utf-8") if raw else ""
+        if value.startswith("b64:"):
+            return base64.b64decode(value[4:]).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        pass
+    return ""
+
+
+def _empty_accounts():
+    return {"active": "", "accounts": []}
+
+
+def _normalize_accounts(raw):
+    data = _empty_accounts()
+    if not isinstance(raw, dict):
+        return data
+    accounts, seen = [], set()
+    for item in raw.get("accounts") or []:
+        if not isinstance(item, dict):
+            continue
+        account_id = str(item.get("id") or "")[:64]
+        user_id = str(item.get("user_id") or "")
+        session = str(item.get("session") or "")
+        if not account_id or account_id in seen or not user_id.isdigit():
+            continue
+        if not session:
+            continue
+        seen.add(account_id)
+        try:
+            added = int(item.get("added") or 0)
+            used = int(item.get("last_used") or 0)
+        except (TypeError, ValueError):
+            added = used = 0
+        accounts.append({
+            "id": account_id,
+            "user_id": user_id,
+            "name": str(item.get("name") or "")[:64],
+            "display": str(item.get("display") or "")[:64],
+            "session": session,
+            "added": added,
+            "last_used": used,
+        })
+    data["accounts"] = accounts
+    active = str(raw.get("active") or "")
+    if active not in {item["id"] for item in accounts}:
+        active = accounts[0]["id"] if accounts else ""
+    data["active"] = active
+    return data
+
+
+def load_accounts(path=None):
+    raw = read_json_dict(Path(path or ACCOUNTS_PATH))
+    return _normalize_accounts(raw)
+
+
+def save_accounts(data, path=None):
+    return write_json_dict(Path(path or ACCOUNTS_PATH),
+                           _normalize_accounts(data))[0]
+
+
+def _account_meta(account):
+    return {"id": account["id"], "user_id": account["user_id"],
+            "name": account["name"], "display": account["display"],
+            "added": account["added"], "last_used": account["last_used"]}
+
+
+def accounts_state(path=None):
+    data = load_accounts(path)
+    return {"active": data["active"],
+            "accounts": [_account_meta(item) for item in data["accounts"]]}
+
+
+def account_avatar_path(user_id):
+    try:
+        path = Path(AVATARS_DIR) / f"{int(user_id)}.png"
+    except (TypeError, ValueError):
+        return None
+    return path if path.is_file() else None
+
+
+def _save_account_avatar(user_id, avatar_bytes):
+    if not avatar_bytes or not avatar_bytes.startswith(PNG_SIGNATURE):
+        return None
+    try:
+        Path(AVATARS_DIR).mkdir(parents=True, exist_ok=True)
+        path = Path(AVATARS_DIR) / f"{user_id}.png"
+        path.write_bytes(avatar_bytes)
+        return path
+    except OSError:
+        return None
+
+
+def add_account(cookie, profile=None, path=None, fetch_avatar=True):
+    cookie = str(cookie or "").strip().strip('"')
+    cookie = re.sub(r"^\.?ROBLOSECURITY=", "", cookie, flags=re.I).strip()
+    if not cookie:
+        return {"ok": False, "error": "Нет сессии Roblox."}
+    if profile is None:
+        profile = verify_roblox_cookie(cookie)
+    if not profile.get("ok"):
+        return {"ok": False, "error": profile.get("error")
+                or "Не удалось проверить аккаунт."}
+    session, error = protect_secret(cookie)
+    if error:
+        return {"ok": False, "error": error}
+    data = load_accounts(path)
+    now = int(time.time())
+    existing = next((item for item in data["accounts"]
+                     if item["user_id"] == str(profile["id"])), None)
+    if existing is not None:
+        existing["session"] = session
+        existing["name"] = str(profile.get("name") or existing["name"])[:64]
+        existing["display"] = str(profile.get("display")
+                                   or existing["display"])[:64]
+        existing["last_used"] = now
+        account_id = existing["id"]
+    else:
+        account_id = uuid.uuid4().hex
+        data["accounts"].append({
+            "id": account_id,
+            "user_id": str(profile["id"]),
+            "name": str(profile.get("name") or "")[:64],
+            "display": str(profile.get("display")
+                           or profile.get("name") or "")[:64],
+            "session": session,
+            "added": now,
+            "last_used": now,
+        })
+    if not data["active"]:
+        data["active"] = account_id
+    if not save_accounts(data, path):
+        return {"ok": False, "error": "Не удалось сохранить аккаунт."}
+    if fetch_avatar:
+        avatar = fetch_roblox_avatar(profile["id"])
+        if avatar:
+            _save_account_avatar(profile["id"], avatar)
+    account = next(item for item in data["accounts"]
+                   if item["id"] == account_id)
+    return {"ok": True, "error": "", "account": _account_meta(account),
+            "active": data["active"]}
+
+
+def set_active_account(account_id, path=None):
+    data = load_accounts(path)
+    if account_id not in {item["id"] for item in data["accounts"]}:
+        return {"ok": False, "error": "Аккаунт не найден."}
+    data["active"] = str(account_id)
+    if not save_accounts(data, path):
+        return {"ok": False, "error": "Не удалось сохранить выбор."}
+    return {"ok": True, "error": ""}
+
+
+def remove_account(account_id, path=None):
+    data = load_accounts(path)
+    account = next((item for item in data["accounts"]
+                    if item["id"] == account_id), None)
+    if account is None:
+        return {"ok": False, "error": "Аккаунт не найден."}
+    data["accounts"] = [item for item in data["accounts"]
+                        if item["id"] != account_id]
+    if data["active"] == account_id:
+        data["active"] = (data["accounts"][0]["id"]
+                          if data["accounts"] else "")
+    if not save_accounts(data, path):
+        return {"ok": False, "error": "Не удалось удалить аккаунт."}
+    if not any(item["user_id"] == account["user_id"]
+               for item in data["accounts"]):
+        try:
+            avatar = account_avatar_path(account["user_id"])
+            if avatar is not None:
+                avatar.unlink()
+        except OSError:
+            pass
+    return {"ok": True, "error": ""}
+
+
+def account_session(account_id, path=None):
+    data = load_accounts(path)
+    account = next((item for item in data["accounts"]
+                    if item["id"] == account_id), None)
+    return unprotect_secret(account["session"]) if account else ""
+
+
+def _touch_account(account_id, path=None):
+    data = load_accounts(path)
+    account = next((item for item in data["accounts"]
+                    if item["id"] == account_id), None)
+    if account is None:
+        return
+    account["last_used"] = int(time.time())
+    save_accounts(data, path)
+
+
+def launch_game_as(place_id, account_id=None, accounts_path=None):
+    """Запустить игру под выбранным аккаунтом через roblox-player."""
+    data = load_accounts(accounts_path)
+    account = None
+    if account_id:
+        account = next((item for item in data["accounts"]
+                        if item["id"] == account_id), None)
+    if account is None:
+        account = next((item for item in data["accounts"]
+                        if item["id"] == data["active"]), None)
+    if account is None and data["accounts"]:
+        account = data["accounts"][0]
+    if account is None:
+        return {"ok": False, "error": "Нет добавленных аккаунтов."}
+    cookie = unprotect_secret(account["session"])
+    if not cookie:
+        return {"ok": False, "account": _account_meta(account),
+                "error": "Сессия аккаунта повреждена — войди заново."}
+    ticket = roblox_auth_ticket(cookie)
+    if not ticket["ok"]:
+        return {"ok": False, "account": _account_meta(account),
+                "error": ticket["error"]}
+    url = game_launch_url(place_id, ticket["ticket"])
+    try:
+        os.startfile(url)
+    except OSError as exc:
+        return {"ok": False, "account": _account_meta(account),
+                "error": f"Не удалось открыть roblox-player: {exc}"}
+    _touch_account(account["id"], accounts_path)
+    return {"ok": True, "error": "", "account": _account_meta(account)}
+
+
+def close_roblox_players():
+    """Закрыть игровые процессы Roblox. Вызывать только после согласия."""
+    try:
+        subprocess.run(["taskkill", "/IM", "RobloxPlayerBeta.exe", "/F"],
+                       capture_output=True, timeout=15,
+                       creationflags=CREATE_NO_WINDOW)
+        return True
+    except Exception:
+        return False
+
+
+# ---- вход через браузер (Edge/Chrome + CDP) ----------------------------------
+
+def find_browser_exe():
+    local = os.getenv("LOCALAPPDATA", "")
+    roots = []
+    for env in ("ProgramFiles(x86)", "ProgramFiles", "ProgramW6432"):
+        base = os.getenv(env)
+        if base:
+            roots.append(Path(base) / "Microsoft" / "Edge" / "Application")
+    if local:
+        roots.append(Path(local) / "Microsoft" / "Edge" / "Application")
+    for env in ("ProgramFiles(x86)", "ProgramFiles", "ProgramW6432"):
+        base = os.getenv(env)
+        if base:
+            roots.append(Path(base) / "Google" / "Chrome" / "Application")
+    if local:
+        roots.append(Path(local) / "Google" / "Chrome" / "Application")
+    for root in roots:
+        for name in ("msedge.exe", "chrome.exe"):
+            candidate = root / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _free_port():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+    finally:
+        sock.close()
+
+
+def _cdp_json(url, timeout=1.5):
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+class _WebSocket:
+    """Минимальный WebSocket-клиент для локального DevTools (ws://)."""
+
+    def __init__(self, url, timeout=5.0):
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 80
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+        self.sock.settimeout(timeout)
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        request = (
+            f"GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n")
+        self.sock.sendall(request.encode("ascii"))
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise OSError("DevTools закрыл соединение")
+            response += chunk
+        if b" 101 " not in response.split(b"\r\n", 1)[0]:
+            raise OSError("DevTools не принял WebSocket")
+        self._id = 0
+        self._buffer = response.split(b"\r\n\r\n", 1)[1]
+
+    def _read_exact(self, size):
+        data = self._buffer
+        while len(data) < size:
+            chunk = self.sock.recv(size - len(data))
+            if not chunk:
+                raise OSError("DevTools закрыл соединение")
+            data += chunk
+        self._buffer = data[size:]
+        return data[:size]
+
+    def _send_frame(self, opcode, payload):
+        header = bytearray([0x80 | opcode])
+        length = len(payload)
+        if length < 126:
+            header.append(0x80 | length)
+        elif length < 65536:
+            header.append(0x80 | 126)
+            header += struct.pack(">H", length)
+        else:
+            header.append(0x80 | 127)
+            header += struct.pack(">Q", length)
+        mask = os.urandom(4)
+        header += mask
+        masked = bytes(byte ^ mask[index % 4]
+                       for index, byte in enumerate(payload))
+        self.sock.sendall(bytes(header) + masked)
+
+    def _recv_message(self):
+        while True:
+            first, second = self._read_exact(2)
+            opcode = first & 0x0F
+            fin = bool(first & 0x80)
+            length = second & 0x7F
+            if length == 126:
+                length = struct.unpack(">H", self._read_exact(2))[0]
+            elif length == 127:
+                length = struct.unpack(">Q", self._read_exact(8))[0]
+            if second & 0x80:
+                mask = self._read_exact(4)
+                payload = bytes(byte ^ mask[index % 4]
+                                for index, byte in enumerate(
+                                    self._read_exact(length)))
+            else:
+                payload = self._read_exact(length)
+            if opcode == 0x9:
+                self._send_frame(0xA, payload)
+                continue
+            if opcode == 0x8:
+                raise OSError("DevTools закрыл соединение")
+            if opcode in (0x0, 0x1):
+                if not fin:
+                    parts = [payload]
+                    while True:
+                        first2, second2 = self._read_exact(2)
+                        length2 = second2 & 0x7F
+                        if length2 == 126:
+                            length2 = struct.unpack(
+                                ">H", self._read_exact(2))[0]
+                        elif length2 == 127:
+                            length2 = struct.unpack(
+                                ">Q", self._read_exact(8))[0]
+                        part = self._read_exact(length2)
+                        parts.append(part)
+                        if first2 & 0x80:
+                            payload = b"".join(parts)
+                            break
+                try:
+                    return json.loads(payload.decode("utf-8", "replace"))
+                except ValueError:
+                    continue
+
+    def call(self, method, params=None, timeout=8.0):
+        self._id += 1
+        call_id = self._id
+        self._send_frame(0x1, json.dumps({
+            "id": call_id, "method": method, "params": params or {},
+        }).encode("utf-8"))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.sock.settimeout(max(0.2, deadline - time.time()))
+            message = self._recv_message()
+            if message and message.get("id") == call_id:
+                return message
+        return {}
+
+    def close(self):
+        try:
+            self._send_frame(0x8, b"")
+        except OSError:
+            pass
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def _browser_cookies(ws):
+    response = ws.call("Network.getAllCookies", timeout=6.0)
+    result = response.get("result") or {}
+    cookies = result.get("cookies") or []
+    for item in cookies:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("name")) != ROBLOX_COOKIE_NAME:
+            continue
+        domain = str(item.get("domain") or "").lower()
+        if "roblox.com" in domain and item.get("value"):
+            return str(item["value"])
+    return ""
+
+
+def _stop_browser(proc, browser_ws_url=""):
+    if browser_ws_url:
+        try:
+            ws = _WebSocket(browser_ws_url, timeout=3.0)
+            try:
+                ws.call("Browser.close", timeout=3.0)
+            finally:
+                ws.close()
+        except Exception:
+            pass
+    try:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            time.sleep(0.5)
+        if proc is not None and proc.poll() is None:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True, timeout=10,
+                creationflags=CREATE_NO_WINDOW)
+    except Exception:
+        pass
+
+
+def _cleanup_browser_profile(profile_dir):
+    path = Path(profile_dir)
+    for _ in range(6):
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            time.sleep(0.5)
+
+
+def browser_login(timeout=300, cancel_event=None, status_cb=None,
+                  profile_dir=None):
+    """Вход в Roblox в отдельном окне Edge/Chrome.
+
+    Лаунчер запускает браузер с временным профилем и читает cookie
+    через локальный DevTools. Основной профиль браузера не затрагивается.
+    """
+    def emit(text):
+        if status_cb is not None:
+            try:
+                status_cb(text)
+            except Exception:
+                pass
+
+    exe = find_browser_exe()
+    if exe is None:
+        return {"ok": False, "cancelled": False,
+                "error": "Edge или Chrome не найден. Войди по логину и паролю."}
+    profile = Path(profile_dir or BROWSER_PROFILE_DIR)
+    _cleanup_browser_profile(profile)
+    try:
+        profile.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {"ok": False, "cancelled": False, "error": str(exc)}
+
+    port = _free_port()
+    args = [
+        str(exe),
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile}",
+        "--no-first-run", "--no-default-browser-check",
+        "--disable-sync", "--disable-extensions",
+        "--remote-allow-origins=*",
+        "--app=https://www.roblox.com/login",
+    ]
+    proc = None
+    ws = None
+    browser_ws_url = ""
+    try:
+        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        emit("Открыл окно браузера — войди в Roblox.")
+        deadline = time.time() + timeout
+        ready_deadline = time.time() + 25
+        page_ws_url = ""
+        while time.time() < ready_deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                return {"ok": False, "cancelled": True, "error": "Отменено."}
+            try:
+                version = _cdp_json(f"http://127.0.0.1:{port}/json/version")
+                browser_ws_url = str(version.get("webSocketDebuggerUrl") or "")
+                break
+            except Exception:
+                time.sleep(0.5)
+        if not browser_ws_url:
+            return {"ok": False, "cancelled": False,
+                    "error": "Браузер не ответил. Попробуй войти по паролю."}
+
+        while time.time() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                return {"ok": False, "cancelled": True, "error": "Отменено."}
+            if ws is None:
+                try:
+                    targets = _cdp_json(
+                        f"http://127.0.0.1:{port}/json/list", timeout=2.0)
+                except Exception:
+                    targets = []
+                pages = [item for item in targets
+                         if item.get("type") == "page"
+                         and item.get("webSocketDebuggerUrl")]
+                pages.sort(key=lambda item: "roblox.com" not in str(
+                    item.get("url") or ""))
+                if pages:
+                    page_ws_url = str(pages[0]["webSocketDebuggerUrl"])
+                    try:
+                        ws = _WebSocket(page_ws_url)
+                        ws.call("Network.enable", timeout=4.0)
+                    except Exception:
+                        try:
+                            if ws is not None:
+                                ws.close()
+                        except Exception:
+                            pass
+                        ws = None
+                if ws is None:
+                    time.sleep(1.0)
+                    continue
+            try:
+                cookie = _browser_cookies(ws)
+            except Exception:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+                ws = None
+                time.sleep(0.5)
+                continue
+            if not cookie:
+                time.sleep(1.2)
+                continue
+            emit("Проверяю аккаунт…")
+            profile_info = verify_roblox_cookie(cookie)
+            if profile_info.get("ok"):
+                return {"ok": True, "cancelled": False, "cookie": cookie,
+                        "profile": profile_info, "error": ""}
+            time.sleep(1.0)
+        return {"ok": False, "cancelled": False,
+                "error": "Время ожидания входа вышло."}
+    except Exception as exc:
+        return {"ok": False, "cancelled": False,
+                "error": f"Браузерный вход не сработал: {exc}"}
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+        _stop_browser(proc, browser_ws_url)
+        _cleanup_browser_profile(profile)
 
 
 # ---- Discord Rich Presence ---------------------------------------------------

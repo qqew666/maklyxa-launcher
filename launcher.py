@@ -34,7 +34,13 @@ import webbrowser
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
+
+try:
+    from PIL import Image, ImageDraw, ImageTk
+    HAVE_PIL = True
+except Exception:  # Pillow не обязателен для запуска
+    HAVE_PIL = False
 
 from core import (
     ACCENT_PRESETS, APP_NAME, BOOT_BOOLS_FROST, BOOT_BOOLS_SHARED,
@@ -43,19 +49,28 @@ from core import (
     DISCORD_PORTAL_URL, DISCOVER_URL, FPS_CHOICES, FLAG_API, FLAG_FPS, FLAG_QUALITY,
     GRAPHICS_MODES, HTTP_HEADERS, INSTALLER_URL,
     THEMES, THEME_ORDER, VERSION, WINDOW_TITLE,
+    THEME_SETS_DIR, THEME_TINTS,
+    account_avatar_path, account_session, accounts_state, add_account,
     acquire_single_instance, apply_cursor_set, apply_fastflags,
-    bootstrapper_running, client_settings_paths, copy_current_cursor_set,
-    create_cursor_set, cursor_install_roots, cursor_set_files,
-    cursor_set_warnings, cursor_slot_path, cursor_state_info,
-    datacenter_regions, delete_cursor_set, ensure_cursor_sets_dir,
-    export_cursor_set, fetch_game_icon, fetch_game_info, fastflag_values,
-    find_bootstrapper_settings, find_player_exe, focus_roblox_window,
-    fmt_num, hit_test, import_cursor_set, list_cursor_sets, load_config,
-    mb, merge_flags_into, migrate_old_config, parse_place_id, png_info,
-    player_pids, probe_protocol, read_json_dict, remove_cursor_slot,
-    rename_cursor_set, resize_geometry, restore_custom_cursors,
-    roblox_status, save_config, set_cursor_slot, shade, trunc,
-    valid_cursor_set_name, valid_discord_app_id, valid_geometry, work_area,
+    bootstrapper_running, browser_login, build_theme_palette,
+    client_settings_paths, close_roblox_players, copy_current_cursor_set,
+    create_cursor_set, create_theme_set, cursor_install_roots,
+    cursor_set_files, cursor_set_warnings, cursor_slot_path,
+    cursor_state_info, datacenter_regions, delete_cursor_set,
+    delete_theme_set, ensure_cursor_sets_dir, ensure_theme_sets_dir,
+    export_cursor_set, export_theme_set, fetch_game_icon, fetch_game_info,
+    fastflag_values, find_bootstrapper_settings, find_player_exe,
+    focus_roblox_window, fmt_num, game_launch_url, hit_test, import_cursor_set,
+    import_theme_set, launch_game_as, list_cursor_sets, list_theme_sets,
+    load_config, load_theme_palette, mb, merge_flags_into,
+    migrate_old_config, parse_place_id, png_info, player_pids,
+    probe_protocol, protect_secret, read_json_dict, remove_account,
+    remove_cursor_slot, remove_theme_image, rename_cursor_set,
+    rename_theme_set, resize_geometry, restore_custom_cursors, roblox_login,
+    roblox_status, save_config, set_active_account, set_cursor_slot,
+    set_theme_image, shade, theme_set_info, trunc, unprotect_secret,
+    update_theme_set, valid_cursor_set_name,
+    valid_discord_app_id, valid_geometry, valid_theme_set_name, work_area,
     write_json_dict, DiscordPresence, discord_activity, discord_frame,
 )
 
@@ -66,6 +81,8 @@ SIDEBAR_W = 216
 MIN_W, MIN_H = 960, 640
 BORDER_PX = 6
 DEFAULT_SIZE = (1080, 760)
+BANNER_H = 150
+THEME_PREVIEW_H = 148
 
 CURSORS = {
     "n": "sb_v_double_arrow", "s": "sb_v_double_arrow",
@@ -75,16 +92,18 @@ CURSORS = {
 
 NAV_ITEMS = [
     ("game", "▶", "Игра"),
+    ("accounts", "◉", "Аккаунты"),
     ("favorites", "★", "Избранное"),
     ("flags", "⚑", "Флаги"),
     ("cursors", "◈", "Курсоры"),
+    ("themes", "◐", "Темы"),
     ("settings", "⚙", "Настройки"),
     ("log", "≡", "Журнал"),
 ]
 
 NAV_GROUPS = [
-    ("ЗАПУСК", ("game", "favorites")),
-    ("ПРЕДУСТАНОВЛЕННЫЕ\nМОДИФИКАЦИИ", ("flags", "cursors")),
+    ("ЗАПУСК", ("game", "accounts", "favorites")),
+    ("ПРЕДУСТАНОВЛЕННЫЕ\nМОДИФИКАЦИИ", ("flags", "cursors", "themes")),
     ("СИСТЕМА", ("settings", "log")),
 ]
 
@@ -526,8 +545,19 @@ class App:
         self.interactive = interactive
         self.cfg = load_config()
         self.theme_name = self.cfg["theme"]
-        self.c = THEMES[self.theme_name]
-        self.accent = self.cfg["accent"]
+        self.custom_theme_name = ""
+        self.c = THEMES.get(self.theme_name, THEMES[DEFAULT_THEME])
+        if self.theme_name == "custom":
+            palette = load_theme_palette(self.cfg.get("custom_theme") or "")
+            if palette is not None:
+                self.c = palette
+                self.custom_theme_name = self.cfg["custom_theme"]
+            else:
+                self.theme_name = DEFAULT_THEME
+                self.c = THEMES[DEFAULT_THEME]
+                self.cfg["theme"] = DEFAULT_THEME
+        self.accent = (self.c.get("accent") if self.theme_name == "custom"
+                       else self.cfg["accent"])
 
         self.q = queue.Queue()
         self.info_cache = {}
@@ -545,6 +575,28 @@ class App:
         self._rpc = None
         self._rpc_start_ts = time.time()
         self.discord_status_var = tk.StringVar(value="")
+        self.account_name_var = tk.StringVar(value="Не выбран")
+        self.account_user_var = tk.StringVar(value="Войти в аккаунт")
+        self.game_account_var = tk.StringVar(value="Аккаунт не выбран")
+        self.active_display_var = tk.StringVar(value="Аккаунт не выбран")
+        self.active_login_var = tk.StringVar(value="Добавь аккаунт, чтобы играть под ним")
+        self.active_meta_var = tk.StringVar(value="")
+        self._accounts = {"active": "", "accounts": []}
+        self._avatar_photos = {}
+        self._banner_photo = None
+        self._banner_cache = {}
+        self._banner_job = None
+        self._play_busy = False
+        self._theme_preview_photo = None
+        self._theme_preview_cache = {}
+        self._theme_active_set = None
+        self._theme_base = "dark"
+        self._theme_tint = "#00c48c"
+        self._theme_accent = "#00c48c"
+        self._theme_image_path = None
+        self._login_cancel = None
+        self._login_dialog = None
+        self._login_busy = False
 
         self._debounce = None
         self._dl_active = False
@@ -580,13 +632,16 @@ class App:
         self._build_styles()
         self._build_shell()
         self._build_page_game()
+        self._build_page_accounts()
         self._build_page_favorites()
         self._build_page_flags()
         self._build_page_cursors()
+        self._build_page_themes()
         self._build_page_settings()
         self._build_page_log()
         self._load_into_ui()
         self._refresh_lists()
+        self._refresh_account_ui()
         page = keep_page if keep_page in self.pages else "game"
         self.show_page(page)
         self.apply_accent(self.accent)
@@ -743,7 +798,7 @@ class App:
         self.max_button = max_btn
         self.frameless.on_max_change = self._on_max_change
 
-        theme_lbl = THEMES[self.theme_name]["label"]
+        theme_lbl = self.c["label"]
         self.theme_cycle_btn = tk.Button(
             titlebar, text=f"◐  {theme_lbl}", relief="flat", bd=0,
             font=("Segoe UI", 9), cursor="hand2", takefocus=False,
@@ -752,8 +807,21 @@ class App:
             command=self._cycle_theme)
         self.theme_cycle_btn.pack(side="right", padx=(0, 12))
         self._bind_hover(self.theme_cycle_btn, "ghost")
+
+        self.account_switch_btn = tk.Menubutton(
+            titlebar, text="◉  Войти", relief="flat", bd=0,
+            font=("Segoe UI", 9), cursor="hand2", takefocus=False,
+            bg=c["surface2"], fg=c["text"], activebackground=c["hover"],
+            activeforeground=c["text"], highlightthickness=0, padx=12)
+        self.account_menu = tk.Menu(
+            self.account_switch_btn, tearoff=0, bg=c["surface"],
+            fg=c["text"], activebackground=self.accent,
+            activeforeground=c["on_accent"], bd=0, font=("Segoe UI", 9))
+        self.account_switch_btn.configure(menu=self.account_menu)
+        self.account_switch_btn.pack(side="right", padx=(0, 8))
         self.frameless.excluded = {min_btn, max_btn, close_btn,
-                                   self.theme_cycle_btn}
+                                   self.theme_cycle_btn,
+                                   self.account_switch_btn}
 
         body = tk.Frame(root, bg=c["bg"])
         body.pack(fill="both", expand=True)
@@ -787,6 +855,14 @@ class App:
         tk.Frame(main, bg=c["border"], height=1).pack(
             fill="x", side="bottom")
 
+        self.banner_canvas = tk.Canvas(
+            main, height=BANNER_H, bg=c["bg"], highlightthickness=0, bd=0)
+        if self.c.get("image"):
+            self.banner_canvas.pack(fill="x", side="top")
+            self.banner_canvas.bind("<Configure>",
+                                    self._on_banner_configure)
+            self.root.after_idle(self._render_banner)
+
         content = tk.Frame(main, bg=c["bg"])
         content.pack(fill="both", expand=True)
         content.grid_rowconfigure(0, weight=1)
@@ -811,6 +887,37 @@ class App:
                 self.nav_buttons[key] = item
 
         tk.Frame(sidebar, bg=c["panel"]).pack(fill="both", expand=True)
+
+        # активный аккаунт — быстрый переход к переключателю
+        acc_card = tk.Frame(sidebar, bg=c["border"], cursor="hand2")
+        acc_card.pack(fill="x", padx=12, pady=(10, 0))
+        acc_inner = tk.Frame(acc_card, bg=c["surface"], padx=12, pady=8,
+                             cursor="hand2")
+        acc_inner.pack(fill="x", padx=1, pady=1)
+        acc_head = tk.Frame(acc_inner, bg=c["surface"], cursor="hand2")
+        acc_head.pack(fill="x")
+        acc_dot = tk.Label(acc_head, text="●", bg=c["surface"],
+                           fg=self.accent, font=("Segoe UI", 7),
+                           cursor="hand2")
+        acc_dot.pack(side="left")
+        tk.Label(acc_head, text="АККАУНТ", bg=c["surface"], fg=c["muted"],
+                 font=("Segoe UI", 8, "bold"), cursor="hand2").pack(
+                     side="left", padx=(6, 0))
+        self.sidebar_account_dot = acc_dot
+        acc_name = tk.Label(acc_inner, textvariable=self.account_name_var,
+                            bg=c["surface"], fg=c["text"],
+                            font=("Segoe UI", 9, "bold"), anchor="w",
+                            cursor="hand2")
+        acc_name.pack(fill="x", pady=(4, 0))
+        acc_user = tk.Label(acc_inner, textvariable=self.account_user_var,
+                            bg=c["surface"], fg=c["muted"],
+                            font=("Segoe UI", 8), anchor="w",
+                            cursor="hand2")
+        acc_user.pack(fill="x")
+        for widget in (acc_card, acc_inner, acc_head, acc_dot, acc_name,
+                       acc_user):
+            widget.bind("<Button-1>",
+                        lambda _e: self.show_page("accounts"))
 
         # статус Roblox внизу сайдбара
         card = tk.Frame(sidebar, bg=c["border"])
@@ -862,9 +969,101 @@ class App:
 
     def _cycle_theme(self):
         """Быстрая смена темы в верхней панели."""
-        idx = THEME_ORDER.index(self.theme_name) \
-            if self.theme_name in THEME_ORDER else 0
-        self.set_theme(THEME_ORDER[(idx + 1) % len(THEME_ORDER)])
+        order = list(THEME_ORDER)
+        custom_name = self._custom_theme_available()
+        if custom_name:
+            order.append("custom")
+        idx = order.index(self.theme_name) if self.theme_name in order else 0
+        target = order[(idx + 1) % len(order)]
+        if target == "custom":
+            self.set_theme("custom", custom_name=custom_name)
+        else:
+            self.set_theme(target)
+
+    def _custom_theme_available(self):
+        name = str(self.cfg.get("custom_theme") or "")
+        try:
+            return name if name and name in list_theme_sets() else ""
+        except Exception:
+            return ""
+
+    # -- баннер своей темы -------------------------------------------------------
+
+    def _on_banner_configure(self, _event=None):
+        if self._banner_job is not None:
+            try:
+                self.root.after_cancel(self._banner_job)
+            except tk.TclError:
+                pass
+        self._banner_job = self.root.after(120, self._render_banner)
+
+    def _render_banner(self, _event=None):
+        """Картинка темы в шапке контента, с затемнением под низ."""
+        self._banner_job = None
+        canvas = getattr(self, "banner_canvas", None)
+        source = str(self.c.get("image") or "")
+        if canvas is None or not source or not Path(source).is_file():
+            return
+        try:
+            width = max(320, canvas.winfo_width())
+            height = BANNER_H
+        except tk.TclError:
+            return
+        cache_key = (source, width, height)
+        photo = self._banner_cache.get(cache_key)
+        if photo is None:
+            try:
+                photo = self._make_banner_photo(source, width, height)
+            except Exception:
+                return
+            if photo is None:
+                return
+            self._banner_cache[cache_key] = photo
+            if len(self._banner_cache) > 6:
+                self._banner_cache.pop(next(iter(self._banner_cache)))
+        self._banner_photo = photo
+        try:
+            canvas.delete("all")
+            canvas.create_image(0, 0, image=photo, anchor="nw")
+            canvas.create_rectangle(0, height - 2, width, height,
+                                    fill=self.accent, outline="")
+        except tk.TclError:
+            pass
+
+    def _make_banner_photo(self, source, width, height):
+        c = self.c
+        if HAVE_PIL:
+            image = Image.open(source).convert("RGB")
+            scale = max(width / image.width, height / image.height)
+            size = (max(1, int(image.width * scale + 0.5)),
+                    max(1, int(image.height * scale + 0.5)))
+            image = image.resize(size, Image.LANCZOS)
+            left = max(0, (image.width - width) // 2)
+            top = max(0, (image.height - height) // 2)
+            image = image.crop((left, top, left + width, top + height))
+            image = image.convert("RGBA")
+            try:
+                bg = c["bg"].lstrip("#")
+                rgb = tuple(int(bg[i:i + 2], 16) for i in (0, 2, 4))
+            except (ValueError, TypeError):
+                rgb = (10, 12, 16)
+            overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+            tint_alpha = 62 if c.get("base") != "light" else 88
+            draw.rectangle([0, 0, width, height], fill=rgb + (tint_alpha,))
+            fade = min(84, height // 2)
+            for index in range(fade):
+                alpha = int(215 * (index / max(1, fade - 1)) ** 1.5)
+                y = height - fade + index
+                draw.line([(0, y), (width, y)], fill=rgb + (alpha,))
+            image = Image.alpha_composite(image, overlay).convert("RGB")
+            return ImageTk.PhotoImage(image)
+        photo = tk.PhotoImage(file=source)
+        factor = max(1, min(photo.width() // max(1, width),
+                            photo.height() // max(1, height)))
+        if factor > 1:
+            photo = photo.subsample(factor, factor)
+        return photo
 
     def _window_button(self, parent, glyph, command, danger=False):
         c = self.c
@@ -1052,7 +1251,7 @@ class App:
         else:
             base = self.c["surface2"]
             fg = self.c["text"]
-        factor = 0.95 if self.theme_name == "light" else 1.14
+        factor = 0.95 if self.c.get("base") == "light" else 1.14
         return base, fg, shade(base, factor)
 
     def _bind_hover(self, btn, kind):
@@ -1138,11 +1337,12 @@ class App:
         return ThemedCheck(self, parent, text, variable, command=command)
 
     def _warn_fg(self):
-        return "#b45309" if self.theme_name == "light" else "#ff9f43"
+        light = self.c.get("base") == "light"
+        return "#b45309" if light else "#ff9f43"
 
     def _vscroll(self, parent, command, trough, width=8):
         c = self.c
-        light = self.theme_name == "light"
+        light = c.get("base") == "light"
         thumb = self._lerp_hex(trough, c["text"], 0.13 if light else 0.20)
         hover = self._lerp_hex(trough, c["text"], 0.24 if light else 0.36)
         return ThinScrollbar(parent, command, trough, thumb, hover, width)
@@ -1256,6 +1456,23 @@ class App:
         self._button(row, "Вставить", self.paste_clipboard,
                      side="left", padx=(8, 0))
 
+        acc_strip = tk.Frame(inner, bg=c["surface2"], padx=11, pady=8)
+        acc_strip.pack(fill="x", pady=(12, 0))
+        acc_glyph = tk.Label(acc_strip, text="◉", bg=c["surface2"],
+                             fg=self.accent, font=("Segoe UI", 12, "bold"))
+        acc_glyph.pack(side="left")
+        self.accent_fgs.append(acc_glyph)
+        acc_text = tk.Frame(acc_strip, bg=c["surface2"])
+        acc_text.pack(side="left", fill="x", expand=True, padx=(10, 8))
+        tk.Label(acc_text, text="АККАУНТ ДЛЯ ЗАПУСКА", bg=c["surface2"],
+                 fg=c["muted"], font=("Segoe UI", 8, "bold"),
+                 anchor="w").pack(fill="x")
+        tk.Label(acc_text, textvariable=self.game_account_var,
+                 bg=c["surface2"], fg=c["text"], font=("Segoe UI", 9),
+                 anchor="w", justify="left", wraplength=420).pack(fill="x")
+        self._button(acc_strip, "Сменить",
+                     lambda: self.show_page("accounts"), side="right")
+
         self.btn_play = tk.Button(
             inner, text="▶   ИГРАТЬ ПО ID", relief="flat", bd=0,
             cursor="hand2", font=("Segoe UI", 13, "bold"), pady=12,
@@ -1275,6 +1492,593 @@ class App:
                      side="left", padx=8)
         self._button(actions, "Копировать ID", self.copy_id,
                      side="left")
+
+    # -- страница «Аккаунты» ---------------------------------------------------------
+
+    def _build_page_accounts(self):
+        c = self.c
+        pad = self._scroll_page("accounts")
+
+        self._page_header(
+            pad, "◉", "Аккаунты",
+            "Быстрый переключатель: выбери аккаунт — и следующая игра "
+            "запустится под ним. Войти можно по логину и паролю или через "
+            "браузер.")
+
+        row = tk.Frame(pad, bg=c["bg"])
+        row.pack(fill="x")
+
+        left = self._side_card(row, "Мои аккаунты", "left", glyph="◉")
+        self.accounts_box, _ = self._make_listbox(left, height=9)
+        self.accounts_box.bind("<Double-Button-1>",
+                               lambda _e: self._activate_selected_account())
+        btns = tk.Frame(left, bg=c["surface"])
+        btns.pack(fill="x", pady=(10, 0))
+        self._button(btns, "＋ Добавить", self._open_add_account_dialog,
+                     kind="primary", side="left")
+        self._button(btns, "Удалить", self._account_remove, side="left",
+                     padx=8)
+        self._hint(left, "Двойной клик — сделать аккаунт активным. "
+                         "Пароль не сохраняется: только зашифрованная "
+                         "сессия Roblox.", wrap=320)
+
+        right = self._side_card(row, "Активный аккаунт", "right", glyph="✓")
+        head = tk.Frame(right, bg=c["surface"])
+        head.pack(fill="x")
+        avatar = tk.Frame(head, bg=c["surface2"], width=84, height=84,
+                          highlightthickness=1,
+                          highlightbackground=c["border"])
+        avatar.pack(side="left")
+        avatar.pack_propagate(False)
+        self.account_avatar_label = tk.Label(
+            avatar, text="◉", bg=c["surface2"], fg=self.accent,
+            font=("Segoe UI", 26, "bold"))
+        self.account_avatar_label.pack(fill="both", expand=True)
+        self.accent_fgs.append(self.account_avatar_label)
+
+        col = tk.Frame(head, bg=c["surface"])
+        col.pack(side="left", fill="both", expand=True, padx=(16, 0))
+        tk.Label(col, textvariable=self.active_display_var, bg=c["surface"],
+                 fg=c["text"], font=("Segoe UI", 16, "bold"), anchor="w",
+                 justify="left", wraplength=280).pack(fill="x")
+        tk.Label(col, textvariable=self.active_login_var, bg=c["surface"],
+                 fg=self.accent, font=("Segoe UI", 10, "bold"),
+                 anchor="w").pack(fill="x", pady=(3, 3))
+        tk.Label(col, textvariable=self.active_meta_var, bg=c["surface"],
+                 fg=c["muted"], font=("Segoe UI", 8), anchor="w",
+                 justify="left", wraplength=280).pack(fill="x")
+
+        actions = tk.Frame(right, bg=c["surface"])
+        actions.pack(fill="x", pady=(14, 0))
+        self._button(actions, "Добавить аккаунт",
+                     self._open_add_account_dialog, kind="primary",
+                     side="left")
+        self._button(actions, "Обновить", self._refresh_account_ui,
+                     side="left", padx=8)
+
+        self.account_status_var = tk.StringVar(value="")
+        tk.Label(right, textvariable=self.account_status_var,
+                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                 anchor="w", justify="left", wraplength=330).pack(
+                     fill="x", pady=(12, 0))
+
+        info = self._card(pad, title="Как это работает", glyph="ⓘ")
+        for text in (
+            "Активный аккаунт применяется при запуске игры: лаунчер "
+            "получает одноразовый тикет Roblox и открывает клиент уже "
+            "под нужным аккаунтом.",
+            "Если Roblox уже запущен, лаунчер спросит, закрыть ли его "
+            "перед сменой аккаунта.",
+            "Вход через браузер открывает отдельное окно Edge/Chrome "
+            "с временным профилем — основной браузер не затрагивается.",
+            "Пароль нигде не сохраняется. Сессия Roblox лежит в "
+            "accounts.json и зашифрована средствами Windows (DPAPI).",
+        ):
+            tk.Label(info, text="•  " + text, bg=c["surface"],
+                     fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+                     justify="left", wraplength=560).pack(
+                         fill="x", pady=(3, 0))
+
+    def _active_account(self):
+        active = self._accounts.get("active") or ""
+        return next((item for item in self._accounts.get("accounts") or []
+                     if item["id"] == active), None)
+
+    @staticmethod
+    def _account_label(account):
+        display = account.get("display") or account.get("name") or "аккаунт"
+        login = account.get("name") or ""
+        if login and login.lower() != display.lower():
+            return f"{display}  @{login}"
+        return display
+
+    def _refresh_account_ui(self):
+        try:
+            self._accounts = accounts_state()
+        except Exception:
+            self._accounts = {"active": "", "accounts": []}
+        accounts = self._accounts.get("accounts") or []
+        active = self._active_account()
+        if active is not None:
+            display = (active.get("display") or active.get("name")
+                       or "Аккаунт")
+            login = f"@{active['name']}" if active.get("name") else ""
+            self.account_name_var.set(trunc(display, 20))
+            self.account_user_var.set(login or "Roblox")
+            self.game_account_var.set(
+                f"{display}  {login}".strip()
+                + "  ·  игра запустится под ним")
+            self.active_display_var.set(display)
+            self.active_login_var.set(login or "—")
+            meta = f"Roblox ID {active.get('user_id') or '—'}"
+            if active.get("last_used"):
+                meta += "  ·  последний запуск " + time.strftime(
+                    "%d.%m.%Y", time.localtime(active["last_used"]))
+            self.active_meta_var.set(meta)
+        else:
+            self.account_name_var.set("Не выбран")
+            self.account_user_var.set("Нажми, чтобы войти")
+            self.game_account_var.set(
+                "Аккаунт не выбран — игра запустится как обычно")
+            self.active_display_var.set("Аккаунт не выбран")
+            self.active_login_var.set("Добавь аккаунт, чтобы играть под ним")
+            self.active_meta_var.set("")
+
+        dot = getattr(self, "sidebar_account_dot", None)
+        if dot is not None:
+            try:
+                dot.configure(fg=self.accent if active else self.c["muted"])
+            except tk.TclError:
+                pass
+
+        box = getattr(self, "accounts_box", None)
+        if box is not None:
+            try:
+                box.delete(0, "end")
+                for account in accounts:
+                    mark = ("●  " if account["id"] == self._accounts["active"]
+                            else "     ")
+                    box.insert("end", mark + self._account_label(account))
+                if not accounts:
+                    box.insert("end", "   аккаунтов пока нет")
+                elif active is not None:
+                    index = [a["id"] for a in accounts].index(active["id"])
+                    box.selection_clear(0, "end")
+                    box.selection_set(index)
+                    box.see(index)
+            except (tk.TclError, ValueError):
+                pass
+
+        status = getattr(self, "account_status_var", None)
+        if status is not None:
+            try:
+                if active is not None:
+                    status.set(f"Аккаунтов: {len(accounts)}  ·  выбран "
+                               f"«{active.get('display') or active['name']}»")
+                elif accounts:
+                    status.set(f"Аккаунтов: {len(accounts)}  ·  активный "
+                               "не выбран")
+                else:
+                    status.set("Аккаунтов пока нет — добавь первый.")
+            except tk.TclError:
+                pass
+
+        self._set_account_avatar(active)
+        self._refresh_account_menu()
+
+    def _set_account_avatar(self, account):
+        label = getattr(self, "account_avatar_label", None)
+        if label is None:
+            return
+        photo = None
+        if account is not None:
+            photo = self._avatar_photo(account.get("user_id"), 84)
+        try:
+            if photo is not None:
+                self._account_avatar_photo = photo
+                label.configure(image=photo, text="")
+            else:
+                self._account_avatar_photo = None
+                name = ((account or {}).get("display")
+                        or (account or {}).get("name") or "?")
+                label.configure(image="", text=str(name)[:1].upper(),
+                                fg=self.accent)
+        except tk.TclError:
+            pass
+
+    def _avatar_photo(self, user_id, size):
+        path = account_avatar_path(user_id) if user_id else None
+        if path is None:
+            return None
+        try:
+            stamp = path.stat().st_mtime_ns
+        except OSError:
+            stamp = 0
+        key = (str(user_id), int(size), stamp)
+        cached = self._avatar_photos.get(key)
+        if cached is not None:
+            return cached
+        photo = None
+        try:
+            if HAVE_PIL:
+                image = Image.open(path).convert("RGBA").resize(
+                    (size, size), Image.LANCZOS)
+                photo = ImageTk.PhotoImage(image)
+            else:
+                image = tk.PhotoImage(file=str(path))
+                factor = max(1, -(-max(image.width(), image.height())
+                                  // max(1, size)))
+                if factor > 1:
+                    image = image.subsample(factor, factor)
+                photo = image
+        except Exception:
+            photo = None
+        if photo is not None:
+            self._avatar_photos[key] = photo
+            if len(self._avatar_photos) > 24:
+                self._avatar_photos.pop(next(iter(self._avatar_photos)))
+        return photo
+
+    def _refresh_account_menu(self):
+        menu = getattr(self, "account_menu", None)
+        button = getattr(self, "account_switch_btn", None)
+        if menu is None or button is None:
+            return
+        accounts = self._accounts.get("accounts") or []
+        active = self._active_account()
+        try:
+            menu.delete(0, "end")
+            if accounts:
+                label = (active.get("display") or active.get("name")
+                         if active is not None else "Войти")
+                button.configure(text=f"◉  {trunc(label, 18)}")
+                for account in accounts:
+                    mark = "✓  " if account.get("id") == self._accounts.get(
+                        "active") else "\u2003  "
+                    menu.add_command(
+                        label=mark + self._account_label(account),
+                        command=lambda a=account["id"]:
+                        self._choose_account(a))
+                menu.add_separator()
+                menu.add_command(label="Добавить аккаунт…",
+                                 command=self._open_add_account_dialog)
+                menu.add_command(label="Управление аккаунтами…",
+                                 command=lambda: self.show_page("accounts"))
+            else:
+                button.configure(text="◉  Войти")
+                menu.add_command(label="Войти в аккаунт…",
+                                 command=self._open_add_account_dialog)
+                menu.add_command(label="Подробнее об аккаунтах…",
+                                 command=lambda: self.show_page("accounts"))
+        except tk.TclError:
+            pass
+
+    def _selected_account(self):
+        box = getattr(self, "accounts_box", None)
+        accounts = self._accounts.get("accounts") or []
+        if box is None or not accounts:
+            return None
+        try:
+            selection = box.curselection()
+        except tk.TclError:
+            return None
+        if not selection or selection[0] >= len(accounts):
+            self.status_var.set("Выбери аккаунт в списке")
+            return None
+        return accounts[selection[0]]
+
+    def _activate_selected_account(self):
+        account = self._selected_account()
+        if account is not None:
+            self._choose_account(account["id"])
+
+    def _choose_account(self, account_id):
+        result = set_active_account(account_id)
+        if not result["ok"]:
+            self.status_var.set(result["error"] or "Не удалось выбрать аккаунт")
+            return
+        self._refresh_account_ui()
+        active = self._active_account()
+        if active is None:
+            return
+        who = active.get("display") or active.get("name") or "аккаунт"
+        note = " — применится к следующему запуску" if player_pids() else ""
+        self.status_var.set(f"Аккаунт: {who}{note}")
+        self.log(f"Активный аккаунт: @{active.get('name')}")
+
+    def _account_remove(self):
+        account = self._selected_account() or self._active_account()
+        if account is None:
+            if self.interactive:
+                messagebox.showinfo(APP_NAME, "В лаунчере нет аккаунтов.",
+                                    parent=self.root)
+            return
+        if not self.interactive:
+            return
+        if not messagebox.askyesno(
+                APP_NAME,
+                f"Удалить аккаунт «{self._account_label(account)}»?\n"
+                "Сохранённая сессия будет удалена — для игры под ним "
+                "придётся войти заново.",
+                parent=self.root):
+            return
+        result = remove_account(account["id"])
+        if not result["ok"]:
+            messagebox.showerror(APP_NAME, result["error"],
+                                 parent=self.root)
+            return
+        self._refresh_account_ui()
+        self.status_var.set("Аккаунт удалён")
+        self.log(f"Аккаунт @{account.get('name')} удалён")
+
+    def _login_window_alive(self):
+        win = getattr(self, "_login_dialog", None)
+        if win is None:
+            return False
+        try:
+            return bool(win.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _set_login_status(self, text, error=False):
+        if not self._login_window_alive():
+            return
+        try:
+            self._login_status_var.set(text)
+            self._login_status_lbl.configure(
+                fg=self._warn_fg() if error else self.c["muted"])
+        except tk.TclError:
+            pass
+
+    def _set_login_busy(self, busy, text=None):
+        self._login_busy = busy
+        state = "disabled" if busy else "normal"
+        for attr in ("_login_user_entry", "_login_pass_entry"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                try:
+                    widget.configure(state=state)
+                except tk.TclError:
+                    pass
+        for attr in ("_login_btn", "_login_browser_btn"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                try:
+                    self._btn_state(widget, "primary", not busy)
+                except tk.TclError:
+                    pass
+        if text is not None:
+            self._set_login_status(text)
+
+    def _open_add_account_dialog(self):
+        if self._login_busy:
+            self.status_var.set("Дождись завершения входа")
+            return
+        if self._login_window_alive():
+            try:
+                self._login_dialog.lift()
+                self._login_dialog.focus_force()
+            except tk.TclError:
+                pass
+            return
+        c = self.c
+        win = tk.Toplevel(self.root)
+        win.withdraw()
+        win.title("Добавить аккаунт")
+        win.configure(bg=c["bg"])
+        win.resizable(False, False)
+        win.transient(self.root)
+        self._login_dialog = win
+        self._login_cancel = None
+        self._login_user_var = tk.StringVar()
+        self._login_pass_var = tk.StringVar()
+
+        body = tk.Frame(win, bg=c["bg"], padx=22, pady=18)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="Добавить аккаунт", bg=c["bg"], fg=c["text"],
+                 font=("Segoe UI", 16, "bold"), anchor="w").pack(fill="x")
+        tk.Label(body, text="Пароль не сохраняется — только зашифрованная "
+                            "сессия Roblox для запуска игр.",
+                 bg=c["bg"], fg=c["muted"], font=("Segoe UI", 9),
+                 anchor="w", justify="left", wraplength=430).pack(
+                     fill="x", pady=(4, 14))
+
+        def section(title):
+            outer = tk.Frame(body, bg=c["border"])
+            outer.pack(fill="x", pady=(0, 12))
+            frame = tk.Frame(outer, bg=c["surface"], padx=14, pady=12)
+            frame.pack(fill="x", padx=1, pady=1)
+            tk.Label(frame, text=title, bg=c["surface"], fg=c["muted"],
+                     font=("Segoe UI", 8, "bold"), anchor="w").pack(
+                         fill="x")
+            return frame
+
+        pw = section("ПО ЛОГИНУ И ПАРОЛЮ")
+        tk.Label(pw, text="Логин Roblox", bg=c["surface"], fg=c["text"],
+                 font=("Segoe UI", 9), anchor="w").pack(
+                     fill="x", pady=(8, 3))
+        self._login_user_entry = ttk.Entry(pw,
+                                           textvariable=self._login_user_var)
+        self._login_user_entry.pack(fill="x", ipady=3)
+        tk.Label(pw, text="Пароль", bg=c["surface"], fg=c["text"],
+                 font=("Segoe UI", 9), anchor="w").pack(
+                     fill="x", pady=(8, 3))
+        self._login_pass_entry = ttk.Entry(
+            pw, textvariable=self._login_pass_var, show="•")
+        self._login_pass_entry.pack(fill="x", ipady=3)
+        self._login_btn = self._button(pw, "Войти",
+                                       self._account_login_password,
+                                       kind="primary")
+        self._login_btn.pack_configure(fill="x", pady=(10, 0))
+        self._login_user_entry.bind(
+            "<Return>", lambda _e: self._login_pass_entry.focus_set())
+        self._login_pass_entry.bind(
+            "<Return>", lambda _e: self._account_login_password())
+        tk.Label(pw, text="Если Roblox попросит капчу или 2FA — используй "
+                          "вход через браузер.",
+                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 8),
+                 anchor="w", justify="left", wraplength=430).pack(
+                     fill="x", pady=(8, 0))
+
+        tk.Label(body, text="или", bg=c["bg"], fg=c["muted"],
+                 font=("Segoe UI", 9)).pack(pady=(0, 10))
+
+        br = section("ЧЕРЕЗ БРАУЗЕР")
+        tk.Label(br, text="Откроется отдельное окно Edge или Chrome. "
+                          "Войди в Roblox — лаунчер заберёт сессию и "
+                          "закроет окно.",
+                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                 anchor="w", justify="left", wraplength=430).pack(
+                     fill="x", pady=(8, 10))
+        self._login_browser_btn = self._button(
+            br, "Войти через браузер", self._account_login_browser,
+            kind="primary")
+        self._login_browser_btn.pack_configure(fill="x")
+
+        self._login_status_var = tk.StringVar(value="")
+        self._login_status_lbl = tk.Label(
+            body, textvariable=self._login_status_var, bg=c["bg"],
+            fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+            justify="left", wraplength=430)
+        self._login_status_lbl.pack(fill="x", pady=(2, 10))
+
+        close_btn = self._button(body, "Закрыть",
+                                 self._close_login_dialog)
+        close_btn.pack_configure(side="right")
+
+        win.protocol("WM_DELETE_WINDOW", self._close_login_dialog)
+        win.update_idletasks()
+        width = max(470, win.winfo_reqwidth())
+        height = win.winfo_reqheight()
+        try:
+            rx = self.root.winfo_rootx()
+            ry = self.root.winfo_rooty()
+            rw = self.root.winfo_width()
+            rh = self.root.winfo_height()
+        except tk.TclError:
+            rx = ry = rw = rh = 0
+        if rw > 1 and rh > 1:
+            x = rx + max(0, (rw - width) // 2)
+            y = ry + max(0, (rh - height) // 2)
+        else:
+            x = y = 120
+        win.geometry(f"{width}x{height}+{x}+{y}")
+        win.deiconify()
+        try:
+            win.grab_set()
+            self._login_user_entry.focus_set()
+        except tk.TclError:
+            pass
+
+    def _close_login_dialog(self):
+        win = getattr(self, "_login_dialog", None)
+        if self._login_cancel is not None:
+            try:
+                self._login_cancel.set()
+            except Exception:
+                pass
+        self._login_dialog = None
+        for attr in ("_login_btn", "_login_browser_btn"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                try:
+                    self.primary_buttons.remove(widget)
+                except ValueError:
+                    pass
+        if win is None:
+            return
+        try:
+            win.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
+
+    def _account_login_password(self):
+        if self._login_busy:
+            return
+        username = self._login_user_var.get().strip()
+        password = self._login_pass_var.get()
+        self._login_pass_var.set("")
+        if not username or not password:
+            self._set_login_status("Введи логин и пароль.", error=True)
+            return
+        self._set_login_busy(True, "Вхожу в Roblox…")
+
+        def worker():
+            result = roblox_login(username, password)
+            added = None
+            if result.get("ok"):
+                added = add_account(result["cookie"], result.get("profile"))
+            self.q.put(lambda: self._password_login_done(result, added))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_account_add(self, added, method):
+        account = (added or {}).get("account") or {}
+        set_active_account(account.get("id"))
+        self._refresh_account_ui()
+        who = account.get("display") or account.get("name") or "аккаунт"
+        self.status_var.set(f"Аккаунт «{who}» добавлен и выбран")
+        self.log(f"Добавлен аккаунт @{account.get('name')} ({method})")
+        self._close_login_dialog()
+
+    def _account_login_browser(self):
+        if self._login_busy:
+            return
+        self._login_cancel = threading.Event()
+        cancel = self._login_cancel
+        self._set_login_busy(True, "Открываю браузер…")
+
+        def report(text):
+            self.q.put(lambda t=text: self._set_login_status(t))
+
+        def worker():
+            result = browser_login(cancel_event=cancel, status_cb=report)
+            added = None
+            if result.get("ok"):
+                added = add_account(result["cookie"], result.get("profile"))
+            self.q.put(lambda: self._browser_login_done(result, added))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _password_login_done(self, result, added):
+        self._login_busy = False
+        if self._login_window_alive():
+            self._set_login_busy(False)
+        if not result.get("ok"):
+            error = result.get("error") or "Не удалось войти."
+            if result.get("needs_browser"):
+                error += "\nПопробуй «Войти через браузер»."
+            self._set_login_status(error, error=True)
+            return
+        if not added or not added.get("ok"):
+            error = (added or {}).get("error") or \
+                "Не удалось сохранить аккаунт."
+            self._set_login_status(error, error=True)
+            return
+        self._finish_account_add(added, "по логину и паролю")
+
+    def _browser_login_done(self, result, added):
+        self._login_busy = False
+        self._login_cancel = None
+        if self._login_window_alive():
+            self._set_login_busy(False)
+        if result.get("cancelled"):
+            self._set_login_status("Вход через браузер отменён.")
+            return
+        if not result.get("ok"):
+            self._set_login_status(result.get("error")
+                                   or "Не удалось войти.", error=True)
+            return
+        if not added or not added.get("ok"):
+            error = (added or {}).get("error") or \
+                "Не удалось сохранить аккаунт."
+            self._set_login_status(error, error=True)
+            return
+        self._finish_account_add(added, "через браузер")
 
     # -- страница «Избранное» --------------------------------------------------------
 
@@ -1363,11 +2167,13 @@ class App:
                 and str(self.cfg["fps_limit"]) not in fps_values):
             fps_values.append(str(self.cfg["fps_limit"]))
         self.combo_fps = ttk.Combobox(gridf, values=fps_values,
-                                      state="readonly")
+                                      state="normal")
         self.combo_fps.set(
             str(self.cfg["fps_limit"]) if self.cfg["fps_limit"]
             else "Как в игре")
         self.combo_fps.bind("<<ComboboxSelected>>", self._on_fps_change)
+        self.combo_fps.bind("<Return>", self._on_fps_change)
+        self.combo_fps.bind("<FocusOut>", self._on_fps_change)
         _row(0, "Ограничение FPS", self.combo_fps)
 
         self.combo_api = ttk.Combobox(
@@ -1394,6 +2200,13 @@ class App:
                                 self._on_quality_change)
         _row(3, "Качество графики", self.combo_quality)
 
+        tk.Label(gridf, text="FPS можно ввести вручную: число от 1 до 1000. "
+                            "«Как в игре» или пустое поле — без ограничения.",
+                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 8),
+                 anchor="w", justify="left", wraplength=520).grid(
+                     row=5, column=0, columnspan=2, sticky="w",
+                     pady=(8, 0))
+
         self.var_apply_flags = tk.BooleanVar(
             value=bool(self.cfg["apply_flags_on_launch"]))
         self._checkbox(
@@ -1402,7 +2215,7 @@ class App:
             row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         btn_row = tk.Frame(gridf, bg=c["surface"])
-        btn_row.grid(row=5, column=0, columnspan=2, sticky="ew",
+        btn_row.grid(row=6, column=0, columnspan=2, sticky="ew",
                      pady=(10, 0))
         self._button(btn_row, "Применить сейчас", self.apply_flags_now,
                      side="left")
@@ -1556,11 +2369,28 @@ class App:
         self.status_var.set("Настройка сохранена")
 
     def _on_fps_change(self, _event=None):
-        raw = self.combo_fps.get()
-        try:
-            self.cfg["fps_limit"] = 0 if raw == "Как в игре" else int(raw)
-        except ValueError:
-            self.cfg["fps_limit"] = 0
+        raw = self.combo_fps.get().strip()
+        if raw in ("", "Как в игре"):
+            value = 0
+        else:
+            try:
+                value = int(raw)
+            except ValueError:
+                value = -1
+            if value != 0 and not 1 <= value <= 1000:
+                value = -1
+        if value < 0:
+            current = int(self.cfg.get("fps_limit") or 0)
+            self.combo_fps.set("Как в игре" if not current else str(current))
+            self.flags_status.set("FPS: введи число от 1 до 1000")
+            self.status_var.set("Некорректное ограничение FPS")
+            return
+        display = str(value) if value else "Как в игре"
+        if self.combo_fps.get() != display:
+            self.combo_fps.set(display)
+        if int(self.cfg.get("fps_limit") or 0) == value:
+            return
+        self.cfg["fps_limit"] = value
         self._flags_changed("Ограничение FPS")
 
     def _on_api_change(self, _event=None):
@@ -2282,6 +3112,620 @@ class App:
             self.log(f"Курсоры не применены: {result.get('error')}")
         self._refresh_cursor_panel()
 
+    # -- страница «Темы» --------------------------------------------------------------
+
+    def _build_page_themes(self):
+        c = self.c
+        pad = self._scroll_page("themes")
+
+        self._page_header(
+            pad, "◐", "Свои темы",
+            "Собери оформление из базовых цветов, оттенка и своей картинки. "
+            "Темы хранятся папками, как наборы курсоров: смена, ZIP-импорт "
+            "и экспорт.")
+
+        inner = self._card(
+            pad, title="Мои темы", glyph="◐",
+            subtitle="Выбери тему слева — справа можно переименовать её, "
+                     "сменить цвета, поставить картинку и применить.")
+
+        body = tk.Frame(inner, bg=c["surface"])
+        body.pack(fill="both", expand=True, pady=(12, 0))
+
+        left = tk.Frame(body, bg=c["surface"], width=200)
+        left.pack(side="left", fill="y", padx=(0, 16))
+        left.pack_propagate(False)
+        list_holder = tk.Frame(left, bg=c["surface"])
+        list_holder.pack(fill="both", expand=True)
+        select_bg, select_fg = self._list_selection()
+        self.theme_sets_box = tk.Listbox(
+            list_holder, bg=c["list"], fg=c["text"],
+            selectbackground=select_bg, selectforeground=select_fg,
+            activestyle="none", bd=0, highlightthickness=1,
+            highlightbackground=c["border"], highlightcolor=self.accent,
+            font=("Segoe UI", 10), exportselection=False, height=10)
+        scroll = self._vscroll(list_holder, self.theme_sets_box.yview,
+                               c["list"], width=7)
+        self.theme_sets_box.configure(yscrollcommand=scroll.set)
+        self.theme_sets_box.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        self.theme_sets_box.bind("<<ListboxSelect>>",
+                                 self._on_theme_set_select)
+
+        nav = tk.Frame(left, bg=c["surface"])
+        nav.pack(fill="x", pady=(8, 0))
+        self._button(nav, "＋ Создать", self._theme_create_set, side="left")
+        self._button(nav, "Удалить", self._theme_delete_set, side="left",
+                     padx=(6, 0))
+        nav2 = tk.Frame(left, bg=c["surface"])
+        nav2.pack(fill="x", pady=(6, 0))
+        self._button(nav2, "Импорт ZIP", self._theme_import_set,
+                     side="left")
+        self._button(nav2, "Экспорт ZIP", self._theme_export_set,
+                     side="left", padx=(6, 0))
+        self._hint(left, "Новая тема создаётся с текущими цветами. "
+                         "Имя можно поменять справа.", wrap=200)
+
+        right = tk.Frame(body, bg=c["surface"])
+        right.pack(side="left", fill="both", expand=True)
+
+        rename_row = tk.Frame(right, bg=c["surface"])
+        rename_row.pack(fill="x")
+        self.theme_rename_var = tk.StringVar()
+        self.theme_rename_entry = ttk.Entry(
+            rename_row, textvariable=self.theme_rename_var)
+        self.theme_rename_entry.pack(side="left", fill="x", expand=True,
+                                     ipady=4)
+        self.theme_rename_entry.bind(
+            "<Return>", lambda _e: self._theme_rename_set())
+        self._button(rename_row, "Переименовать", self._theme_rename_set,
+                     side="left", padx=(8, 0))
+
+        self.theme_preview_canvas = tk.Canvas(
+            right, height=THEME_PREVIEW_H, bg=c["bg"],
+            highlightthickness=1, highlightbackground=c["border"], bd=0)
+        self.theme_preview_canvas.pack(fill="x", pady=(10, 0))
+        self.theme_preview_canvas.bind(
+            "<Configure>", lambda _e: self._render_theme_preview())
+        self.theme_preview_canvas.bind(
+            "<Double-Button-1>", lambda _e: self._theme_apply())
+
+        self.theme_info_var = tk.StringVar(value="")
+        self.theme_image_var = tk.StringVar(value="")
+        tk.Label(right, textvariable=self.theme_info_var, bg=c["surface"],
+                 fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+                 justify="left", wraplength=460).pack(fill="x", pady=(7, 0))
+
+        opts = tk.Frame(right, bg=c["surface"])
+        opts.pack(fill="x", pady=(10, 0))
+        opts.grid_columnconfigure(1, weight=1)
+
+        def opt_row(row, label):
+            tk.Label(opts, text=label, bg=c["surface"], fg=c["muted"],
+                     font=("Segoe UI", 9), anchor="w").grid(
+                         row=row, column=0, sticky="w", pady=4,
+                         padx=(0, 12))
+            holder = tk.Frame(opts, bg=c["surface"])
+            holder.grid(row=row, column=1, sticky="w", pady=4)
+            return holder
+
+        self.theme_base_row = opt_row(0, "База")
+        self.theme_tint_row = opt_row(1, "Оттенок")
+        self.theme_accent_row = opt_row(2, "Акцент")
+        tk.Label(opts, text="Картинка", bg=c["surface"], fg=c["muted"],
+                 font=("Segoe UI", 9), anchor="w").grid(
+                     row=3, column=0, sticky="w", pady=4, padx=(0, 12))
+        image_row = tk.Frame(opts, bg=c["surface"])
+        image_row.grid(row=3, column=1, sticky="w", pady=4)
+        self.theme_pick_btn = self._button(
+            image_row, "Выбрать", self._theme_pick_image, side="left")
+        self.theme_image_remove_btn = self._button(
+            image_row, "Убрать", self._theme_remove_image, side="left",
+            padx=(6, 0))
+        tk.Label(opts, textvariable=self.theme_image_var, bg=c["surface"],
+                 fg=c["muted"], font=("Segoe UI", 8), anchor="w",
+                 justify="left", wraplength=320).grid(
+                     row=4, column=1, sticky="w", pady=(2, 0))
+
+        actions = tk.Frame(right, bg=c["surface"])
+        actions.pack(fill="x", pady=(12, 0))
+        self.theme_apply_btn = self._button(
+            actions, "Применить тему", self._theme_apply, kind="primary",
+            side="left")
+        self._button(actions, "Обновить", self._refresh_theme_panel,
+                     side="left", padx=8)
+
+        self.theme_status_var = tk.StringVar(value="")
+        tk.Label(right, textvariable=self.theme_status_var, bg=c["surface"],
+                 fg=c["text"], font=("Segoe UI", 9), anchor="w",
+                 justify="left", wraplength=460).pack(fill="x", pady=(10, 0))
+        self._hint(
+            right,
+            "Картинка показывается баннером в верхней части окна; лучше "
+            "горизонтальная (например 1920×400). Тема не затрагивает "
+            "аккаунты и пароли. Импорт и экспорт — ZIP, как у курсоров.",
+            wrap=470)
+        self._refresh_theme_panel()
+        self.root.after_idle(self._render_theme_preview)
+
+    def _refresh_theme_panel(self, select=None):
+        box = getattr(self, "theme_sets_box", None)
+        if box is None:
+            return
+        if ensure_theme_sets_dir() is None:
+            self.theme_status_var.set("Папка тем недоступна")
+            return
+        names = list_theme_sets()
+        current = select or getattr(self, "_theme_active_set", None)
+        saved = str(self.cfg.get("custom_theme") or "")
+        if current not in names:
+            current = saved if saved in names else (names[0] if names else None)
+        self._theme_refreshing = True
+        try:
+            box.delete(0, "end")
+            for name in names:
+                box.insert("end", name)
+            if current is not None:
+                index = names.index(current)
+                box.selection_set(index)
+                box.see(index)
+        except tk.TclError:
+            pass
+        self._theme_refreshing = False
+        self._theme_active_set = current
+        self.theme_rename_var.set(current or "")
+        try:
+            self.theme_rename_entry.configure(
+                state="normal" if current else "disabled")
+        except tk.TclError:
+            pass
+        self._load_theme_editor(current)
+
+    def _on_theme_set_select(self, _event=None):
+        if getattr(self, "_theme_refreshing", False):
+            return
+        selection = self.theme_sets_box.curselection()
+        if not selection:
+            return
+        name = self.theme_sets_box.get(selection[0])
+        if name == getattr(self, "_theme_active_set", None):
+            return
+        self._theme_active_set = name
+        self.theme_rename_var.set(name)
+        try:
+            self.theme_rename_entry.configure(state="normal")
+        except tk.TclError:
+            pass
+        self._load_theme_editor(name)
+
+    @staticmethod
+    def _clear_frame(frame):
+        for child in frame.winfo_children():
+            child.destroy()
+
+    def _load_theme_editor(self, name):
+        info = theme_set_info(name) if name else {"ok": False}
+        palette = load_theme_palette(name) if name else None
+        if not info.get("ok") or palette is None:
+            self._theme_image_path = None
+            self.theme_info_var.set("")
+            self.theme_image_var.set("")
+            self.theme_status_var.set(
+                "Тем пока нет — создай новую кнопкой «＋ Создать»."
+                if not list_theme_sets() else "Выбери тему слева.")
+            for holder in (getattr(self, "theme_base_row", None),
+                           getattr(self, "theme_tint_row", None),
+                           getattr(self, "theme_accent_row", None)):
+                if holder is not None:
+                    self._clear_frame(holder)
+            for attr in ("theme_pick_btn", "theme_image_remove_btn",
+                         "theme_apply_btn"):
+                widget = getattr(self, attr, None)
+                if widget is not None:
+                    try:
+                        widget.configure(state="disabled")
+                    except tk.TclError:
+                        pass
+            self._render_theme_preview()
+            return
+
+        self._theme_base = info.get("base") or "dark"
+        self._theme_tint = info.get("tint") or "#00c48c"
+        self._theme_accent = info.get("accent") or "#00c48c"
+        self._theme_image_path = info.get("image")
+        self.theme_info_var.set(
+            f"База: {'светлая' if self._theme_base == 'light' else 'тёмная'}"
+            f"  ·  оттенок {self._theme_tint}"
+            f"  ·  акцент {self._theme_accent}")
+        self._build_theme_options()
+        if self._theme_image_path:
+            width = info.get("width") or 0
+            height = info.get("height") or 0
+            self.theme_image_var.set(
+                f"{Path(self._theme_image_path).name}  ·  {width}×{height}")
+            remove_state = "normal"
+        else:
+            self.theme_image_var.set(
+                "не выбрана — PNG, JPG, WEBP, BMP или GIF до 20 МБ")
+            remove_state = "disabled"
+        for attr in ("theme_pick_btn", "theme_apply_btn"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                try:
+                    widget.configure(state="normal")
+                except tk.TclError:
+                    pass
+        if getattr(self, "theme_image_remove_btn", None) is not None:
+            try:
+                self.theme_image_remove_btn.configure(state=remove_state)
+            except tk.TclError:
+                pass
+        self._render_theme_preview()
+
+    def _build_theme_options(self):
+        for holder in (self.theme_base_row, self.theme_tint_row,
+                       self.theme_accent_row):
+            self._clear_frame(holder)
+        for value, label in (("dark", "Тёмная"), ("light", "Светлая")):
+            active = self._theme_base == value
+            base, fg, hot = self._btn_colors(
+                "primary" if active else "ghost")
+            btn = tk.Button(
+                self.theme_base_row, text=label, relief="flat", bd=0,
+                font=("Segoe UI", 9, "bold" if active else "normal"),
+                padx=12, pady=4, cursor="hand2", bg=base, fg=fg,
+                activebackground=hot, activeforeground=fg,
+                highlightthickness=0, takefocus=False,
+                command=lambda v=value: self._theme_set_colors(base=v))
+            btn.pack(side="left", padx=(0, 6))
+        tints = list(THEME_TINTS)
+        if not any(color.lower() == str(self._theme_tint).lower()
+                   for color, _label in tints):
+            tints.insert(0, (str(self._theme_tint), "Свой"))
+        for color, _label in tints:
+            self._theme_swatch(
+                self.theme_tint_row, color,
+                color.lower() == str(self._theme_tint).lower(),
+                lambda c=color: self._theme_set_colors(tint=c))
+        accents = list(ACCENT_PRESETS)
+        if not any(color.lower() == str(self._theme_accent).lower()
+                   for color, _label in accents):
+            accents.insert(0, (str(self._theme_accent), "Свой"))
+        for color, _label in accents:
+            self._theme_swatch(
+                self.theme_accent_row, color,
+                color.lower() == str(self._theme_accent).lower(),
+                lambda c=color: self._theme_set_colors(accent=c))
+
+    def _theme_swatch(self, parent, color, selected, command):
+        border = self.accent if selected else self.c["border"]
+        holder = tk.Frame(parent, bg=border)
+        holder.pack(side="left", padx=(0, 6), pady=1)
+        btn = tk.Button(
+            holder, bg=color, activebackground=shade(color, 1.15),
+            width=2, height=1, bd=0, relief="flat", cursor="hand2",
+            highlightthickness=0, takefocus=False, command=command)
+        btn.pack(padx=2, pady=2)
+
+    def _theme_set_colors(self, base=None, tint=None, accent=None):
+        name = getattr(self, "_theme_active_set", None)
+        if not name:
+            return
+        if base is not None:
+            self._theme_base = base
+        if tint is not None:
+            self._theme_tint = tint
+        if accent is not None:
+            self._theme_accent = accent
+        result = update_theme_set(name, base=self._theme_base,
+                                  tint=self._theme_tint,
+                                  accent=self._theme_accent)
+        if not result["ok"]:
+            self.theme_status_var.set(result["error"]
+                                     or "Не удалось сохранить тему.")
+            return
+        applied = (self.theme_name == "custom"
+                   and self.custom_theme_name == name)
+        self._load_theme_editor(name)
+        if applied:
+            self.theme_status_var.set(
+                "Сохранено — нажми «Применить тему», чтобы увидеть "
+                "изменения в лаунчере.")
+        else:
+            self.theme_status_var.set("Изменения сохранены.")
+
+    def _theme_pick_image(self):
+        name = getattr(self, "_theme_active_set", None)
+        if not name:
+            return
+        path = filedialog.askopenfilename(
+            parent=self.root, title="Картинка для темы",
+            filetypes=[("Картинки", "*.png *.jpg *.jpeg *.webp *.bmp *.gif"),
+                       ("Все файлы", "*.*")])
+        if not path:
+            return
+        result = set_theme_image(name, path)
+        if not result["ok"]:
+            messagebox.showerror(APP_NAME, result["error"],
+                                 parent=self.root)
+            return
+        self._theme_preview_cache.clear()
+        self._load_theme_editor(name)
+        self.theme_status_var.set(
+            "Картинка добавлена — примени тему, чтобы увидеть баннер.")
+        self.status_var.set("Картинка темы обновлена")
+        self.log(f"Тема «{name}»: картинка {Path(path).name}")
+
+    def _theme_remove_image(self):
+        name = getattr(self, "_theme_active_set", None)
+        if not name or not self._theme_image_path:
+            return
+        if not messagebox.askyesno(APP_NAME,
+                                   "Убрать картинку из темы?",
+                                   parent=self.root):
+            return
+        result = remove_theme_image(name)
+        if not result["ok"]:
+            messagebox.showerror(APP_NAME, result["error"],
+                                 parent=self.root)
+            return
+        self._theme_preview_cache.clear()
+        self._load_theme_editor(name)
+        self.theme_status_var.set(
+            "Картинка убрана — примени тему, чтобы обновить окно.")
+        self.status_var.set("Картинка темы убрана")
+        self.log(f"Тема «{name}»: картинка убрана")
+
+    def _theme_apply(self):
+        name = getattr(self, "_theme_active_set", None)
+        if not name:
+            messagebox.showinfo(
+                APP_NAME, "Выбери тему или создай новую.", parent=self.root)
+            return
+        self.set_theme("custom", custom_name=name)
+
+    def _theme_create_set(self):
+        base = "light" if self.c.get("base") == "light" else "dark"
+        tint = str(self.c.get("tint") or self.cfg.get("accent")
+                   or "#00c48c")
+        result = create_theme_set(base=base, tint=tint, accent=tint)
+        if not result["ok"]:
+            messagebox.showerror(APP_NAME, result["error"],
+                                 parent=self.root)
+            return
+        self._theme_preview_cache.clear()
+        self._refresh_theme_panel(select=result["name"])
+        self.status_var.set(f"Создана тема «{result['name']}»")
+        self.log(f"Создана своя тема «{result['name']}»")
+
+    def _theme_delete_set(self):
+        name = getattr(self, "_theme_active_set", None)
+        if not name:
+            return
+        if not messagebox.askyesno(
+                APP_NAME,
+                f"Удалить тему «{name}» вместе с картинкой?",
+                parent=self.root):
+            return
+        applied = (self.theme_name == "custom"
+                   and self.custom_theme_name == name)
+        if applied:
+            self.set_theme(DEFAULT_THEME)
+        result = delete_theme_set(name)
+        if not result["ok"]:
+            messagebox.showerror(APP_NAME, result["error"],
+                                 parent=self.root)
+            return
+        if self.cfg.get("custom_theme") == name:
+            self.cfg["custom_theme"] = ""
+            save_config(self.cfg)
+        remaining = list_theme_sets()
+        next_name = remaining[0] if remaining else None
+        self._theme_active_set = next_name
+        self._theme_preview_cache.clear()
+        self._refresh_theme_panel(select=next_name)
+        self.status_var.set(f"Тема «{name}» удалена")
+        self.log(f"Своя тема «{name}» удалена")
+
+    def _theme_rename_set(self):
+        old = getattr(self, "_theme_active_set", None)
+        if not old:
+            return
+        new = self.theme_rename_var.get().strip()
+        if not valid_theme_set_name(new):
+            messagebox.showerror(
+                APP_NAME,
+                "Имя темы не должно содержать <>:\"/\\|?* и не может "
+                "быть пустым.",
+                parent=self.root)
+            return
+        result = rename_theme_set(old, new)
+        if not result["ok"]:
+            messagebox.showerror(APP_NAME, result["error"],
+                                 parent=self.root)
+            return
+        applied = (self.theme_name == "custom"
+                   and self.custom_theme_name == old)
+        if self.cfg.get("custom_theme") == old:
+            self.cfg["custom_theme"] = result["name"]
+            save_config(self.cfg)
+        self._theme_preview_cache.clear()
+        if applied:
+            self.set_theme("custom", custom_name=result["name"])
+        else:
+            self._theme_active_set = result["name"]
+            self._refresh_theme_panel(select=result["name"])
+        self.status_var.set(f"Тема переименована в «{result['name']}»")
+        self.log(f"Своя тема «{old}» → «{result['name']}»")
+
+    def _theme_import_set(self):
+        path = filedialog.askopenfilename(
+            parent=self.root, title="Импорт темы",
+            filetypes=[("ZIP-архив", "*.zip")])
+        if not path:
+            return
+        result = import_theme_set(path)
+        if not result["ok"]:
+            messagebox.showerror(
+                APP_NAME,
+                f"Не удалось импортировать тему:\n{result['error']}",
+                parent=self.root)
+            return
+        self._theme_preview_cache.clear()
+        self._theme_active_set = result["name"]
+        self._refresh_theme_panel(select=result["name"])
+        message = f"Импортирована тема «{result['name']}»"
+        if result.get("image"):
+            message += "\nКартинка темы тоже импортирована."
+        message += "\nНажми «Применить тему», чтобы включить её."
+        self.status_var.set(f"Импортирована тема «{result['name']}»")
+        self.log(f"Импорт темы «{result['name']}»")
+        messagebox.showinfo(APP_NAME, message, parent=self.root)
+
+    def _theme_export_set(self):
+        name = getattr(self, "_theme_active_set", None)
+        if not name:
+            messagebox.showinfo(APP_NAME, "Сначала выбери тему.",
+                                parent=self.root)
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="Экспорт темы",
+            defaultextension=".zip", initialfile=f"{name}.zip",
+            filetypes=[("ZIP-архив", "*.zip")])
+        if not path:
+            return
+        result = export_theme_set(name, path)
+        if not result["ok"]:
+            messagebox.showerror(
+                APP_NAME, f"Не удалось экспортировать тему:\n"
+                          f"{result['error']}", parent=self.root)
+            return
+        self.status_var.set(f"Тема «{name}» экспортирована")
+        self.log(f"Экспорт темы «{name}» → {path}")
+        messagebox.showinfo(APP_NAME, f"Тема сохранена:\n{result['path']}",
+                            parent=self.root)
+
+    def _draw_theme_preview_fallback(self, canvas, palette, width, height):
+        canvas.create_rectangle(0, 0, width, 18,
+                                fill=palette["titlebar"], outline="")
+        canvas.create_rectangle(0, 18, 78, height,
+                                fill=palette["panel"], outline="")
+        canvas.create_rectangle(90, 30, width - 12, height - 14,
+                                fill=palette["surface"],
+                                outline=palette["border"])
+        canvas.create_rectangle(100, 44, width - 26, 51,
+                                fill=palette["text"], outline="")
+        canvas.create_rectangle(100, 60, width - 90, 65,
+                                fill=palette["muted"], outline="")
+        canvas.create_rectangle(100, height - 46, 190, height - 24,
+                                fill=palette["accent"], outline="")
+        canvas.create_rectangle(0, 0, 3, height,
+                                fill=palette["accent"], outline="")
+        canvas.create_rectangle(0, height - 3, width, height,
+                                fill=palette["accent"], outline="")
+
+    def _make_theme_preview(self, palette, width, height):
+        if not HAVE_PIL:
+            return None
+
+        def rgb(key):
+            value = str(palette.get(key) or "#000000").lstrip("#")
+            try:
+                return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
+            except (ValueError, TypeError):
+                return (0, 0, 0)
+
+        source = getattr(self, "_theme_image_path", None)
+        base_image = None
+        if source is not None:
+            try:
+                base_image = Image.open(source).convert("RGB")
+                scale = max(width / base_image.width,
+                            height / base_image.height)
+                size = (max(1, int(base_image.width * scale + 0.5)),
+                        max(1, int(base_image.height * scale + 0.5)))
+                base_image = base_image.resize(size, Image.LANCZOS)
+                left = max(0, (base_image.width - width) // 2)
+                top = max(0, (base_image.height - height) // 2)
+                base_image = base_image.crop(
+                    (left, top, left + width, top + height)).convert("RGBA")
+            except Exception:
+                base_image = None
+        if base_image is None:
+            base_image = Image.new("RGBA", (width, height),
+                                   rgb("bg") + (255,))
+        overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        draw.rectangle([0, 0, width, 18], fill=rgb("titlebar") + (238,))
+        draw.rectangle([0, 18, 78, height], fill=rgb("panel") + (240,))
+        draw.rectangle([90, 30, width - 12, height - 14],
+                       fill=rgb("surface") + (244,))
+        draw.rectangle([100, 44, width - 26, 51],
+                       fill=rgb("text") + (95,))
+        draw.rectangle([100, 60, max(140, width - 90), 65],
+                       fill=rgb("muted") + (120,))
+        draw.rectangle([100, height - 46, 190, height - 24],
+                       fill=rgb("accent") + (255,))
+        draw.rectangle([0, 0, 3, height], fill=rgb("accent") + (255,))
+        draw.rectangle([0, height - 3, width, height],
+                       fill=rgb("accent") + (255,))
+        for row_y in (34, 56, 78, 100):
+            if row_y + 8 < height:
+                draw.rectangle([12, row_y, 66, row_y + 7],
+                               fill=rgb("text") + (80,))
+        image = Image.alpha_composite(base_image, overlay).convert("RGB")
+        return ImageTk.PhotoImage(image)
+
+    def _render_theme_preview(self, _event=None):
+        canvas = getattr(self, "theme_preview_canvas", None)
+        if canvas is None:
+            return
+        try:
+            width = max(260, canvas.winfo_width())
+        except tk.TclError:
+            return
+        height = THEME_PREVIEW_H
+        name = getattr(self, "_theme_active_set", None)
+        palette = load_theme_palette(name) if name else None
+        has_theme = palette is not None
+        if palette is None:
+            palette = build_theme_palette("dark", self.accent, self.accent)
+        source = getattr(self, "_theme_image_path", None)
+        try:
+            stamp = Path(source).stat().st_mtime_ns if source else 0
+        except OSError:
+            stamp = 0
+        key = (name or "", width, height, palette.get("base"),
+               palette.get("tint"), palette.get("accent"),
+               str(source or ""), stamp)
+        photo = self._theme_preview_cache.get(key)
+        if photo is None and HAVE_PIL:
+            try:
+                photo = self._make_theme_preview(palette, width, height)
+            except Exception:
+                photo = None
+            if photo is not None:
+                self._theme_preview_cache[key] = photo
+                if len(self._theme_preview_cache) > 8:
+                    self._theme_preview_cache.pop(
+                        next(iter(self._theme_preview_cache)))
+        try:
+            canvas.delete("all")
+            canvas.configure(bg=palette.get("bg") or "#000000")
+            if photo is not None:
+                self._theme_preview_photo = photo
+                canvas.create_image(0, 0, image=photo, anchor="nw")
+                return
+            self._theme_preview_photo = None
+            self._draw_theme_preview_fallback(canvas, palette, width, height)
+            if not has_theme:
+                canvas.create_text(
+                    width // 2, height // 2,
+                    text="Выбери тему или создай новую",
+                    fill=palette["muted"], font=("Segoe UI", 10))
+        except tk.TclError:
+            pass
+
     # -- страница «Настройки» ----------------------------------------------------------
 
     def _build_page_settings(self):
@@ -2389,6 +3833,20 @@ class App:
                                lambda n=name: self.set_theme(n), kind=kind,
                                side="left", padx=(0, 8))
             self.theme_buttons[name] = btn
+        custom = self._custom_theme_available()
+        if custom:
+            kind = "primary" if self.theme_name == "custom" else "ghost"
+            self.theme_buttons["custom"] = self._button(
+                theme_row, f"◐ {trunc(custom, 14)}",
+                lambda n=custom: self.set_theme("custom", custom_name=n),
+                kind=kind, side="left", padx=(0, 8))
+        themes_row = tk.Frame(inner4, bg=c["surface"])
+        themes_row.pack(fill="x", pady=(8, 0))
+        self._button(themes_row, "Свои темы и картинка",
+                     lambda: self.show_page("themes"), side="left")
+        tk.Label(themes_row, text="цвета и баннер в разделе «Темы»",
+                 bg=c["surface"], fg=c["muted"],
+                 font=("Segoe UI", 8)).pack(side="left", padx=8)
 
         tk.Label(inner4, text="Акцентный цвет", bg=c["surface"],
                  fg=c["text"], font=("Segoe UI", 10)).pack(
@@ -3255,8 +4713,33 @@ class App:
         self._apply_cursors_for_launch()
         name = self._name_for(pid)
         game = name or f"Place {pid}"
-        url = f"roblox://experiences/start?placeId={pid}"
         self.log(f"Запуск: {name or 'игра'} (place {pid})")
+        active = self._active_account()
+        if active is not None:
+            who = active.get("display") or active.get("name") or "аккаунт"
+            if player_pids():
+                close_it = True
+                if self.interactive:
+                    close_it = messagebox.askyesno(
+                        APP_NAME,
+                        f"Roblox уже запущен.\nЗакрыть клиент и запустить "
+                        f"игру под аккаунтом «{who}»?",
+                        parent=self.root)
+                if close_it:
+                    self._start_account_launch(pid, name, game, active)
+                    return
+                self.log("Аккаунт не применён: Roblox уже запущен")
+                self.status_var.set("Запуск без смены аккаунта")
+            else:
+                self._start_account_launch(pid, name, game, active)
+                return
+        self._launch_plain(pid, name, game)
+
+    def _launch_plain(self, pid, name, game):
+        """Обычный запуск roblox:// — без входа под аккаунтом."""
+        if self._play_busy:
+            return
+        url = f"roblox://experiences/start?placeId={pid}"
         self._rpc_set(game, "Запускаю игру…")
         try:
             os.startfile(url)
@@ -3270,15 +4753,70 @@ class App:
                     f"Не удалось открыть ссылку roblox://\n\n{exc}",
                     parent=self.root)
             return
-
         self.entry_var.set(pid)
         self.status_var.set(f"Запускаю {name or pid}…")
         self.log(f"Ссылка передана системе: {url}")
         self.root.after(
             10000, lambda g=game: self._rpc_set(g, "Играет в Roblox"))
+        self._after_game_launch(pid, name)
 
+    def _start_account_launch(self, pid, name, game, account):
+        if self._play_busy:
+            return
+        self._play_busy = True
+        who = account.get("display") or account.get("name") or "аккаунт"
+        self._btn_state(self.btn_play, "primary", False,
+                        text="Вхожу в аккаунт…")
+        self._rpc_set(game, "Подключаю аккаунт…")
+        self.status_var.set(f"Вхожу под «{who}»…")
+        self.log(f"Запуск под аккаунтом @{account.get('name')} "
+                 f"(place {pid})")
+        threading.Thread(
+            target=self._account_launch_worker,
+            args=(pid, name, game, account), daemon=True).start()
+
+    def _account_launch_worker(self, pid, name, game, account):
+        if player_pids():
+            close_roblox_players()
+            for _ in range(8):
+                if not player_pids():
+                    break
+                time.sleep(0.5)
+        result = launch_game_as(pid, account["id"])
+        self.q.put(lambda: self._account_launch_done(
+            pid, name, game, result))
+
+    def _account_launch_done(self, pid, name, game, result):
+        if self._closing:
+            return
+        self._play_busy = False
+        self._btn_state(self.btn_play, "primary", True,
+                        text="▶   ИГРАТЬ ПО ID")
+        account = result.get("account") or {}
+        if result.get("ok"):
+            who = account.get("name") or "аккаунт"
+            self.entry_var.set(pid)
+            self.status_var.set(f"Запускаю {name or pid} под @{who}")
+            self.log(f"Игра запущена под аккаунтом @{who} (place {pid})")
+            self._rpc_set(game, "Играет в Roblox")
+            self.root.after(
+                10000, lambda g=game: self._rpc_set(g, "Играет в Roblox"))
+            self._after_game_launch(pid, name)
+            return
+        error = result.get("error") or "Не удалось войти под аккаунтом."
+        self.log(f"Аккаунт: {error}")
+        self.status_var.set("Не удалось войти под аккаунтом")
+        self._rpc_set("В меню", "Ошибка аккаунта")
+        if self.interactive and messagebox.askyesno(
+                APP_NAME,
+                f"{error}\n\nЗапустить игру без аккаунта, как обычно?",
+                parent=self.root):
+            self._launch_plain(pid, name, game)
+
+    def _after_game_launch(self, pid, name):
         if self.cfg["save_history"]:
-            history = [h for h in self.cfg["history"] if h["place_id"] != pid]
+            history = [h for h in self.cfg["history"]
+                       if h["place_id"] != pid]
             history.insert(0, {"place_id": pid, "name": name,
                                "ts": int(time.time())})
             self.cfg["history"] = history[:30]
@@ -3286,19 +4824,38 @@ class App:
             self.cfg["last_place_id"] = pid
         save_config(self.cfg)
         self._refresh_lists()
-
         if self.cfg["auto_close"]:
             self.log("Автозакрытие через 1.5 с…")
             self.root.after(1500, self.close)
 
     # -- оформление ------------------------------------------------------------------------------
 
-    def set_theme(self, name, save=True):
+    def set_theme(self, name, save=True, custom_name=None):
+        if name == "custom":
+            target = custom_name or self.cfg.get("custom_theme") or ""
+            palette = load_theme_palette(target)
+            if palette is None:
+                return
+            self.theme_name = "custom"
+            self.custom_theme_name = target
+            self.c = palette
+            self.accent = palette.get("accent") or self.accent
+            if save:
+                self.cfg["theme"] = "custom"
+                self.cfg["custom_theme"] = target
+                save_config(self.cfg)
+            self._rebuild()
+            self.status_var.set(f"Тема: {target}")
+            if save:
+                self.log(f"Своя тема оформления: {target}")
+            return
         if name not in THEMES:
             return
         label = THEMES[name]["label"]
         self.theme_name = name
+        self.custom_theme_name = ""
         self.c = THEMES[name]
+        self.accent = self.cfg["accent"]
         if save:
             self.cfg["theme"] = name
             save_config(self.cfg)
@@ -3311,6 +4868,11 @@ class App:
         color = color.lower()
         self.accent = color
         self.cfg["accent"] = color
+        if self.theme_name == "custom" and self.custom_theme_name:
+            result = update_theme_set(self.custom_theme_name, accent=color)
+            if result["ok"]:
+                self.c["accent"] = color
+                self._theme_preview_cache.clear()
         save_config(self.cfg)
         self.apply_accent(color)
         name = next((n for c, n in ACCENT_PRESETS if c == color), color)
@@ -3337,7 +4899,9 @@ class App:
         for box in (getattr(self, "recent_box", None),
                     getattr(self, "fav_box", None),
                     getattr(self, "hist_box", None),
-                    getattr(self, "cursor_sets_box", None)):
+                    getattr(self, "cursor_sets_box", None),
+                    getattr(self, "theme_sets_box", None),
+                    getattr(self, "accounts_box", None)):
             if box is None:
                 continue
             try:
@@ -3699,6 +5263,207 @@ def run_selftest():
     except Exception as exc:  # noqa: BLE001
         failures.append(f"cursor sets test: {exc}")
 
+    # 6c) свои темы: палитра, картинка, ZIP, переименование, удаление
+    try:
+        tiny_png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
+            "2mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sets_dir = root / "ThemeSets"
+            created = create_theme_set("Зелёная тема", base="dark",
+                                       tint="#00c48c", accent="#00c48c",
+                                       sets_dir=sets_dir)
+            if not created["ok"] or created["name"] != "Зелёная тема":
+                failures.append(f"темы: набор не создан {created}")
+            name = created["name"]
+            if name not in list_theme_sets(sets_dir):
+                failures.append("темы: набор не появился в списке")
+            if create_theme_set(name, sets_dir=sets_dir)["ok"]:
+                failures.append("темы: создан дубликат набора")
+            if create_theme_set("bad/name", sets_dir=sets_dir)["ok"]:
+                failures.append("темы: недопустимое имя принято")
+
+            palette = load_theme_palette(name, sets_dir)
+            if palette is None or palette.get("base") != "dark":
+                failures.append(f"темы: палитра {palette}")
+            elif not all(isinstance(palette.get(key), str)
+                         and palette[key].startswith("#")
+                         for key in ("bg", "panel", "surface", "text",
+                                     "muted", "accent", "titlebar")):
+                failures.append("темы: палитра неполная")
+
+            image = root / "bg.png"
+            image.write_bytes(tiny_png)
+            added = set_theme_image(name, image, sets_dir)
+            if not added["ok"]:
+                failures.append(f"темы: картинка не добавилась {added}")
+            info = theme_set_info(name, sets_dir)
+            if not info["ok"] or info["image"] is None:
+                failures.append(f"темы: картинка не видна в теме {info}")
+            elif (info["width"], info["height"]) != (1, 1):
+                failures.append(f"темы: размер картинки "
+                                f"{info['width']}x{info['height']}")
+            if (load_theme_palette(name, sets_dir) or {}).get("image") is None:
+                failures.append("темы: палитра не отдала картинку")
+
+            bad = root / "bad.txt"
+            bad.write_text("not an image", encoding="utf-8")
+            if set_theme_image(name, bad, sets_dir)["ok"]:
+                failures.append("темы: текстовый файл принят за картинку")
+
+            updated = update_theme_set(name, base="light", tint="#ff9f43",
+                                       sets_dir=sets_dir)
+            if not updated["ok"]:
+                failures.append(f"темы: обновление {updated}")
+            palette = load_theme_palette(name, sets_dir) or {}
+            if palette.get("base") != "light":
+                failures.append(f"темы: база не сменилась {palette.get('base')}")
+            if palette.get("tint") != "#ff9f43":
+                failures.append(f"темы: оттенок не сменился {palette.get('tint')}")
+            if palette.get("accent") != "#00c48c":
+                failures.append(f"темы: акцент потерялся {palette.get('accent')}")
+            if palette.get("image") is None:
+                failures.append("темы: обновление потеряло картинку")
+
+            if not remove_theme_image(name, sets_dir)["ok"]:
+                failures.append("темы: картинка не удалилась")
+            if theme_set_info(name, sets_dir)["image"] is not None:
+                failures.append("темы: удалённая картинка осталась в теме")
+
+            archive = root / "theme.zip"
+            exported = export_theme_set(name, archive, sets_dir)
+            if not exported["ok"] or not archive.exists():
+                failures.append(f"темы: экспорт {exported}")
+            imported = import_theme_set(archive, "Импорт темы", sets_dir)
+            if not imported["ok"] or "Импорт темы" not in list_theme_sets(
+                    sets_dir):
+                failures.append(f"темы: импорт {imported}")
+            else:
+                imported_palette = load_theme_palette(
+                    imported["name"], sets_dir) or {}
+                if imported_palette.get("tint") != "#ff9f43":
+                    failures.append("темы: импорт потерял цвета")
+                renamed = rename_theme_set(imported["name"], "Импорт 2",
+                                           sets_dir)
+                if not renamed["ok"]:
+                    failures.append(f"темы: переименование {renamed}")
+                elif load_theme_palette("Импорт 2", sets_dir) is None:
+                    failures.append("темы: после переименования тема пропала")
+                if rename_theme_set("Импорт 2", "bad/name", sets_dir)["ok"]:
+                    failures.append("темы: недопустимое имя при переименовании")
+                if not delete_theme_set("Импорт 2", sets_dir)["ok"]:
+                    failures.append("темы: импорт не удалился")
+            if not delete_theme_set(name, sets_dir)["ok"]:
+                failures.append("темы: набор не удалился")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"theme sets test: {exc}")
+
+    # 6d) аккаунты: DPAPI, активный аккаунт, ссылка запуска
+    try:
+        secret, error = protect_secret("COOKIE-1")
+        if error or not secret.startswith("dpapi:"):
+            failures.append(f"аккаунты: сессия не зашифрована ({error})")
+        elif unprotect_secret(secret) != "COOKIE-1":
+            failures.append("аккаунты: DPAPI не расшифровал сессию")
+        if unprotect_secret("broken") != "":
+            failures.append("аккаунты: мусор расшифровался в строку")
+
+        with tempfile.TemporaryDirectory() as td:
+            acc_path = Path(td) / "accounts.json"
+            first = add_account(
+                "COOKIE-1",
+                profile={"ok": True, "id": 111, "name": "first_login",
+                         "display": "First"},
+                path=acc_path, fetch_avatar=False)
+            if not first["ok"]:
+                failures.append(f"аккаунты: первый не добавлен {first}")
+            state = accounts_state(acc_path)
+            if len(state["accounts"]) != 1:
+                failures.append(f"аккаунты: список {state}")
+            first_id = first.get("account", {}).get("id", "")
+            if state["active"] != first_id:
+                failures.append("аккаунты: первый не стал активным")
+
+            second = add_account(
+                "COOKIE-2",
+                profile={"ok": True, "id": 222, "name": "second_login",
+                         "display": "Second"},
+                path=acc_path, fetch_avatar=False)
+            second_id = second.get("account", {}).get("id", "")
+            state = accounts_state(acc_path)
+            if len(state["accounts"]) != 2:
+                failures.append(f"аккаунты: второй не добавлен {state}")
+            if state["active"] != first_id:
+                failures.append("аккаунты: активный сменился сам")
+            if not set_active_account(second_id, acc_path)["ok"]:
+                failures.append("аккаунты: активный не переключился")
+            if accounts_state(acc_path)["active"] != second_id:
+                failures.append("аккаунты: активный не сохранился")
+            if account_session(second_id, acc_path) != "COOKIE-2":
+                failures.append("аккаунты: сессия второго не читается")
+            if "COOKIE-2" in acc_path.read_text(encoding="utf-8"):
+                failures.append("аккаунты: сессия лежит открытым текстом")
+
+            again = add_account(
+                "COOKIE-1B",
+                profile={"ok": True, "id": 111, "name": "first_login",
+                         "display": "First"},
+                path=acc_path, fetch_avatar=False)
+            if (not again["ok"]
+                    or len(accounts_state(acc_path)["accounts"]) != 2):
+                failures.append("аккаунты: повторный вход создал дубликат")
+            elif account_session(first_id, acc_path) != "COOKIE-1B":
+                failures.append("аккаунты: повторный вход не обновил сессию")
+
+            raw = json.loads(acc_path.read_text(encoding="utf-8"))
+            for item in raw["accounts"]:
+                if item["user_id"] == "222":
+                    item["session"] = "broken"
+            acc_path.write_text(json.dumps(raw), encoding="utf-8")
+            broken = launch_game_as("12345", second_id,
+                                    accounts_path=acc_path)
+            if broken["ok"] or "повреждена" not in broken["error"]:
+                failures.append(f"аккаунты: битая сессия {broken}")
+
+            empty_path = Path(td) / "empty.json"
+            missing = launch_game_as("12345", None,
+                                     accounts_path=empty_path)
+            if missing["ok"] or "Нет добавленных аккаунтов" not in missing[
+                    "error"]:
+                failures.append(f"аккаунты: пустой запуск {missing}")
+
+            garbage = Path(td) / "garbage.json"
+            garbage.write_text(json.dumps({
+                "active": "missing",
+                "accounts": [
+                    {"id": "a1", "user_id": "333", "name": "ok",
+                     "display": "Ok", "session": "dpapi:x"},
+                    {"id": "a2", "user_id": "not-a-number", "session": "x"},
+                    {"id": "a1", "user_id": "444", "session": "x"},
+                    {"id": "a3", "user_id": "555"},
+                ],
+            }), encoding="utf-8")
+            cleaned = accounts_state(garbage)
+            if (len(cleaned["accounts"]) != 1
+                    or cleaned["active"] != "a1"):
+                failures.append(f"аккаунты: мусор не вычищен {cleaned}")
+
+            removed = remove_account(second_id, acc_path)
+            state = accounts_state(acc_path)
+            if (not removed["ok"] or len(state["accounts"]) != 1
+                    or state["active"] != first_id):
+                failures.append(f"аккаунты: удаление {removed} {state}")
+
+            url = game_launch_url("12345", "TICKET-ABC")
+            if not url.startswith(
+                    "roblox-player:1+launchmode:play+gameinfo:TICKET-ABC"):
+                failures.append(f"аккаунты: ссылка запуска {url[:70]}")
+            if "12345" not in url:
+                failures.append("аккаунты: place id не попал в ссылку")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"accounts test: {exc}")
+
     # 7) пути записи флагов (регрессия на неверный путь Roblox/…)
     try:
         for path in client_settings_paths():
@@ -3734,20 +5499,32 @@ def run_selftest():
 
     # 10) UI: построение, все темы (пересборка), безрамочное окно
     try:
+        import core as core_module
+
+        ui_tmp = tempfile.TemporaryDirectory(prefix="maklyxa-ui-")
+        ui_data = Path(ui_tmp.name)
+        core_module.THEME_SETS_DIR = ui_data / "ThemeSets"
+        core_module.ACCOUNTS_PATH = ui_data / "accounts.json"
+        core_module.AVATARS_DIR = ui_data / "avatars"
+
         root = tk.Tk()
         root.withdraw()
         app = App(root, interactive=False)
         root.update_idletasks()
         root.update()
 
-        for page_key in ("flags", "cursors", "favorites", "settings", "log",
-                         "game"):
+        for page_key in ("game", "accounts", "favorites", "flags",
+                         "cursors", "themes", "settings", "log"):
             app.show_page(page_key)
             root.update()
             if app.current_page != page_key:
                 failures.append(f"show_page({page_key}) не сработал")
         if not hasattr(app, "var_discord_id"):
             failures.append("UI: нет поля Discord Application ID")
+        if not hasattr(app, "accounts_box"):
+            failures.append("UI: нет списка аккаунтов")
+        if not hasattr(app, "theme_sets_box"):
+            failures.append("UI: нет списка своих тем")
         if app._rpc is not None:
             failures.append("UI: presence запустился без интерактива")
         if app.discord_status_var.get() == "":
@@ -3763,11 +5540,35 @@ def run_selftest():
                 failures.append(f"set_theme({name}): страницы неполные")
             if len(app.nav_buttons) != len(NAV_ITEMS):
                 failures.append(f"set_theme({name}): сайдбар неполный")
+
+        ui_theme = create_theme_set("Тестовая тема", base="light",
+                                    tint="#3b9eff", accent="#3b9eff")
+        if not ui_theme["ok"]:
+            failures.append(f"UI: тестовая тема не создана {ui_theme}")
+        else:
+            app.set_theme("custom", save=False,
+                          custom_name=ui_theme["name"])
+            root.update()
+            if app.theme_name != "custom" or not app.c.get("custom"):
+                failures.append("UI: своя тема не применилась")
+            if app.c.get("base") != "light":
+                failures.append("UI: своя тема потеряла светлую базу")
+            if len(app.pages) != len(NAV_ITEMS):
+                failures.append("UI: страницы своей темы неполные")
+            if len(app.nav_buttons) != len(NAV_ITEMS):
+                failures.append("UI: сайдбар своей темы неполный")
+            app._refresh_theme_panel(select=ui_theme["name"])
+            root.update()
+            if ui_theme["name"] not in app.theme_sets_box.get(0, "end"):
+                failures.append("UI: тестовая тема не попала в список")
+
         if original_theme != app.theme_name:
             app.set_theme(original_theme, save=False)
             root.update()
         if app.cfg["theme"] != load_config()["theme"]:
             failures.append("set_theme(save=False) записал тему в конфиг")
+        if ui_theme["ok"]:
+            delete_theme_set(ui_theme["name"])
 
         # безрамочное окно: панель задач и сворачивание
         test_geom = f"{MIN_W}x{MIN_H}+-32000+-32000"
@@ -3804,6 +5605,7 @@ def run_selftest():
         root.withdraw()
         app._closing = True        # не пишем тестовую геометрию в конфиг
         root.destroy()
+        ui_tmp.cleanup()
     except Exception as exc:  # noqa: BLE001
         failures.append(f"UI smoke test: {type(exc).__name__}: {exc}")
 
@@ -3812,8 +5614,8 @@ def run_selftest():
         for item in failures:
             print("  -", item)
         return 1
-    print("SELFTEST OK: core, themes, frameless window, flags, cursors, "
-          "UI rebuild — all good")
+    print("SELFTEST OK: core, themes, accounts, frameless window, flags, "
+          "cursors, UI rebuild — all good")
     return 0
 
 
