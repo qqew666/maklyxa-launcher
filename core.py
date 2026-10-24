@@ -23,9 +23,13 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -36,7 +40,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -169,6 +173,8 @@ DEFAULT_CONFIG = {
     "accent": "#00c48c",
     "theme": DEFAULT_THEME,
     "window_geometry": "",
+    "discord_rpc": True,
+    "discord_app_id": "",
 }
 
 # ---- FastFlags и бутстраперы -----------------------------------------------
@@ -292,8 +298,10 @@ def load_config(path=None):
         cfg[key] = clean[:40]
 
     for flag in ("auto_close", "save_history", "remember_last",
-                 "apply_flags_on_launch", "use_custom_cursors"):
+                 "apply_flags_on_launch", "use_custom_cursors",
+                 "discord_rpc"):
         cfg[flag] = bool(cfg.get(flag))
+    cfg["discord_app_id"] = valid_discord_app_id(cfg.get("discord_app_id"))
     try:
         cfg["fps_limit"] = max(0, min(1000, int(cfg.get("fps_limit") or 0)))
     except (TypeError, ValueError):
@@ -1277,6 +1285,291 @@ def datacenter_regions():
     except Exception:
         pass
     return ["Auto"]
+
+
+# ---- Discord Rich Presence ---------------------------------------------------
+
+DISCORD_PORTAL_URL = "https://discord.com/developers/applications"
+
+_OP_HANDSHAKE = 0
+_OP_FRAME = 1
+_OP_CLOSE = 2
+_OP_PING = 3
+_OP_PONG = 4
+
+
+def valid_discord_app_id(value):
+    """Application ID приложения Discord — 15–25 цифр, иначе пусто."""
+    value = str(value or "").strip()
+    return value if re.fullmatch(r"\d{15,25}", value) else ""
+
+
+def discord_activity(details=None, state=None, start_ms=None, buttons=None):
+    """Собирает объект activity для SET_ACTIVITY в рамках лимитов Discord."""
+    activity = {"instance": True}
+    for key, value in (("details", details), ("state", state)):
+        text = str(value or "").strip()
+        if len(text) > 128:
+            text = text[:127] + "…"
+        if len(text) >= 2:
+            activity[key] = text
+    if start_ms:
+        activity["timestamps"] = {"start": int(start_ms)}
+    clean = []
+    for item in buttons or ():
+        label = str(item.get("label") or "").strip()[:32]
+        url = str(item.get("url") or "").strip()
+        if label and url.startswith(("https://", "http://")):
+            clean.append({"label": label, "url": url[:512]})
+    if clean:
+        activity["buttons"] = clean[:2]
+    return activity
+
+
+def discord_frame(op, payload):
+    """Кадр Discord IPC: little-endian op + длина + JSON."""
+    data = json.dumps(payload, ensure_ascii=False,
+                      separators=(",", ":")).encode("utf-8")
+    return struct.pack("<II", op, len(data)) + data
+
+
+class DiscordRPC:
+    """Минимальный клиент Discord IPC через named pipe (без библиотек)."""
+
+    def __init__(self, app_id):
+        self.app_id = valid_discord_app_id(app_id)
+        self._pipe = None
+        self._write_lock = threading.Lock()
+        self._ready = threading.Event()
+        self._closed = threading.Event()
+        self.last_error = ""
+
+    @property
+    def connected(self):
+        return self._pipe is not None and self._ready.is_set()
+
+    @staticmethod
+    def _pipe_names():
+        if sys.platform == "win32":
+            return [rf"\\?\pipe\discord-ipc-{i}" for i in range(10)]
+        base = os.getenv("XDG_RUNTIME_DIR") or os.getenv("TMPDIR") or "/tmp"
+        return [str(Path(base) / f"discord-ipc-{i}") for i in range(10)]
+
+    @staticmethod
+    def _read_exact(pipe, size):
+        data = bytearray()
+        while len(data) < size:
+            chunk = pipe.read(size - len(data))
+            if not chunk:
+                return b""
+            data.extend(chunk)
+        return bytes(data)
+
+    def connect(self, timeout=3.0):
+        if not self.app_id:
+            return False
+        pipe = None
+        for name in self._pipe_names():
+            try:
+                pipe = open(name, "r+b", buffering=0)
+                break
+            except OSError:
+                continue
+        if pipe is None:
+            self.last_error = "no_pipe"
+            return False
+        self._pipe = pipe
+        self._closed.clear()
+        self.last_error = ""
+        try:
+            self._send(_OP_HANDSHAKE, {"v": 1, "client_id": self.app_id})
+        except OSError:
+            self.close()
+            return False
+        threading.Thread(target=self._read_loop, daemon=True,
+                         name="discord-rpc-reader").start()
+        if not self._ready.wait(timeout):
+            if self.last_error == "closed":
+                # Discord закрыл пайп до READY — обычно это чужой client_id
+                self.last_error = "rejected"
+            elif not self.last_error:
+                self.last_error = "no_response"
+            self.close()
+            return False
+        return True
+
+    def _send(self, op, payload):
+        pipe = self._pipe
+        if pipe is None:
+            raise OSError("Discord IPC закрыт")
+        frame = discord_frame(op, payload)
+        with self._write_lock:
+            offset = 0
+            while offset < len(frame):
+                written = pipe.write(frame[offset:])
+                if not written:
+                    raise OSError("Discord IPC: запись не удалась")
+                offset += written
+
+    def _read_loop(self):
+        pipe = self._pipe
+        try:
+            while pipe is not None:
+                header = self._read_exact(pipe, 8)
+                if not header:
+                    break
+                op, length = struct.unpack("<II", header)
+                body = self._read_exact(pipe, length) if length else b""
+                if length and not body:
+                    break
+                payload = {}
+                if body:
+                    try:
+                        payload = json.loads(body.decode("utf-8", "replace"))
+                    except ValueError:
+                        payload = {}
+                if op == _OP_PING:
+                    try:
+                        self._send(_OP_PONG, payload)
+                    except OSError:
+                        break
+                elif op == _OP_CLOSE:
+                    if not self.last_error:
+                        self.last_error = "closed"
+                    break
+                elif payload.get("evt") == "READY":
+                    self._ready.set()
+                elif payload.get("evt") == "ERROR":
+                    self.last_error = "rejected"
+                    break
+        except (OSError, ValueError):
+            pass
+        finally:
+            self._ready.clear()
+            if not self.last_error:
+                self.last_error = "closed"
+
+    def set_activity(self, activity):
+        self._send(_OP_FRAME, {
+            "cmd": "SET_ACTIVITY",
+            "args": {"pid": os.getpid(), "activity": activity},
+            "nonce": uuid.uuid4().hex,
+        })
+
+    def clear_activity(self):
+        self._send(_OP_FRAME, {
+            "cmd": "SET_ACTIVITY",
+            "args": {"pid": os.getpid(), "activity": None},
+            "nonce": uuid.uuid4().hex,
+        })
+
+    def close(self):
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        self._ready.clear()
+        pipe, self._pipe = self._pipe, None
+        if pipe is not None:
+            try:
+                pipe.close()
+            except (OSError, ValueError):
+                pass
+
+
+class DiscordPresence:
+    """Фоновый статус: подключение с ретраями и обновление активности."""
+
+    RETRY_DELAY = 15
+
+    def __init__(self, app_id, start_ts=None):
+        self.app_id = valid_discord_app_id(app_id)
+        self.start_ms = int((start_ts or time.time()) * 1000)
+        self._activity = None
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread = None
+        self.connected = False
+        self.last_error = ""
+
+    def start(self):
+        if not self.app_id or self._thread is not None:
+            return False
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="discord-presence")
+        self._thread.start()
+        return True
+
+    def set_activity(self, details=None, state=None, buttons=None):
+        activity = discord_activity(details, state, self.start_ms, buttons)
+        with self._lock:
+            self._activity = activity
+        self._wake.set()
+
+    def clear_activity(self):
+        with self._lock:
+            self._activity = None
+        self._wake.set()
+
+    def stop(self):
+        self._stop.set()
+        self._wake.set()
+
+    def _run(self):
+        rpc = None
+        while not self._stop.is_set():
+            if rpc is None:
+                rpc = DiscordRPC(self.app_id)
+                if not rpc.connect():
+                    self.last_error = rpc.last_error or "no_pipe"
+                    rpc = None
+                    self.connected = False
+                    self._stop.wait(self.RETRY_DELAY)
+                    continue
+                self.connected = True
+                self.last_error = ""
+            with self._lock:
+                activity = self._activity
+            try:
+                if activity is not None:
+                    rpc.set_activity(activity)
+                else:
+                    rpc.clear_activity()
+            except OSError:
+                self.connected = False
+                self.last_error = rpc.last_error or "closed"
+                rpc.close()
+                rpc = None
+                continue
+            self._wake.wait(self.RETRY_DELAY)
+            self._wake.clear()
+            if self._stop.is_set():
+                break
+            if not rpc.connected:
+                self.connected = False
+                self.last_error = rpc.last_error or "closed"
+                rpc.close()
+                rpc = None
+                continue
+            with self._lock:
+                activity = self._activity
+            try:
+                if activity is None:
+                    rpc.clear_activity()
+                else:
+                    rpc.set_activity(activity)
+            except OSError:
+                self.connected = False
+                self.last_error = rpc.last_error or "closed"
+                rpc.close()
+                rpc = None
+        self.connected = False
+        if rpc is not None:
+            try:
+                rpc.clear_activity()
+            except OSError:
+                pass
+            rpc.close()
 
 
 # ---- геометрия безрамочного окна --------------------------------------------------

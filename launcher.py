@@ -40,7 +40,7 @@ from core import (
     ACCENT_PRESETS, APP_NAME, BOOT_BOOLS_FROST, BOOT_BOOLS_SHARED,
     BUNDLE_DIR, CONFIG_DIR, CONFIG_PATH, CURSOR_SLOTS,
     DEFAULT_CONFIG, DEFAULT_THEME,
-    DISCOVER_URL, FPS_CHOICES, FLAG_API, FLAG_FPS, FLAG_QUALITY,
+    DISCORD_PORTAL_URL, DISCOVER_URL, FPS_CHOICES, FLAG_API, FLAG_FPS, FLAG_QUALITY,
     GRAPHICS_MODES, HTTP_HEADERS, INSTALLER_URL,
     THEMES, THEME_ORDER, VERSION, WINDOW_TITLE,
     acquire_single_instance, apply_cursor_set, apply_fastflags,
@@ -55,7 +55,8 @@ from core import (
     player_pids, probe_protocol, read_json_dict, remove_cursor_slot,
     rename_cursor_set, resize_geometry, restore_custom_cursors,
     roblox_status, save_config, set_cursor_slot, shade, trunc,
-    valid_cursor_set_name, valid_geometry, work_area, write_json_dict,
+    valid_cursor_set_name, valid_discord_app_id, valid_geometry, work_area,
+    write_json_dict, DiscordPresence, discord_activity, discord_frame,
 )
 
 ICON_PNG = BUNDLE_DIR / "icon.png"
@@ -541,6 +542,9 @@ class App:
         self._checks = []             # кастомные чекбоксы
         self._btn_anim_jobs = {}      # анимации наведения кнопок
         self.current_page = start_page or "game"
+        self._rpc = None
+        self._rpc_start_ts = time.time()
+        self.discord_status_var = tk.StringVar(value="")
 
         self._debounce = None
         self._dl_active = False
@@ -565,6 +569,10 @@ class App:
         self.root.after(100, self._poll_queue)
         self._startup_checks()
         self.on_entry_changed()
+        self._start_presence()
+        self.discord_status_var.set(self._discord_status_text())
+        if self.interactive:
+            self._poll_discord_status()
 
     # -- сборка / пересборка ----------------------------------------------------
 
@@ -2313,6 +2321,40 @@ class App:
         self._button(row, "Применить", self.apply_default,
                      side="left", padx=(8, 0))
 
+        # Discord Rich Presence
+        inner_d = self._card(
+            pad, title="Discord",
+            subtitle="Статус MaklyxaLauncher в профиле Discord",
+            glyph="◍")
+        self.var_discord_rpc = tk.BooleanVar(
+            value=bool(self.cfg.get("discord_rpc", True)))
+        self.var_discord_id = tk.StringVar(
+            value=self.cfg.get("discord_app_id") or "")
+        self._checkbox(
+            inner_d, "Показывать статус лаунчера в Discord",
+            self.var_discord_rpc, command=self.apply_discord_settings).pack(
+                anchor="w", pady=(4, 8))
+        tk.Label(inner_d, text="Application ID", bg=c["surface"],
+                 fg=c["text"], font=("Segoe UI", 10)).pack(anchor="w")
+        row_d = tk.Frame(inner_d, bg=c["surface"])
+        row_d.pack(fill="x", pady=(4, 0))
+        ttk.Entry(row_d, textvariable=self.var_discord_id).pack(
+            side="left", fill="x", expand=True, ipady=3)
+        self._button(row_d, "Сохранить", self.apply_discord_settings,
+                     kind="primary", side="left", padx=(8, 0))
+        row_d2 = tk.Frame(inner_d, bg=c["surface"])
+        row_d2.pack(fill="x", pady=(8, 0))
+        self._button(row_d2, "Создать приложение",
+                     self.open_discord_portal, side="left")
+        tk.Label(inner_d, textvariable=self.discord_status_var,
+                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                 anchor="w").pack(fill="x", pady=(8, 0))
+        self._hint(
+            inner_d,
+            "Application ID берётся у приложения с именем MaklyxaLauncher "
+            "на discord.com/developers/applications. Для статуса нужен "
+            "запущенный Discord для ПК.", wrap=540)
+
         # Roblox на этом ПК
         inner3 = self._card(pad, title="Roblox на этом ПК", glyph="◉")
         tk.Label(inner3, textvariable=self.proto_var, bg=c["surface"],
@@ -2431,6 +2473,8 @@ class App:
         self.var_save_history.set(self.cfg["save_history"])
         self.var_remember.set(self.cfg["remember_last"])
         self.var_default.set(self.cfg["default_place_id"])
+        self.var_discord_rpc.set(bool(self.cfg.get("discord_rpc", True)))
+        self.var_discord_id.set(self.cfg.get("discord_app_id") or "")
 
         start = ""
         if self.cfg["remember_last"] and self.cfg["last_place_id"]:
@@ -2468,6 +2512,82 @@ class App:
         save_config(self.cfg)
         self.status_var.set(f"Игра по умолчанию: {pid}")
 
+    # -- Discord Rich Presence ---------------------------------------------------
+
+    def _start_presence(self):
+        if self._rpc is not None or not self.cfg.get("discord_rpc"):
+            return
+        app_id = valid_discord_app_id(self.cfg.get("discord_app_id"))
+        if not app_id:
+            return
+        self._rpc = DiscordPresence(app_id, self._rpc_start_ts)
+        self._rpc.start()
+        self._rpc_set("В меню", "Игра не выбрана")
+
+    def _stop_presence(self):
+        rpc, self._rpc = self._rpc, None
+        if rpc is not None:
+            rpc.stop()
+
+    def _rpc_set(self, details, state):
+        if self._rpc is not None:
+            self._rpc.set_activity(details, state)
+
+    def _discord_status_text(self):
+        if not self.cfg.get("discord_rpc"):
+            return "Статус в Discord выключен"
+        if not valid_discord_app_id(self.cfg.get("discord_app_id")):
+            return "Не подключён — укажи Application ID"
+        if self._rpc is None:
+            return "Ожидание запуска…"
+        if self._rpc.connected:
+            return "Подключён к Discord ✓"
+        error = getattr(self._rpc, "last_error", "")
+        if error == "rejected":
+            return "Discord не принял Application ID"
+        if error == "no_pipe":
+            return "Discord не запущен — жду подключения"
+        if error == "closed":
+            return "Соединение с Discord потеряно — переподключаюсь"
+        if error == "no_response":
+            return "Discord не отвечает — переподключаюсь"
+        return "Подключаюсь к Discord…"
+
+    def _poll_discord_status(self):
+        if self._closing:
+            return
+        self.discord_status_var.set(self._discord_status_text())
+        self.root.after(2000, self._poll_discord_status)
+
+    def apply_discord_settings(self):
+        raw = self.var_discord_id.get().strip()
+        app_id = valid_discord_app_id(raw)
+        if raw and not app_id:
+            self.status_var.set("Application ID — только цифры")
+            if self.interactive:
+                messagebox.showwarning(
+                    APP_NAME, "Application ID приложения Discord "
+                    "состоит только из цифр.", parent=self.root)
+            return
+        self.cfg["discord_rpc"] = bool(self.var_discord_rpc.get())
+        self.cfg["discord_app_id"] = app_id
+        self.var_discord_id.set(app_id)
+        save_config(self.cfg)
+        self._stop_presence()
+        self._start_presence()
+        if not app_id:
+            self.status_var.set("Discord: укажи Application ID")
+        elif self.cfg["discord_rpc"]:
+            self.status_var.set("Discord: статус включён")
+        else:
+            self.status_var.set("Discord: статус выключен")
+        self.log("Discord Rich Presence: "
+                 f"{'вкл' if self.cfg['discord_rpc'] else 'выкл'}"
+                 + (f", ID {app_id}" if app_id else ""))
+
+    def open_discord_portal(self):
+        webbrowser.open(DISCORD_PORTAL_URL)
+
     def reset_settings(self):
         if self.interactive and not messagebox.askyesno(
                 APP_NAME,
@@ -2498,6 +2618,7 @@ class App:
         if self._closing:
             return
         self._closing = True
+        self._stop_presence()
         try:
             self.cfg["window_geometry"] = self.root.geometry()
         except tk.TclError:
@@ -2987,6 +3108,7 @@ class App:
         self._btn_state(self.btn_client, "primary", False,
                         text="Ищу Roblox…")
         self.status_var.set("Ищу Roblox…")
+        self._rpc_set("Клиент Roblox", "Открываю клиент…")
         threading.Thread(target=self._client_worker, daemon=True).start()
 
     def _client_worker(self):
@@ -3055,6 +3177,7 @@ class App:
         self._btn_state(self.btn_client, "primary", True,
                         text="▶   ПРОСТО В ROBLOX")
         if outcome == "already":
+            self._rpc_set("Клиент Roblox", "Клиент уже открыт")
             if focused:
                 self.status_var.set("Roblox уже запущен — окно впереди")
                 self.log("Roblox уже запущен, окно выведено на передний план")
@@ -3062,11 +3185,13 @@ class App:
                 self.status_var.set("Roblox уже запущен")
                 self.log("Roblox уже запущен (окно вывести не удалось)")
         elif outcome in ("exe", "protocol"):
+            self._rpc_set("Клиент Roblox", "Открыт без игры")
             how = ("прямым запуском клиента" if outcome == "exe"
                    else "через roblox://")
             self.status_var.set("Roblox запущен ✓")
             self.log(f"Клиент Roblox запущен {how}")
         else:
+            self._rpc_set("В меню", "Открыт сайт Roblox")
             self.status_var.set("Не удалось — открыл Roblox в браузере")
             self.log("Прямой запуск не сработал, открыт сайт Roblox")
             webbrowser.open(DISCOVER_URL)
@@ -3077,6 +3202,7 @@ class App:
         self._client_busy = False
         self._btn_state(self.btn_client, "primary", True,
                         text="▶   ПРОСТО В ROBLOX")
+        self._rpc_set("В меню", "Roblox не установлен")
         self.log("Клиент не найден — предлагаю скачать")
         if self.interactive and messagebox.askyesno(
                 APP_NAME, "Roblox не установлен.\n"
@@ -3128,13 +3254,16 @@ class App:
                 self.log(f"FastFlags: {len(values)} → {written} файл(ов)")
         self._apply_cursors_for_launch()
         name = self._name_for(pid)
+        game = name or f"Place {pid}"
         url = f"roblox://experiences/start?placeId={pid}"
         self.log(f"Запуск: {name or 'игра'} (place {pid})")
+        self._rpc_set(game, "Запускаю игру…")
         try:
             os.startfile(url)
         except OSError as exc:
             self.log(f"Ошибка запуска: {exc}")
             self.status_var.set("Ошибка запуска")
+            self._rpc_set("В меню", "Ошибка запуска")
             if self.interactive:
                 messagebox.showerror(
                     APP_NAME,
@@ -3145,6 +3274,8 @@ class App:
         self.entry_var.set(pid)
         self.status_var.set(f"Запускаю {name or pid}…")
         self.log(f"Ссылка передана системе: {url}")
+        self.root.after(
+            10000, lambda g=game: self._rpc_set(g, "Играет в Roblox"))
 
         if self.cfg["save_history"]:
             history = [h for h in self.cfg["history"] if h["place_id"] != pid]
@@ -3393,6 +3524,34 @@ def run_selftest():
     if aw <= 0 or ah <= 0:
         failures.append(f"work_area: {aw}x{ah}")
 
+    # 4b) Discord Rich Presence: ID, activity и кадр IPC
+    try:
+        good_id = "123456789012345678"
+        if valid_discord_app_id(good_id) != good_id:
+            failures.append("discord: валидный Application ID отклонён")
+        for bad in ("", "abc", "123", good_id + "x"):
+            if valid_discord_app_id(bad):
+                failures.append(f"discord: принят неверный ID {bad!r}")
+        activity = discord_activity("В меню", "Игра не выбрана",
+                                    1700000000000)
+        if activity.get("details") != "В меню":
+            failures.append(f"discord: details {activity}")
+        if activity.get("state") != "Игра не выбрана":
+            failures.append(f"discord: state {activity}")
+        if activity.get("timestamps", {}).get("start") != 1700000000000:
+            failures.append("discord: timestamp не попал в activity")
+        if len(discord_activity("x" * 300, "y")["details"]) > 128:
+            failures.append("discord: details не обрезаны до 128")
+        frame = discord_frame(1, {"cmd": "PING"})
+        if int.from_bytes(frame[:4], "little") != 1:
+            failures.append("discord: op кадра IPC неверный")
+        if int.from_bytes(frame[4:8], "little") != len(frame) - 8:
+            failures.append("discord: длина кадра IPC неверна")
+        if json.loads(frame[8:].decode("utf-8")) != {"cmd": "PING"}:
+            failures.append("discord: JSON кадра IPC повреждён")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"discord test: {exc}")
+
     # 5) обнаружение Roblox
     try:
         exe = find_player_exe()
@@ -3587,6 +3746,12 @@ def run_selftest():
             root.update()
             if app.current_page != page_key:
                 failures.append(f"show_page({page_key}) не сработал")
+        if not hasattr(app, "var_discord_id"):
+            failures.append("UI: нет поля Discord Application ID")
+        if app._rpc is not None:
+            failures.append("UI: presence запустился без интерактива")
+        if app.discord_status_var.get() == "":
+            failures.append("UI: пустой статус Discord")
 
         original_theme = app.theme_name
         for name in THEME_ORDER:
