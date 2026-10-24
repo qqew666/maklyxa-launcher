@@ -3,15 +3,19 @@
 """
 MaklyxaLauncher — интерфейс лаунчера (Tkinter).
 
-Полностью новый UI:
+UI v2 (полный реворк меню):
   * своё окно без рамки: перетаскивание за шапку, ресайз за края,
     максимизация двойным кликом, кнопки свернуть/развернуть/закрыть;
-  * три темы оформления — тёмная, светлая, стекло;
-  * карточки вместо рамок, hover-эффекты, акцентный цвет;
-  * карточка игры с иконкой, названием, автором и онлайном.
+  * меню-вкладки сверху (вместо бокового сайдбара) с анимированной
+    акцентной полосой под активной вкладкой;
+  * заголовки страниц с бейджем-иконкой, карточки с разделителями;
+  * кнопки с плавной анимацией цвета при наведении;
+  * статусная строка в виде «пилюль», breadcrumb страницы в шапке,
+    быстрое переключение темы в правом верхнем углу;
+  * три темы оформления — тёмная, светлая, стекло.
 
 Ядро (логика) — в core.py.
-Запуск: python launcher.py [--page game|favorites|flags|settings|log]
+Запуск: python launcher.py [--page game|favorites|flags|cursors|settings|log]
                             [--theme dark|light|glass]
 """
 
@@ -30,28 +34,34 @@ import webbrowser
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from core import (
     ACCENT_PRESETS, APP_NAME, BOOT_BOOLS_FROST, BOOT_BOOLS_SHARED,
-    BUNDLE_DIR, CONFIG_DIR, CONFIG_PATH, DEFAULT_CONFIG, DEFAULT_THEME,
+    BUNDLE_DIR, CONFIG_DIR, CONFIG_PATH, CURSOR_SLOTS,
+    DEFAULT_CONFIG, DEFAULT_THEME,
     DISCOVER_URL, FPS_CHOICES, FLAG_API, FLAG_FPS, FLAG_QUALITY,
     GRAPHICS_MODES, HTTP_HEADERS, INSTALLER_URL,
     THEMES, THEME_ORDER, VERSION, WINDOW_TITLE,
-    acquire_single_instance, apply_fastflags, bootstrapper_running,
-    client_settings_paths, datacenter_regions, fetch_game_icon,
-    fetch_game_info, fastflag_values, find_bootstrapper_settings,
-    find_player_exe, focus_roblox_window, fmt_num, hit_test, load_config,
-    mb, merge_flags_into, migrate_old_config, parse_place_id, player_pids,
-    probe_protocol,
-    read_json_dict, resize_geometry, roblox_status, save_config, shade,
-    trunc, valid_geometry, work_area, write_json_dict,
+    acquire_single_instance, apply_cursor_set, apply_fastflags,
+    bootstrapper_running, client_settings_paths, copy_current_cursor_set,
+    create_cursor_set, cursor_install_roots, cursor_set_files,
+    cursor_set_warnings, cursor_slot_path, cursor_state_info,
+    datacenter_regions, delete_cursor_set, ensure_cursor_sets_dir,
+    export_cursor_set, fetch_game_icon, fetch_game_info, fastflag_values,
+    find_bootstrapper_settings, find_player_exe, focus_roblox_window,
+    fmt_num, hit_test, import_cursor_set, list_cursor_sets, load_config,
+    mb, merge_flags_into, migrate_old_config, parse_place_id, png_info,
+    player_pids, probe_protocol, read_json_dict, remove_cursor_slot,
+    rename_cursor_set, resize_geometry, restore_custom_cursors,
+    roblox_status, save_config, set_cursor_slot, shade, trunc,
+    valid_cursor_set_name, valid_geometry, work_area, write_json_dict,
 )
 
 ICON_PNG = BUNDLE_DIR / "icon.png"
 
 TITLEBAR_H = 42
-SIDEBAR_W = 214
+NAVBAR_H = 46
 MIN_W, MIN_H = 880, 600
 BORDER_PX = 6
 DEFAULT_SIZE = (940, 660)
@@ -66,6 +76,7 @@ NAV_ITEMS = [
     ("game", "▶", "Игра"),
     ("favorites", "★", "Избранное"),
     ("flags", "⚑", "Флаги"),
+    ("cursors", "◈", "Курсоры"),
     ("settings", "⚙", "Настройки"),
     ("log", "≡", "Журнал"),
 ]
@@ -276,6 +287,11 @@ class App:
         self.pages = {}
         self.scroll_canvases = {}
         self.primary_buttons = []
+        self.accent_bgs = []          # виджеты с фоном акцентного цвета
+        self.accent_fgs = []          # виджеты с текстом акцентного цвета
+        self._ind_pos = None          # позиция полосы навигации (x, w)
+        self._ind_anim_job = None
+        self._btn_anim_jobs = {}      # анимации наведения кнопок
         self.current_page = start_page or "game"
 
         self._debounce = None
@@ -287,7 +303,6 @@ class App:
         self._wheel_bound = False
         self._boot_layout_done = False
         self._icon_ref = None
-        self._logo_ref = None
         self.roblox_kind = "missing"
         self.boot_kind = None
         self.boot_config_path = None
@@ -311,6 +326,7 @@ class App:
         self._build_page_game()
         self._build_page_favorites()
         self._build_page_flags()
+        self._build_page_cursors()
         self._build_page_settings()
         self._build_page_log()
         self._load_into_ui()
@@ -328,6 +344,16 @@ class App:
         self.pages.clear()
         self.scroll_canvases.clear()
         self.primary_buttons.clear()
+        self.accent_bgs.clear()
+        self.accent_fgs.clear()
+        self._ind_pos = None
+        self._ind_anim_job = None
+        for job in self._btn_anim_jobs.values():
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._btn_anim_jobs.clear()
         self._debounce = None
         self._boot_layout_done = False
         self.frameless.excluded = set()
@@ -434,7 +460,7 @@ class App:
                         bordercolor=c["border"], lightcolor=self.accent,
                         darkcolor=self.accent)
 
-    # -- каркас: шапка, сайдбар, страницы, статус ---------------------------------
+    # -- каркас: шапка, панель вкладок, страницы, статус -------------------------
 
     def _build_shell(self):
         root, c = self.root, self.c
@@ -461,12 +487,10 @@ class App:
                 pass
         tk.Label(titlebar, text=APP_NAME, bg=c["titlebar"], fg=c["text"],
                  font=("Segoe UI", 10, "bold")).pack(side="left")
-        self.title_theme = tk.Label(
-            titlebar, bg=c["titlebar"], fg=c["muted"],
+        self.title_crumb = tk.Label(
+            titlebar, text="", bg=c["titlebar"], fg=c["muted"],
             font=("Segoe UI", 9))
-        self.title_theme.pack(side="left", padx=(10, 0))
-        self.title_theme.configure(
-            text=f"· {THEMES[self.theme_name]['label'].lower()} тема")
+        self.title_crumb.pack(side="left", padx=(12, 0))
 
         # кнопки окна
         close_btn = self._window_button(
@@ -479,75 +503,156 @@ class App:
         self.frameless.excluded = {min_btn, max_btn, close_btn}
         self.frameless.on_max_change = self._on_max_change
 
-        # статусная строка
-        statusbar = tk.Frame(root, bg=c["panel"], height=30)
-        statusbar.pack(fill="x", side="bottom")
-        statusbar.pack_propagate(False)
-        self.proto_var = tk.StringVar(value="Проверка Roblox…")
-        self.status_var = tk.StringVar(value="Готово")
-        left = tk.Frame(statusbar, bg=c["panel"])
-        left.pack(side="left", fill="y", padx=14)
-        self.status_dot = tk.Label(left, text="●", bg=c["panel"],
-                                   fg=self.accent, font=("Segoe UI", 8))
-        self.status_dot.pack(side="left")
-        tk.Label(left, textvariable=self.proto_var, bg=c["panel"],
-                 fg=c["muted"], font=("Segoe UI", 9)).pack(
-                     side="left", padx=(7, 0))
-        tk.Label(statusbar, textvariable=self.status_var, bg=c["panel"],
-                 fg=c["muted"], font=("Segoe UI", 9)).pack(
-                     side="right", padx=14)
-
-        # тело: сайдбар + контент
-        body = tk.Frame(root, bg=c["bg"])
-        body.pack(fill="both", expand=True)
-
-        sidebar = tk.Frame(body, bg=c["panel"], width=SIDEBAR_W)
-        sidebar.pack(side="left", fill="y")
-        sidebar.pack_propagate(False)
-
-        logo = tk.Frame(sidebar, bg=c["panel"])
-        logo.pack(fill="x", padx=16, pady=(18, 16))
-        if ICON_PNG.exists():
-            try:
-                img = tk.PhotoImage(file=str(ICON_PNG))
-                img = img.subsample(6, 6)        # 256 → 43 px
-                self._logo_ref = img
-                tk.Label(logo, image=img, bg=c["panel"]).pack(side="left")
-            except tk.TclError:
-                pass
-        name_box = tk.Frame(logo, bg=c["panel"])
-        name_box.pack(side="left", padx=(10, 0))
-        tk.Label(name_box, text=APP_NAME, bg=c["panel"], fg=c["text"],
-                 font=("Segoe UI", 11, "bold"), anchor="w").pack(fill="x")
-        tk.Label(name_box, text=f"лаунчер · v{VERSION}", bg=c["panel"],
-                 fg=c["muted"], font=("Segoe UI", 9), anchor="w").pack(
-                     fill="x")
-
-        nav = tk.Frame(sidebar, bg=c["panel"])
-        nav.pack(fill="x", padx=10, pady=(4, 0))
-        for key, icon, text in NAV_ITEMS:
+        # панель вкладок вместо бокового сайдбара
+        navbar = tk.Frame(root, bg=c["panel"], height=NAVBAR_H)
+        navbar.pack(fill="x")
+        navbar.pack_propagate(False)
+        n_tabs = len(NAV_ITEMS)
+        navbar.grid_rowconfigure(0, weight=1)
+        navbar.grid_columnconfigure(n_tabs, weight=1)   # промежуток
+        for i, (key, icon, text) in enumerate(NAV_ITEMS):
             btn = tk.Button(
-                nav, text=f"{icon}    {text}", anchor="w", relief="flat",
-                bd=0, font=("Segoe UI", 11), padx=14, pady=10,
-                cursor="hand2", bg=c["panel"], fg=c["muted"],
-                activebackground=c["hover"], activeforeground=c["text"],
-                highlightthickness=0, takefocus=False,
+                navbar, text=f"{icon}   {text}", relief="flat", bd=0,
+                font=("Segoe UI", 11), cursor="hand2", takefocus=False,
+                bg=c["panel"], fg=c["muted"], activebackground=c["hover"],
+                activeforeground=c["text"], highlightthickness=0,
                 command=lambda k=key: self.show_page(k))
-            btn.pack(fill="x", pady=2)
+            btn.grid(row=0, column=i, sticky="ns", padx=(4, 0))
+            btn.bind("<Enter>",
+                     lambda e, k=key, b=btn: self._nav_hover(b, k, True))
+            btn.bind("<Leave>",
+                     lambda e, k=key, b=btn: self._nav_hover(b, k, False))
             self.nav_buttons[key] = btn
 
-        footer = tk.Frame(sidebar, bg=c["panel"])
-        footer.pack(side="bottom", fill="x", padx=16, pady=14)
-        tk.Label(footer, text="Не связано с Roblox Corp.", bg=c["panel"],
-                 fg=c["muted"], font=("Segoe UI", 8), anchor="w").pack(
-                     fill="x")
+        # правая часть панели: версия и смена темы
+        tk.Label(navbar, text=f"v{VERSION}", bg=c["panel"], fg=c["muted"],
+                 font=("Segoe UI", 9)).grid(
+            row=0, column=n_tabs + 1, padx=(0, 14))
+        theme_lbl = THEMES[self.theme_name]["label"]
+        self.theme_cycle_btn = tk.Button(
+            navbar, text=f"◐  {theme_lbl}", relief="flat", bd=0,
+            font=("Segoe UI", 9), cursor="hand2", takefocus=False,
+            bg=c["surface2"], fg=c["text"], activebackground=c["hover"],
+            activeforeground=c["text"], highlightthickness=0, padx=12,
+            command=self._cycle_theme)
+        self.theme_cycle_btn.grid(row=0, column=n_tabs + 2,
+                                  sticky="ns", padx=(0, 12), pady=9)
+        self._bind_hover(self.theme_cycle_btn, "ghost")
+        self.frameless.excluded = {min_btn, max_btn, close_btn,
+                                   self.theme_cycle_btn}
 
-        content = tk.Frame(body, bg=c["bg"])
-        content.pack(side="left", fill="both", expand=True)
+        # анимированная полоса активной вкладки
+        self.nav_indicator = tk.Frame(navbar, bg=self.accent, height=3)
+        self.nav_indicator.place(x=0, y=NAVBAR_H - 3, width=0, height=3)
+        self.accent_bgs.append(self.nav_indicator)
+        navbar.bind("<Configure>",
+                    lambda e: self._move_indicator(animate=False))
+
+        # тонкий разделитель под панелью вкладок
+        tk.Frame(root, bg=c["border"], height=1).pack(fill="x")
+
+        # статусная строка (внизу): две «пилюли»
+        tk.Frame(root, bg=c["border"], height=1).pack(fill="x", side="bottom")
+        statusbar = tk.Frame(root, bg=c["bg"], height=34)
+        statusbar.pack(fill="x", side="bottom")
+        statusbar.pack_propagate(False)
+
+        self.proto_var = tk.StringVar(value="Проверка Roblox…")
+        self.status_var = tk.StringVar(value="Готово")
+
+        pill_l = tk.Frame(statusbar, bg=c["surface2"])
+        pill_l.pack(side="left", padx=(12, 0), pady=6)
+        self.status_dot = tk.Label(pill_l, text="●", bg=c["surface2"],
+                                   fg=self.accent, font=("Segoe UI", 8))
+        self.status_dot.pack(side="left", padx=(10, 0))
+        tk.Label(pill_l, textvariable=self.proto_var, bg=c["surface2"],
+                 fg=c["muted"], font=("Segoe UI", 9)).pack(
+                     side="left", padx=(6, 10))
+
+        pill_r = tk.Frame(statusbar, bg=c["surface2"])
+        pill_r.pack(side="right", padx=(0, 12), pady=6)
+        tk.Label(pill_r, textvariable=self.status_var, bg=c["surface2"],
+                 fg=c["text"], font=("Segoe UI", 9)).pack(
+                     side="left", padx=(10, 10))
+
+        # тело: контент на всю ширину
+        content = tk.Frame(root, bg=c["bg"])
+        content.pack(fill="both", expand=True)
         content.grid_rowconfigure(0, weight=1)
         content.grid_columnconfigure(0, weight=1)
         self.content = content
-        self.sidebar = sidebar
+
+    def _nav_hover(self, btn, key, enter):
+        """Подсветка вкладки при наведении (активная не меняется)."""
+        if key == self.current_page:
+            return
+        c = self.c
+        try:
+            btn.configure(
+                bg=c["hover"] if enter else c["panel"],
+                fg=c["text"] if enter else c["muted"],
+                activeforeground=c["text"])
+        except tk.TclError:
+            pass
+
+    def _cycle_theme(self):
+        """Быстрая смена темы кнопкой в панели вкладок."""
+        idx = THEME_ORDER.index(self.theme_name) \
+            if self.theme_name in THEME_ORDER else 0
+        self.set_theme(THEME_ORDER[(idx + 1) % len(THEME_ORDER)])
+
+    def _move_indicator(self, animate=True):
+        """Полоса активной вкладки: плавный переезд или мгновенный."""
+        btn = self.nav_buttons.get(self.current_page)
+        ind = getattr(self, "nav_indicator", None)
+        if btn is None or ind is None:
+            return
+        try:
+            x, w = btn.winfo_x(), btn.winfo_width()
+        except tk.TclError:
+            return
+        if w <= 1:                      # вкладка ещё не отрисована
+            try:
+                self.root.after_idle(lambda: self._move_indicator(animate))
+            except (tk.TclError, RuntimeError):
+                pass
+            return
+        target = (x, w)
+        start = self._ind_pos
+        if not animate or start is None or start == target:
+            self._ind_pos = target
+            try:
+                ind.place(x=x, y=NAVBAR_H - 3, width=w, height=3)
+            except tk.TclError:
+                pass
+            return
+        if self._ind_anim_job is not None:
+            try:
+                self.root.after_cancel(self._ind_anim_job)
+            except tk.TclError:
+                pass
+        steps, delay = 7, 15
+
+        def tick(i=1):
+            try:
+                t = i / steps
+                ease = 1 - (1 - t) ** 2          # ease-out
+                cx = start[0] + (target[0] - start[0]) * ease
+                cw = start[1] + (target[1] - start[1]) * ease
+                if i >= steps:
+                    ind.place(x=target[0], y=NAVBAR_H - 3,
+                              width=target[1], height=3)
+                    self._ind_pos = target
+                    self._ind_anim_job = None
+                    return
+                ind.place(x=int(cx), y=NAVBAR_H - 3,
+                          width=max(2, int(cw)), height=3)
+                self._ind_anim_job = self.root.after(
+                    delay, lambda: tick(i + 1))
+            except (tk.TclError, RuntimeError):
+                self._ind_anim_job = None
+
+        self._ind_anim_job = self.root.after(delay, tick)
 
     def _window_button(self, parent, glyph, command, danger=False):
         c = self.c
@@ -624,18 +729,27 @@ class App:
                 canvas.yview_moveto(0)
             except tk.TclError:
                 pass
-        active = self.nav_buttons.get(key)
+        # breadcrumb в шапке окна
+        crumb = next((text for k, _icon, text in NAV_ITEMS if k == key), "")
+        if getattr(self, "title_crumb", None) is not None:
+            try:
+                self.title_crumb.configure(text=f"›  {crumb}")
+            except tk.TclError:
+                pass
+        # цвет и шрифт вкладок
         for name, btn in self.nav_buttons.items():
-            if btn is active:
-                btn.configure(bg=self.accent, fg=self.c["on_accent"],
-                              activebackground=shade(self.accent, 1.12),
-                              activeforeground=self.c["on_accent"],
-                              font=("Segoe UI", 11, "bold"))
-            else:
-                btn.configure(bg=self.c["panel"], fg=self.c["muted"],
+            if name == key:
+                btn.configure(fg=self.accent, font=("Segoe UI", 11, "bold"),
                               activebackground=self.c["hover"],
-                              activeforeground=self.c["text"],
-                              font=("Segoe UI", 11))
+                              activeforeground=self.c["text"])
+            else:
+                btn.configure(fg=self.c["muted"],
+                              font=("Segoe UI", 11),
+                              activebackground=self.c["hover"],
+                              activeforeground=self.c["text"])
+        # полоса под активной вкладкой
+        if not self._closing:
+            self._move_indicator(animate=True)
 
     def _on_wheel(self, event):
         """Скролл страницы колесом; спискам и журналу даём скроллиться самим."""
@@ -657,8 +771,41 @@ class App:
 
     # -- хелперы виджетов -----------------------------------------------------------
 
-    def _card(self, parent, title=None, subtitle=None, expand=False):
-        """Карточка: контейнер с фоном темы и 1px контуром."""
+    def _glyph_badge(self, parent, glyph, size=22, font_size=11):
+        """Квадратный бейдж с иконкой-глифом (акцентный фон)."""
+        c = self.c
+        badge = tk.Frame(parent, width=size, height=size, bg=self.accent)
+        badge.pack_propagate(False)
+        lbl = tk.Label(badge, text=glyph, bg=self.accent,
+                       fg=c["on_accent"],
+                       font=("Segoe UI", font_size, "bold"))
+        lbl.pack(fill="both", expand=True)
+        badge.pack(side="left")
+        self.accent_bgs.append(badge)
+        return badge
+
+    def _page_header(self, pad, glyph, title, subtitle=None):
+        """Заголовок страницы: бейдж-иконка + крупный текст + подпись."""
+        c = self.c
+        row = tk.Frame(pad, bg=c["bg"])
+        row.pack(fill="x", pady=(0, 16))
+
+        self._glyph_badge(row, glyph, size=40, font_size=17)
+
+        col = tk.Frame(row, bg=c["bg"])
+        col.pack(side="left", fill="x", expand=True, padx=(14, 0))
+        tk.Label(col, text=title, bg=c["bg"], fg=c["text"],
+                 font=("Segoe UI", 17, "bold"), anchor="w").pack(fill="x")
+        if subtitle:
+            tk.Label(col, text=subtitle, bg=c["bg"], fg=c["muted"],
+                     font=("Segoe UI", 10), anchor="w",
+                     justify="left", wraplength=720).pack(
+                         fill="x", pady=(2, 0))
+        return row
+
+    def _card(self, parent, title=None, subtitle=None, expand=False,
+              glyph=None):
+        """Карточка: контейнер с фоном темы, бейджем заголовка и разделителем."""
         c = self.c
         outer = tk.Frame(parent, bg=c["border"])
         outer.pack(fill="both" if expand else "x", expand=expand,
@@ -668,26 +815,94 @@ class App:
         inner = tk.Frame(body, bg=c["surface"], padx=16, pady=14)
         inner.pack(fill="both", expand=True)
         if title:
-            tk.Label(inner, text=title, bg=c["surface"], fg=c["text"],
-                     font=("Segoe UI", 11, "bold"), anchor="w").pack(fill="x")
-        if subtitle:
-            tk.Label(inner, text=subtitle, bg=c["surface"], fg=c["muted"],
-                     font=("Segoe UI", 9), anchor="w", justify="left",
-                     wraplength=640).pack(fill="x", pady=(3, 0))
+            head = tk.Frame(inner, bg=c["surface"])
+            head.pack(fill="x")
+            if glyph:
+                self._glyph_badge(head, glyph, size=24, font_size=11)
+                tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
+                         font=("Segoe UI", 11, "bold"),
+                         anchor="w").pack(side="left", padx=(10, 0))
+            else:
+                tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
+                         font=("Segoe UI", 11, "bold"),
+                         anchor="w").pack(side="left")
+            if subtitle:
+                tk.Label(inner, text=subtitle, bg=c["surface"],
+                         fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+                         justify="left", wraplength=640).pack(
+                             fill="x", pady=(4, 0))
+            # тонкий разделитель под шапкой карточки
+            tk.Frame(inner, bg=c["border"], height=1).pack(
+                fill="x", pady=(10, 0))
         return inner
 
     def _btn_colors(self, kind):
         if kind == "primary":
             base = self.accent
             fg = self.c["on_accent"]
+        elif kind == "slot":
+            base = self.c["entry"]
+            fg = self.c["text"]
         else:
             base = self.c["surface2"]
             fg = self.c["text"]
         return base, fg, shade(base, 1.14)
 
+    def _bind_hover(self, btn, kind):
+        """Плавный переход цвета кнопки при наведении (~100 мс)."""
+        btn.bind("<Enter>",
+                 lambda e: self._animate_btn(btn, kind, hover=True))
+        btn.bind("<Leave>",
+                 lambda e: self._animate_btn(btn, kind, hover=False))
+
+    @staticmethod
+    def _lerp_hex(c1, c2, t):
+        """Линейная интерполяция двух hex-цветов."""
+        try:
+            a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+            b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+        except (ValueError, TypeError):
+            return c2
+        return "#%02x%02x%02x" % tuple(
+            int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+
+    def _animate_btn(self, btn, kind, hover):
+        """Анимация цвета кнопки; hover=True — на подсветку, иначе назад."""
+        key = id(btn)
+        job = self._btn_anim_jobs.pop(key, None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+        base, fg, hot = self._btn_colors(kind)
+        target = hot if hover else base
+        try:
+            current = btn.cget("bg")
+        except tk.TclError:
+            return
+        if current == target:
+            return
+        steps, delay = 5, 20
+
+        def tick(i=1):
+            try:
+                if i >= steps:
+                    btn.configure(bg=target, activebackground=hot,
+                                  activeforeground=fg, fg=fg)
+                    self._btn_anim_jobs.pop(key, None)
+                    return
+                btn.configure(bg=self._lerp_hex(current, target, i / steps))
+                self._btn_anim_jobs[key] = self.root.after(
+                    delay, lambda: tick(i + 1))
+            except (tk.TclError, RuntimeError):
+                self._btn_anim_jobs.pop(key, None)
+
+        self._btn_anim_jobs[key] = self.root.after(delay, tick)
+
     def _button(self, parent, text, command=None, kind="ghost",
                 side=None, padx=0, **kw):
-        """Своя кнопка с hover-эффектом. kind: primary | ghost."""
+        """Своя кнопка с анимацией наведения. kind: primary | ghost."""
         base, fg, hot = self._btn_colors(kind)
         btn = tk.Button(
             parent, text=text, command=command, relief="flat", bd=0,
@@ -699,17 +914,7 @@ class App:
             btn.pack(side=side, padx=padx)
         else:
             btn.pack()
-
-        def on_enter(_e):
-            b, f, h = self._btn_colors(kind)
-            btn.configure(bg=h, activebackground=h, activeforeground=f)
-
-        def on_leave(_e):
-            b, f, h = self._btn_colors(kind)
-            btn.configure(bg=b, activebackground=h, activeforeground=f)
-
-        btn.bind("<Enter>", on_enter)
-        btn.bind("<Leave>", on_leave)
+        self._bind_hover(btn, kind)
         if kind == "primary":
             self.primary_buttons.append(btn)
         return btn
@@ -747,14 +952,13 @@ class App:
         c = self.c
         pad = self._scroll_page("game")
 
-        tk.Label(pad, text="Запуск игры", bg=c["bg"], fg=c["text"],
-                 font=("Segoe UI", 16, "bold")).pack(anchor="w")
-        tk.Label(pad, text="Вставь ссылку на игру или введи Place ID",
-                 bg=c["bg"], fg=c["muted"],
-                 font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 12))
+        self._page_header(
+            pad, "▶", "Запуск игры",
+            "Вставь ссылку на игру или введи Place ID — лаунчер откроет "
+            "официальный клиент Roblox")
 
         # карточка выбранной игры
-        inner = self._card(pad, title="Куда запускать")
+        inner = self._card(pad, title="Куда запускать", glyph="⌖")
         head = tk.Frame(inner, bg=c["surface"])
         head.pack(fill="x")
 
@@ -804,6 +1008,7 @@ class App:
         base, fg, hot = self._btn_colors("primary")
         self.btn_play.configure(bg=base, fg=fg, activebackground=hot,
                                 activeforeground=fg)
+        self._bind_hover(self.btn_play, "primary")
 
         actions = tk.Frame(pad, bg=c["bg"])
         actions.pack(fill="x", pady=(10, 4))
@@ -815,9 +1020,9 @@ class App:
                      side="left")
 
         # клиент Roblox
-        inner2 = self._card(pad, title="Клиент Roblox")
+        inner2 = self._card(pad, title="Клиент Roblox", glyph="◉")
         row2 = tk.Frame(inner2, bg=c["surface"])
-        row2.pack(fill="x", pady=(8, 0))
+        row2.pack(fill="x", pady=(12, 0))
         self.btn_client = tk.Button(
             row2, text="Запустить Roblox без игры", relief="flat", bd=0,
             cursor="hand2", font=("Segoe UI", 10, "bold"), padx=16, pady=9,
@@ -827,19 +1032,20 @@ class App:
         base, fg, hot = self._btn_colors("primary")
         self.btn_client.configure(bg=base, fg=fg, activebackground=hot,
                                   activeforeground=fg)
+        self._bind_hover(self.btn_client, "primary")
         tk.Label(row2, text="открывает сам клиент — дальше можно выбрать игру",
                  bg=c["surface"], fg=c["muted"],
                  font=("Segoe UI", 9)).pack(side="left", padx=12)
 
         # недавние
-        inner3 = self._card(pad, title="Недавние")
+        inner3 = self._card(pad, title="Недавние", glyph="◷")
         self.recent_box, _ = self._make_listbox(inner3, height=6)
         self.recent_box.bind("<Double-Button-1>", self._recent_activate)
         self._hint(inner3, "Enter — запустить, двойной клик по строке — тоже")
 
     # -- страница «Избранное» --------------------------------------------------------
 
-    def _side_card(self, parent, title, side):
+    def _side_card(self, parent, title, side, glyph=None):
         """Карточка в ряду карточек (side: left/right)."""
         c = self.c
         outer = tk.Frame(parent, bg=c["border"])
@@ -849,24 +1055,30 @@ class App:
         body.pack(fill="both", expand=True, padx=1, pady=1)
         inner = tk.Frame(body, bg=c["surface"], padx=14, pady=12)
         inner.pack(fill="both", expand=True)
-        tk.Label(inner, text=title, bg=c["surface"], fg=c["text"],
-                 font=("Segoe UI", 11, "bold")).pack(fill="x", pady=(0, 8))
+        head = tk.Frame(inner, bg=c["surface"])
+        head.pack(fill="x", pady=(0, 8))
+        if glyph:
+            self._glyph_badge(head, glyph, size=22, font_size=10)
+            tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
+                     font=("Segoe UI", 11, "bold")).pack(
+                         side="left", padx=(9, 0))
+        else:
+            tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
+                     font=("Segoe UI", 11, "bold")).pack(side="left")
         return inner
 
     def _build_page_favorites(self):
         c = self.c
         pad = self._scroll_page("favorites")
 
-        tk.Label(pad, text="Избранное и история", bg=c["bg"], fg=c["text"],
-                 font=("Segoe UI", 16, "bold")).pack(anchor="w")
-        tk.Label(pad, text="Двойной клик по строке — запустить игру",
-                 bg=c["bg"], fg=c["muted"],
-                 font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 12))
+        self._page_header(
+            pad, "★", "Избранное и история",
+            "Двойной клик по строке — запустить игру")
 
         row = tk.Frame(pad, bg=c["bg"])
         row.pack(fill="both", expand=True)
 
-        fav = self._side_card(row, "Избранное", "left")
+        fav = self._side_card(row, "Избранное", "left", glyph="★")
         self.fav_box, _ = self._make_listbox(fav, height=15)
         self.fav_box.bind("<Double-Button-1>", lambda _e: self._fav_play())
         btns = tk.Frame(fav, bg=c["surface"])
@@ -874,7 +1086,7 @@ class App:
         self._button(btns, "Запустить", self._fav_play, side="left")
         self._button(btns, "Удалить", self._fav_remove, side="left", padx=8)
 
-        hist = self._side_card(row, "История запусков", "right")
+        hist = self._side_card(row, "История запусков", "right", glyph="◷")
         self.hist_box, _ = self._make_listbox(hist, height=15)
         self.hist_box.bind("<Double-Button-1>", lambda _e: self._hist_play())
         btns2 = tk.Frame(hist, bg=c["surface"])
@@ -889,18 +1101,14 @@ class App:
         c = self.c
         pad = self._scroll_page("flags")
 
-        tk.Label(pad, text="Флаги и настройки клиента", bg=c["bg"],
-                 fg=c["text"], font=("Segoe UI", 16, "bold")).pack(anchor="w")
-        tk.Label(
-            pad, bg=c["bg"], fg=c["muted"], font=("Segoe UI", 10),
-            justify="left", wraplength=640, anchor="w",
-            text=("FastFlags — те же настройки, что в Bloxstrap/Froststrap. "
-                  "Пишутся в ClientAppSettings.json через слияние: чужие "
-                  "флаги не затираются.")
-        ).pack(anchor="w", pady=(3, 12))
+        self._page_header(
+            pad, "⚑", "Флаги и настройки клиента",
+            "FastFlags — те же настройки, что в Bloxstrap/Froststrap. "
+            "Пишутся в ClientAppSettings.json через слияние: чужие "
+            "флаги не затираются.")
 
         # -- быстрые флаги
-        inner = self._card(pad, title="Быстрые флаги")
+        inner = self._card(pad, title="Быстрые флаги", glyph="⚡")
         gridf = tk.Frame(inner, bg=c["surface"])
         gridf.pack(fill="x", pady=(6, 0))
         gridf.grid_columnconfigure(1, weight=1)
@@ -969,7 +1177,8 @@ class App:
         inner2 = self._card(pad, title="Панель бутстрапера",
                             subtitle=("Читает и пишет конфиг твоего "
                                       "бутстрапера — только известные "
-                                      "ключи, остальное не трогает."))
+                                      "ключи, остальное не трогает."),
+                            glyph="⚙")
         self.boot_title = tk.Label(inner2, text="", bg=c["surface"],
                                    fg=c["text"],
                                    font=("Segoe UI", 11, "bold"),
@@ -1174,17 +1383,673 @@ class App:
             self.log(f"FastFlags сброшены, файлов обновлено: {written}")
         self.status_var.set("FastFlags применены")
 
+    # -- страница «Курсоры» -----------------------------------------------------------
+
+    def _build_page_cursors(self):
+        c = self.c
+        pad = self._scroll_page("cursors")
+
+        self._page_header(
+            pad, "◈", "Наборы курсоров",
+            "Готовые наборы PNG для Roblox: ShiftLock, обычная стрелка, "
+            "стрелка в игре и курсор ввода текста.")
+
+        inner = self._card(
+            pad, title="Мои наборы", glyph="▤",
+            subtitle="Создай набор, выбери PNG для каждого слота и нажми "
+                     "«Применить набор».")
+
+        body = tk.Frame(inner, bg=c["surface"])
+        body.pack(fill="both", expand=True, pady=(12, 0))
+
+        left = tk.Frame(body, bg=c["surface"], width=186)
+        left.pack(side="left", fill="y", padx=(0, 14))
+        left.pack_propagate(False)
+        self.cursor_sets_box = tk.Listbox(
+            left, bg=c["list"], fg=c["text"],
+            selectbackground=self.accent, selectforeground=c["on_accent"],
+            activestyle="none", bd=0, highlightthickness=1,
+            highlightbackground=c["border"], highlightcolor=self.accent,
+            font=("Segoe UI", 10), exportselection=False, height=9)
+        self.cursor_sets_box.pack(fill="both", expand=True)
+        self.cursor_sets_box.bind("<<ListboxSelect>>",
+                                  self._on_cursor_set_select)
+        nav = tk.Frame(left, bg=c["surface"])
+        nav.pack(fill="x", pady=(8, 0))
+        self._button(nav, "＋ Новое", self._cursor_create_set, side="left")
+        self._button(nav, "Удалить", self._cursor_delete_set,
+                     side="left", padx=(6, 0))
+
+        right = tk.Frame(body, bg=c["surface"])
+        right.pack(side="left", fill="both", expand=True)
+
+        rename_row = tk.Frame(right, bg=c["surface"])
+        rename_row.pack(fill="x")
+        self.cursor_rename_var = tk.StringVar()
+        self.cursor_rename_entry = ttk.Entry(
+            rename_row, textvariable=self.cursor_rename_var)
+        self.cursor_rename_entry.pack(side="left", fill="x", expand=True,
+                                      ipady=4)
+        self.cursor_rename_entry.bind(
+            "<Return>", lambda _e: self._cursor_rename_set())
+        self._button(rename_row, "Переименовать", self._cursor_rename_set,
+                     side="left", padx=(8, 0))
+
+        slots = tk.Frame(right, bg=c["surface"])
+        slots.pack(fill="x", pady=(12, 0))
+        self.cursor_slot_widgets = {}
+        self._cursor_preview_images = {}
+        for index, slot in enumerate(CURSOR_SLOTS):
+            slots.columnconfigure(index, weight=1, uniform="cursor")
+            self._build_cursor_slot(slots, index, slot)
+
+        actions = tk.Frame(right, bg=c["surface"])
+        actions.pack(fill="x", pady=(14, 0))
+        self._button(actions, "Применить набор", self.apply_cursors_now,
+                     kind="primary", side="left")
+        self._button(actions, "Вернуть исходные", self.restore_cursors_now,
+                     side="left", padx=(8, 0))
+        self._button(actions, "Открыть папку", self.open_cursors_dir,
+                     side="left", padx=(8, 0))
+
+        actions2 = tk.Frame(right, bg=c["surface"])
+        actions2.pack(fill="x", pady=(8, 0))
+        self._button(actions2, "Получить текущий",
+                     self._cursor_get_current_set, side="left")
+        self._button(actions2, "Импорт ZIP", self._cursor_import_set,
+                     side="left", padx=(8, 0))
+        self._button(actions2, "Экспорт ZIP", self._cursor_export_set,
+                     side="left", padx=(8, 0))
+        self._button(actions2, "Обновить", self.refresh_cursors,
+                     side="left", padx=(8, 0))
+
+        self.cursor_auto_var = tk.BooleanVar(
+            value=bool(self.cfg.get("use_custom_cursors", True)))
+        ttk.Checkbutton(
+            right, text="Применять выбранный набор при запуске игры",
+            style="Card.TCheckbutton", variable=self.cursor_auto_var,
+            command=self._toggle_cursor_auto).pack(
+                anchor="w", pady=(12, 0))
+
+        self.cursor_status_var = tk.StringVar(value="")
+        tk.Label(right, textvariable=self.cursor_status_var,
+                 bg=c["surface"], fg=c["text"],
+                 font=("Segoe UI", 10, "bold"), anchor="w").pack(
+                     fill="x", pady=(10, 2))
+        self.cursor_warn_var = tk.StringVar(value="")
+        tk.Label(right, textvariable=self.cursor_warn_var, bg=c["surface"],
+                 fg="#ff9f43", font=("Segoe UI", 9), anchor="w",
+                 justify="left", wraplength=560).pack(fill="x")
+
+        self._hint(
+            right,
+            "PNG с прозрачным фоном, лучше 64×64. Клик по превью заменяет "
+            "файл слота. Импорт понимает ZIP-наборы Froststrap: "
+            "MouseLockedCursor.png и папку Cursors\\KeyboardMouse. "
+            "Перед применением закрой Roblox.")
+        self._refresh_cursor_panel(initial=True)
+
+    def _build_cursor_slot(self, parent, index, slot):
+        c = self.c
+        card = tk.Frame(parent, bg=c["surface2"], padx=7, pady=7)
+        card.grid(row=0, column=index, sticky="nsew",
+                  padx=(0 if index == 0 else 5, 0))
+
+        head = tk.Frame(card, bg=c["surface2"])
+        head.pack(fill="x")
+        tk.Label(head, text=slot["label"], bg=c["surface2"], fg=c["text"],
+                 font=("Segoe UI", 9, "bold"), anchor="w",
+                 justify="left", wraplength=105).pack(
+                     side="left", fill="x", expand=True)
+        remove = tk.Label(head, text="✕", bg=c["surface2"], fg=c["muted"],
+                          font=("Segoe UI", 9, "bold"), cursor="hand2")
+        remove.bind("<Button-1>",
+                    lambda _e, k=slot["key"]: self._cursor_clear_slot(k))
+
+        preview = tk.Frame(card, bg=c["entry"], height=78, cursor="hand2")
+        preview.pack(fill="x", pady=(6, 4))
+        preview.pack_propagate(False)
+        image_label = tk.Label(preview, bg=c["entry"], text="+",
+                               fg=c["muted"], font=("Segoe UI", 16),
+                               cursor="hand2")
+        image_label.place(relx=0.5, rely=0.5, anchor="center")
+        for widget in (preview, image_label):
+            widget.bind("<Button-1>",
+                        lambda _e, k=slot["key"]: self._cursor_pick(k))
+
+        meta = tk.Label(card, text="не задан", bg=c["surface2"],
+                        fg=c["muted"], font=("Segoe UI", 8), anchor="w")
+        meta.pack(fill="x")
+
+        view = self._button(
+            card, "Выбрать PNG",
+            lambda k=slot["key"]: self._cursor_view_or_pick(k),
+            kind="slot")
+        view.configure(pady=4)
+        view.pack_configure(fill="x", pady=(5, 0))
+
+        self.cursor_slot_widgets[slot["key"]] = {
+            "preview": preview, "image": image_label,
+            "meta": meta, "view": view, "remove": remove,
+        }
+
+    def _refresh_cursor_panel(self, initial=False, select=None):
+        box = getattr(self, "cursor_sets_box", None)
+        if box is None:
+            return
+        if ensure_cursor_sets_dir() is None:
+            self.cursor_status_var.set("Папка наборов недоступна")
+            return
+        names = list_cursor_sets()
+        if initial and not names:
+            created = create_cursor_set()
+            if created["ok"]:
+                names = list_cursor_sets()
+        current = select or getattr(self, "_cursor_active_set", None)
+        saved = self.cfg.get("cursor_set")
+        if current not in names:
+            current = saved if saved in names else (names[0] if names else None)
+
+        self._cursor_refreshing = True
+        box.delete(0, "end")
+        for name in names:
+            box.insert("end", name)
+        if current is not None:
+            index = names.index(current)
+            box.selection_set(index)
+            box.see(index)
+        self._cursor_refreshing = False
+        self._cursor_active_set = current
+        self.cursor_rename_var.set(current or "")
+        self.cursor_rename_entry.configure(
+            state="normal" if current else "disabled")
+        self._refresh_cursor_slots(current)
+        self._refresh_cursor_status()
+
+    def _refresh_cursor_slots(self, name):
+        files = cursor_set_files(name) if name else {}
+        for slot in CURSOR_SLOTS:
+            widgets = self.cursor_slot_widgets.get(slot["key"])
+            if widgets is None:
+                continue
+            path = files.get(slot["key"])
+            if path is None:
+                self._cursor_preview_images.pop(slot["key"], None)
+                widgets["image"].configure(image="", text="+",
+                                           font=("Segoe UI", 16))
+                widgets["meta"].configure(text="не задан")
+                widgets["view"].configure(text="Выбрать PNG")
+                widgets["remove"].pack_forget()
+                continue
+            try:
+                width, height, _alpha = png_info(path)
+                meta = f"{width}×{height} px"
+            except ValueError:
+                meta = "файл повреждён"
+            image = self._cursor_preview_image(path, 120, 76)
+            if image is not None:
+                self._cursor_preview_images[slot["key"]] = image
+                widgets["image"].configure(image=image, text="")
+            else:
+                self._cursor_preview_images.pop(slot["key"], None)
+                widgets["image"].configure(image="", text="PNG",
+                                           font=("Segoe UI", 10, "bold"))
+            widgets["meta"].configure(text=meta)
+            widgets["view"].configure(text="Просмотр")
+            widgets["remove"].pack(side="right")
+
+    def _refresh_cursor_status(self):
+        name = getattr(self, "_cursor_active_set", None)
+        files = cursor_set_files(name) if name else {}
+        roots = len(cursor_install_roots())
+        auto = "вкл" if self.cfg.get("use_custom_cursors") else "выкл"
+        applied = cursor_state_info()
+        parts = []
+        if name:
+            parts.append(f"Набор «{name}»: {len(files)}/4 PNG")
+        else:
+            parts.append("Нет наборов")
+        parts.append(f"папок для записи: {roots}")
+        parts.append(f"автоприменение: {auto}")
+        if applied["files"]:
+            note = f"применено файлов: {applied['files']}"
+            if applied["set"]:
+                note += f" («{applied['set']}»)"
+            parts.append(note)
+        self.cursor_status_var.set("  ·  ".join(parts))
+
+        warnings = cursor_set_warnings(name) if name else []
+        if name and not files:
+            warnings.insert(0, "Добавь PNG хотя бы в один слот.")
+        if len(warnings) > 3:
+            warnings = warnings[:3] + [f"…и ещё {len(warnings) - 3}"]
+        self.cursor_warn_var.set("\n".join(warnings))
+
+    def _cursor_preview_image(self, path, box_w, box_h):
+        try:
+            image = tk.PhotoImage(file=str(path))
+        except tk.TclError:
+            return None
+        width = max(1, image.width())
+        height = max(1, image.height())
+        scale = min(box_w / width, box_h / height)
+        if scale >= 2:
+            zoom = min(6, int(scale))
+            if zoom > 1:
+                image = image.zoom(zoom)
+        elif scale < 1:
+            factor = max(1, -(-max(width, height) // max(box_w, box_h)))
+            image = image.subsample(factor)
+        return image
+
+    def _on_cursor_set_select(self, _event=None):
+        if getattr(self, "_cursor_refreshing", False):
+            return
+        selection = self.cursor_sets_box.curselection()
+        if not selection:
+            return
+        name = self.cursor_sets_box.get(selection[0])
+        if name == getattr(self, "_cursor_active_set", None):
+            return
+        self._cursor_active_set = name
+        self.cursor_rename_var.set(name)
+        self._refresh_cursor_slots(name)
+        self._refresh_cursor_status()
+        self.cfg["cursor_set"] = name
+        save_config(self.cfg)
+
+    def _cursor_create_set(self):
+        result = create_cursor_set()
+        if not result["ok"]:
+            messagebox.showerror(APP_NAME, result["error"], parent=self.root)
+            return
+        self.cfg["cursor_set"] = result["name"]
+        save_config(self.cfg)
+        self._refresh_cursor_panel(select=result["name"])
+        self.status_var.set(f"Создан набор «{result['name']}»")
+        self.log(f"Создан набор курсоров «{result['name']}»")
+
+    def _cursor_delete_set(self):
+        name = getattr(self, "_cursor_active_set", None)
+        if not name:
+            return
+        applied = cursor_state_info()
+        note = ""
+        if applied["files"] and applied["set"] == name:
+            note = "\nНабор сейчас применён — лаунчер вернёт исходные курсоры."
+        if not messagebox.askyesno(
+                APP_NAME,
+                f"Удалить набор «{name}» вместе с PNG?{note}",
+                parent=self.root):
+            return
+
+        if applied["files"] and applied["set"] == name:
+            if player_pids():
+                messagebox.showwarning(
+                    APP_NAME,
+                    "Закрой Roblox, затем удали набор: сначала нужно "
+                    "вернуть исходные курсоры.",
+                    parent=self.root)
+                return
+            restored = restore_custom_cursors()
+            if not restored["ok"]:
+                messagebox.showerror(
+                    APP_NAME,
+                    "Не удалось вернуть исходные курсоры:\n"
+                    + "\n".join(restored["errors"][:4]),
+                    parent=self.root)
+                return
+            self.cfg["use_custom_cursors"] = False
+            if getattr(self, "cursor_auto_var", None) is not None:
+                self.cursor_auto_var.set(False)
+
+        result = delete_cursor_set(name)
+        if not result["ok"]:
+            messagebox.showerror(APP_NAME, result["error"], parent=self.root)
+            return
+        remaining = list_cursor_sets()
+        next_name = remaining[0] if remaining else ""
+        self.cfg["cursor_set"] = next_name
+        save_config(self.cfg)
+        self._refresh_cursor_panel(select=next_name or None)
+        self.status_var.set(f"Набор «{name}» удалён")
+        self.log(f"Набор курсоров «{name}» удалён")
+
+    def _cursor_rename_set(self):
+        old = getattr(self, "_cursor_active_set", None)
+        if not old:
+            return
+        new = self.cursor_rename_var.get().strip()
+        if not valid_cursor_set_name(new):
+            messagebox.showerror(
+                APP_NAME,
+                "Имя набора не должно содержать <>:\"/\\|?* и не может "
+                "быть пустым.",
+                parent=self.root)
+            return
+        result = rename_cursor_set(old, new)
+        if not result["ok"]:
+            messagebox.showerror(APP_NAME, result["error"], parent=self.root)
+            return
+        if self.cfg.get("cursor_set") == old:
+            self.cfg["cursor_set"] = result["name"]
+            save_config(self.cfg)
+        self._refresh_cursor_panel(select=result["name"])
+        self.status_var.set(f"Набор переименован в «{result['name']}»")
+        self.log(f"Набор курсоров «{old}» → «{result['name']}»")
+
+    def _cursor_pick(self, key):
+        name = getattr(self, "_cursor_active_set", None)
+        if not name:
+            messagebox.showinfo(
+                APP_NAME,
+                "Сначала создай набор кнопкой «＋ Новое».",
+                parent=self.root)
+            return
+        slot = next((s for s in CURSOR_SLOTS if s["key"] == key), None)
+        if slot is None:
+            return
+        path = filedialog.askopenfilename(
+            parent=self.root, title=f"Курсор: {slot['label']}",
+            filetypes=[("PNG-изображения", "*.png")])
+        if not path:
+            return
+        result = set_cursor_slot(name, key, path)
+        if not result["ok"]:
+            messagebox.showerror(
+                APP_NAME,
+                f"Не удалось добавить PNG:\n{result['error']}",
+                parent=self.root)
+            return
+        self._refresh_cursor_slots(name)
+        self._refresh_cursor_status()
+        note = ""
+        if result["width"] > 64 or result["height"] > 64:
+            note = f" ({result['width']}×{result['height']}, лучше 64×64)"
+        self.status_var.set(f"{slot['label']}: PNG добавлен{note}")
+        self.log(f"Курсор {slot['file']} добавлен в набор «{name}»")
+
+    def _cursor_clear_slot(self, key):
+        name = getattr(self, "_cursor_active_set", None)
+        slot = next((s for s in CURSOR_SLOTS if s["key"] == key), None)
+        if not name or slot is None:
+            return
+        if not messagebox.askyesno(
+                APP_NAME,
+                f"Удалить {slot['label']} из набора «{name}»?",
+                parent=self.root):
+            return
+        result = remove_cursor_slot(name, key)
+        if not result["ok"]:
+            messagebox.showerror(APP_NAME, result["error"], parent=self.root)
+            return
+        self._refresh_cursor_slots(name)
+        self._refresh_cursor_status()
+        self.log(f"Курсор {slot['file']} удалён из набора «{name}»")
+
+    def _cursor_view_or_pick(self, key):
+        name = getattr(self, "_cursor_active_set", None)
+        path = cursor_slot_path(name, key) if name else None
+        if path is not None and path.is_file():
+            self._cursor_view_slot(key)
+        else:
+            self._cursor_pick(key)
+
+    def _cursor_view_slot(self, key):
+        name = getattr(self, "_cursor_active_set", None)
+        path = cursor_slot_path(name, key) if name else None
+        if path is None or not path.is_file():
+            messagebox.showinfo(APP_NAME, "В этом слоте нет файла.",
+                                parent=self.root)
+            return
+        try:
+            os.startfile(str(path))
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"Не удалось открыть файл:\n{exc}",
+                                 parent=self.root)
+
+    def _cursor_get_current_set(self):
+        name = getattr(self, "_cursor_active_set", None)
+        if not name:
+            messagebox.showinfo(
+                APP_NAME, "Сначала создай и выбери набор.", parent=self.root)
+            return
+        if not messagebox.askyesno(
+                APP_NAME,
+                f"Заменить содержимое набора «{name}» текущими курсорами "
+                "из установленного Roblox?",
+                parent=self.root):
+            return
+        result = copy_current_cursor_set(name)
+        self._refresh_cursor_slots(name)
+        self._refresh_cursor_status()
+        if not result["ok"]:
+            messagebox.showerror(
+                APP_NAME,
+                "Не удалось получить текущий набор:\n"
+                + "; ".join(result["errors"][:4]),
+                parent=self.root)
+            return
+        message = f"Скопировано PNG: {result['copied']}"
+        if result["missing"]:
+            message += "\nНе найдены: " + ", ".join(result["missing"])
+        self.status_var.set(f"Текущие курсоры скопированы: {result['copied']}")
+        self.log(f"Текущие курсоры Roblox → набор «{name}»: "
+                 f"{result['copied']} PNG")
+        messagebox.showinfo(APP_NAME, message, parent=self.root)
+
+    def _cursor_import_set(self):
+        path = filedialog.askopenfilename(
+            parent=self.root, title="Импорт набора курсоров",
+            filetypes=[("ZIP-архив", "*.zip")])
+        if not path:
+            return
+        result = import_cursor_set(path)
+        if not result["ok"]:
+            messagebox.showerror(
+                APP_NAME,
+                f"Не удалось импортировать набор:\n{result['error']}",
+                parent=self.root)
+            return
+        self.cfg["cursor_set"] = result["name"]
+        save_config(self.cfg)
+        self._refresh_cursor_panel(select=result["name"])
+        message = (f"Импортирован набор «{result['name']}»\n"
+                   f"PNG: {result['files']}")
+        if result["skipped"]:
+            message += f"\nПропущено файлов: {result['skipped']}"
+        self.status_var.set(f"Импортирован набор «{result['name']}»")
+        self.log(f"Импорт набора курсоров «{result['name']}»: "
+                 f"{result['files']} PNG")
+        messagebox.showinfo(APP_NAME, message, parent=self.root)
+
+    def _cursor_export_set(self):
+        name = getattr(self, "_cursor_active_set", None)
+        if not name:
+            messagebox.showinfo(
+                APP_NAME, "Сначала выбери набор.", parent=self.root)
+            return
+        if not cursor_set_files(name):
+            messagebox.showinfo(
+                APP_NAME, "В наборе нет PNG для экспорта.", parent=self.root)
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="Экспорт набора курсоров",
+            defaultextension=".zip", initialfile=f"{name}.zip",
+            filetypes=[("ZIP-архив", "*.zip")])
+        if not path:
+            return
+        result = export_cursor_set(name, path)
+        if not result["ok"]:
+            messagebox.showerror(
+                APP_NAME, f"Не удалось экспортировать набор:\n"
+                         f"{result['error']}", parent=self.root)
+            return
+        self.status_var.set(f"Набор «{name}» экспортирован")
+        self.log(f"Экспорт набора «{name}»: {result['files']} PNG → {path}")
+        messagebox.showinfo(
+            APP_NAME,
+            f"Набор сохранён:\n{result['path']}",
+            parent=self.root)
+
+    def open_cursors_dir(self):
+        folder = ensure_cursor_sets_dir()
+        if folder is None:
+            messagebox.showerror(APP_NAME,
+                                 "Не удалось создать папку наборов.",
+                                 parent=self.root)
+            return
+        try:
+            os.startfile(str(folder))
+        except OSError as exc:
+            messagebox.showerror(
+                APP_NAME, f"Не удалось открыть папку:\n{exc}",
+                parent=self.root)
+
+    def refresh_cursors(self):
+        self._refresh_cursor_panel()
+        self.status_var.set("Список наборов обновлён")
+        self.log("Список наборов курсоров обновлён")
+
+    def _apply_cursors(self, show_errors=True):
+        name = getattr(self, "_cursor_active_set", None)
+        if not name:
+            self.status_var.set("Набор не выбран — курсоры не применены")
+            if show_errors and self.interactive:
+                messagebox.showinfo(
+                    APP_NAME,
+                    "Создай и выбери набор курсоров.",
+                    parent=self.root)
+            self._refresh_cursor_panel()
+            return False
+        if player_pids():
+            text = ("Закрой Roblox, затем примени набор ещё раз. "
+                    "Пока клиент запущен, файлы курсоров могут быть заняты.")
+            self.status_var.set("Курсоры не применены — Roblox запущен")
+            self.log("Курсоры не применены: Roblox запущен")
+            if show_errors and self.interactive:
+                messagebox.showwarning(APP_NAME, text, parent=self.root)
+            self._refresh_cursor_panel()
+            return False
+
+        result = apply_cursor_set(name)
+        self.cfg["cursor_set"] = name
+        save_config(self.cfg)
+        self._refresh_cursor_panel(select=name)
+        if result["ok"]:
+            message = (f"Набор «{name}»: {result['files']} PNG → "
+                       f"{result['installs']} пап(ок)")
+            self.status_var.set(message)
+            self.log(message)
+            return True
+
+        error = result.get("error") or "неизвестная ошибка"
+        self.status_var.set("Ошибка применения набора курсоров")
+        self.log(f"Ошибка применения набора «{name}»: {error}")
+        if show_errors and self.interactive:
+            messagebox.showerror(
+                APP_NAME,
+                "Не удалось применить набор.\n\n"
+                f"{error}\n\n"
+                "Закрой Roblox и попробуй снова.",
+                parent=self.root)
+        return False
+
+    def apply_cursors_now(self):
+        self._apply_cursors()
+
+    def _toggle_cursor_auto(self):
+        enabled = bool(self.cursor_auto_var.get())
+        self.cfg["use_custom_cursors"] = enabled
+        save_config(self.cfg)
+        if enabled:
+            self.log("Автоприменение курсоров включено")
+            self._apply_cursors()
+        else:
+            self.log("Автоприменение курсоров выключено")
+            self._restore_cursors(confirm=False)
+
+    def _restore_cursors(self, confirm=True):
+        if confirm and self.interactive and not messagebox.askyesno(
+                APP_NAME,
+                "Вернуть файлы курсоров, которые были до замены?\n"
+                "PNG в наборах останутся на месте.",
+                parent=self.root):
+            return False
+        if player_pids():
+            self.status_var.set("Roblox запущен — курсоры не восстановлены")
+            self.log("Восстановление курсоров отменено: Roblox запущен")
+            if self.interactive:
+                messagebox.showwarning(
+                    APP_NAME,
+                    "Закрой Roblox, затем верни исходные курсоры.",
+                    parent=self.root)
+            self._refresh_cursor_panel()
+            return False
+
+        result = restore_custom_cursors()
+        if result["ok"]:
+            self.cfg["use_custom_cursors"] = False
+            if getattr(self, "cursor_auto_var", None) is not None:
+                self.cursor_auto_var.set(False)
+            save_config(self.cfg)
+            self.status_var.set("Исходные курсоры восстановлены")
+            self.log(f"Исходные курсоры восстановлены: "
+                     f"{result['restored']} файл(ов)")
+        else:
+            self.status_var.set("Не удалось вернуть исходные курсоры")
+            self.log("Ошибка восстановления курсоров: "
+                     + "; ".join(result["errors"]))
+            if self.interactive:
+                messagebox.showerror(
+                    APP_NAME,
+                    "Не удалось восстановить часть файлов:\n"
+                    + "\n".join(result["errors"][:4]),
+                    parent=self.root)
+        self._refresh_cursor_panel()
+        return result["ok"]
+
+    def restore_cursors_now(self):
+        self._restore_cursors(confirm=True)
+
+    def _apply_cursors_for_launch(self):
+        """Применение с UI-потока перед запуском игры."""
+        if not self.cfg.get("use_custom_cursors") or player_pids():
+            return
+        name = (self.cfg.get("cursor_set")
+                or getattr(self, "_cursor_active_set", None))
+        if not name:
+            return
+        result = apply_cursor_set(name)
+        if result["ok"] and result["files"]:
+            self.log(f"Набор курсоров «{name}»: {result['files']} PNG → "
+                     f"{result['installs']} пап(ок)")
+        elif not result["ok"]:
+            self.log(f"Курсоры не применены: {result.get('error')}")
+        self._refresh_cursor_panel(select=name)
+
+    def _cursor_launch_done(self, result):
+        if self._closing:
+            return
+        if result["ok"] and result["files"]:
+            self.log(f"Набор курсоров «{result.get('set', '')}»: "
+                     f"{result['files']} PNG → {result['installs']} пап(ок)")
+        elif not result["ok"]:
+            self.log(f"Курсоры не применены: {result.get('error')}")
+        self._refresh_cursor_panel()
+
     # -- страница «Настройки» ----------------------------------------------------------
 
     def _build_page_settings(self):
         c = self.c
         pad = self._scroll_page("settings")
 
-        tk.Label(pad, text="Настройки", bg=c["bg"], fg=c["text"],
-                 font=("Segoe UI", 16, "bold")).pack(anchor="w", pady=(0, 12))
+        self._page_header(
+            pad, "⚙", "Настройки",
+            "Поведение лаунчера, оформление и управление Roblox на этом ПК")
 
         # поведение
-        inner = self._card(pad, title="Поведение")
+        inner = self._card(pad, title="Поведение", glyph="☑")
         self.var_auto_close = tk.BooleanVar(value=self.cfg["auto_close"])
         self.var_save_history = tk.BooleanVar(value=self.cfg["save_history"])
         self.var_remember = tk.BooleanVar(value=self.cfg["remember_last"])
@@ -1203,7 +2068,8 @@ class App:
         # игра по умолчанию
         inner2 = self._card(pad, title="Игра по умолчанию",
                             subtitle="Place ID, который подставится при "
-                                     "запуске")
+                                     "запуске",
+                            glyph="▶")
         row = tk.Frame(inner2, bg=c["surface"])
         row.pack(fill="x", pady=(8, 0))
         self.var_default = tk.StringVar(value=self.cfg["default_place_id"])
@@ -1213,7 +2079,7 @@ class App:
                      side="left", padx=(8, 0))
 
         # Roblox на этом ПК
-        inner3 = self._card(pad, title="Roblox на этом ПК")
+        inner3 = self._card(pad, title="Roblox на этом ПК", glyph="◉")
         tk.Label(inner3, textvariable=self.proto_var, bg=c["surface"],
                  fg=c["text"], font=("Segoe UI", 11), anchor="w",
                  wraplength=620, justify="left").pack(fill="x", pady=(6, 0))
@@ -1235,7 +2101,8 @@ class App:
 
         # оформление
         inner4 = self._card(pad, title="Оформление",
-                            subtitle="Тема и акцентный цвет интерфейса")
+                            subtitle="Тема и акцентный цвет интерфейса",
+                            glyph="◐")
         theme_row = tk.Frame(inner4, bg=c["surface"])
         theme_row.pack(fill="x", pady=(8, 0))
         self.theme_buttons = {}
@@ -1265,13 +2132,15 @@ class App:
         self.accent_name_label.pack(side="left", padx=8)
 
         # о программе
-        inner5 = self._card(pad, title="О программе")
+        inner5 = self._card(pad, title="О программе", glyph="ⓘ")
         tk.Label(
             inner5, bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
             justify="left", anchor="w", wraplength=640, text=(
                 "Лаунчер передаёт системе ссылку roblox:// — игру открывает "
                 "официальный клиент Roblox.\n"
-                "Ничего в игру не внедряется и не модифицируется.\n"
+                "Код игры не изменяется: лаунчер только пишет конфиги и, "
+                "если включены наборы курсоров, заменяет PNG-файлы "
+                "курсоров.\n"
                 "Название, версия, тема и списки хранятся локально."
             )).pack(fill="x")
         tk.Label(inner5, text=str(CONFIG_PATH), bg=c["surface"],
@@ -1289,11 +2158,16 @@ class App:
     def _build_page_log(self):
         c = self.c
         pad = self._scroll_page("log")
+
+        self._page_header(
+            pad, "≡", "Журнал",
+            "Все действия лаунчера за текущий сеанс")
+
         inner = self._card(pad, expand=True)
 
         head = tk.Frame(inner, bg=c["surface"])
         head.pack(fill="x")
-        tk.Label(head, text="Журнал действий", bg=c["surface"], fg=c["text"],
+        tk.Label(head, text="События", bg=c["surface"], fg=c["text"],
                  font=("Segoe UI", 11, "bold")).pack(side="left")
         self._button(head, "Очистить", self.clear_log, side="right")
 
@@ -1895,6 +2769,10 @@ class App:
                 apply_fastflags(self.cfg, values)
 
         before = player_pids()
+        cursor_name = str(self.cfg.get("cursor_set") or "")
+        if self.cfg.get("use_custom_cursors") and not before and cursor_name:
+            cursor_result = apply_cursor_set(cursor_name)
+            self.q.put(lambda r=cursor_result: self._cursor_launch_done(r))
         if before:
             focused = False
             try:
@@ -2016,6 +2894,7 @@ class App:
             if values:
                 written = apply_fastflags(self.cfg, values)
                 self.log(f"FastFlags: {len(values)} → {written} файл(ов)")
+        self._apply_cursors_for_launch()
         name = self._name_for(pid)
         url = f"roblox://experiences/start?placeId={pid}"
         self.log(f"Запуск: {name or 'игра'} (place {pid})")
@@ -2076,6 +2955,7 @@ class App:
         self.log(f"Акцент интерфейса: {name} ({color})")
 
     def apply_accent(self, color):
+        old_accent = self.accent
         self.accent = color
         c = self.c
         style = self.style
@@ -2118,11 +2998,28 @@ class App:
             except tk.TclError:
                 pass
 
-        active = self.nav_buttons.get(self.current_page)
-        if active is not None:
-            active.configure(bg=color, fg=c["on_accent"],
-                             activebackground=shade(color, 1.12),
-                             activeforeground=c["on_accent"])
+        # вкладки: активная — акцентным цветом текста (фон не заливаем)
+        for name, btn in self.nav_buttons.items():
+            if name == self.current_page:
+                btn.configure(fg=color)
+            else:
+                try:
+                    if str(btn.cget("fg")) == old_accent:
+                        btn.configure(fg=c["muted"])
+                except tk.TclError:
+                    pass
+
+        # бейджи-иконки и полоса активной вкладки
+        for w in self.accent_bgs:
+            try:
+                w.configure(bg=color)
+            except tk.TclError:
+                pass
+        for w in self.accent_fgs:
+            try:
+                w.configure(fg=color)
+            except tk.TclError:
+                pass
 
         dot = getattr(self, "status_dot", None)
         if dot is not None:
@@ -2325,6 +3222,96 @@ def run_selftest():
     except Exception as exc:  # noqa: BLE001
         failures.append(f"fastflag_values: {exc}")
 
+    # 6b) наборы курсоров: слоты, ZIP, применение с резервной копией, откат
+    try:
+        tiny_png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
+            "2mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sets_dir = root / "CursorSets"
+            created = create_cursor_set(sets_dir=sets_dir)
+            if not created["ok"]:
+                failures.append(f"курсоры: набор не создан {created}")
+            set_name = created["name"]
+            if set_name not in list_cursor_sets(sets_dir):
+                failures.append("курсоры: набор не появился в списке")
+
+            slot_keys = {slot["key"] for slot in CURSOR_SLOTS}
+            for slot in CURSOR_SLOTS:
+                source = root / "sources" / slot["file"]
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(tiny_png)
+                added = set_cursor_slot(set_name, slot["key"], source,
+                                        sets_dir=sets_dir)
+                if not added["ok"]:
+                    failures.append(
+                        f"курсоры: слот {slot['key']} — {added['error']}")
+            files = cursor_set_files(set_name, sets_dir)
+            if set(files) != slot_keys:
+                failures.append(f"курсоры: слоты набора {set(files)}")
+
+            archive = root / "set.zip"
+            exported = export_cursor_set(set_name, archive, sets_dir)
+            if not exported["ok"] or not archive.exists():
+                failures.append(f"курсоры: экспорт {exported}")
+            imported = import_cursor_set(archive, "Импорт", sets_dir)
+            if not imported["ok"] or imported["files"] != 4:
+                failures.append(f"курсоры: импорт {imported}")
+            elif set(cursor_set_files(imported["name"], sets_dir)) != slot_keys:
+                failures.append("курсоры: импорт потерял слоты")
+            else:
+                renamed = rename_cursor_set(imported["name"], "Импорт 2",
+                                            sets_dir)
+                if not renamed["ok"] or "Импорт 2" not in list_cursor_sets(
+                        sets_dir):
+                    failures.append(f"курсоры: переименование {renamed}")
+            if rename_cursor_set("Импорт 2", "bad/name", sets_dir)["ok"]:
+                failures.append("курсоры: недопустимое имя принято")
+
+            target_root = root / "game"
+            defaults = {}
+            for slot in CURSOR_SLOTS:
+                target = target_root / slot["target_rel"]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                defaults[slot["key"]] = b"default-" + slot["file"].encode()
+                target.write_bytes(defaults[slot["key"]])
+            state = root / "state.json"
+            backups = root / "backup"
+
+            result = apply_cursor_set(set_name, [target_root], state,
+                                      backups, sets_dir=sets_dir)
+            if not result["ok"] or result["copied"] != 4:
+                failures.append(f"курсоры: применение набора {result}")
+            if cursor_state_info(state) != {"set": set_name, "files": 4}:
+                failures.append(f"курсоры: состояние {cursor_state_info(state)}")
+            for slot in CURSOR_SLOTS:
+                target = target_root / slot["target_rel"]
+                if target.read_bytes() != tiny_png:
+                    failures.append(f"курсоры: {slot['file']} не заменён")
+
+            copy_name = "Текущие"
+            create_cursor_set(copy_name, sets_dir)
+            copied_current = copy_current_cursor_set(
+                copy_name, [target_root], sets_dir)
+            if (not copied_current["ok"]
+                    or copied_current["copied"] != 4):
+                failures.append(
+                    f"курсоры: получить текущий {copied_current}")
+
+            restored = restore_custom_cursors(state, backups)
+            if not restored["ok"] or restored["restored"] != 4:
+                failures.append(f"курсоры: восстановление {restored}")
+            for slot in CURSOR_SLOTS:
+                target = target_root / slot["target_rel"]
+                if target.read_bytes() != defaults[slot["key"]]:
+                    failures.append(
+                        f"курсоры: {slot['file']} не восстановлен")
+            if not delete_cursor_set("Импорт 2", sets_dir)["ok"]:
+                failures.append("курсоры: набор не удалился")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"cursor sets test: {exc}")
+
     # 7) пути записи флагов (регрессия на неверный путь Roblox/…)
     try:
         for path in client_settings_paths():
@@ -2366,7 +3353,8 @@ def run_selftest():
         root.update_idletasks()
         root.update()
 
-        for page_key in ("flags", "favorites", "settings", "log", "game"):
+        for page_key in ("flags", "cursors", "favorites", "settings", "log",
+                         "game"):
             app.show_page(page_key)
             root.update()
             if app.current_page != page_key:
@@ -2430,8 +3418,8 @@ def run_selftest():
         for item in failures:
             print("  -", item)
         return 1
-    print("SELFTEST OK: core, themes, frameless window, flags, UI rebuild "
-          "— all good")
+    print("SELFTEST OK: core, themes, frameless window, flags, cursors, "
+          "UI rebuild — all good")
     return 0
 
 

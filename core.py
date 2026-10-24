@@ -13,16 +13,20 @@ MaklyxaLauncher — ядро лаунчера (логика без интерф�
   * одноэкземплярность (mutex) и хелперы безрамочного окна.
 
 Лаунчер не внедряет код в игру и не обходит защиту — только стандартные
-ссылки roblox://, запись конфигов и запуск официальных файлов.
+ссылки roblox://, запись конфигов, запуск официальных файлов и локальная
+замена PNG-курсоров клиента.
 """
 
 import ctypes
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.request
+import zipfile
 from pathlib import Path
 
 try:
@@ -32,7 +36,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.3.2"
+VERSION = "1.5.0"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -42,6 +46,33 @@ CONFIG_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / APP_NAME
 CONFIG_PATH = CONFIG_DIR / "config.json"
 OLD_CONFIG_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "RobloxLauncher"
 OLD_CONFIG_PATH = OLD_CONFIG_DIR / "config.json"
+
+CURSOR_SETS_DIR = CONFIG_DIR / "CursorSets"
+CURSOR_STATE_PATH = CONFIG_DIR / "cursor_state.json"
+CURSOR_BACKUP_DIR = CONFIG_DIR / "cursor_backup"
+CURSOR_SLOTS = (
+    {"key": "shiftlock", "file": "MouseLockedCursor.png",
+     "label": "ShiftLock",
+     "set_rel": Path("MouseLockedCursor.png"),
+     "target_rel": Path("content") / "textures" / "MouseLockedCursor.png"},
+    {"key": "arrow", "file": "ArrowCursor.png",
+     "label": "Обычная стрелка",
+     "set_rel": Path("Cursors") / "KeyboardMouse" / "ArrowCursor.png",
+     "target_rel": (Path("content") / "textures" / "Cursors"
+                    / "KeyboardMouse" / "ArrowCursor.png")},
+    {"key": "arrow_far", "file": "ArrowFarCursor.png",
+     "label": "Стрелка в игре",
+     "set_rel": Path("Cursors") / "KeyboardMouse" / "ArrowFarCursor.png",
+     "target_rel": (Path("content") / "textures" / "Cursors"
+                    / "KeyboardMouse" / "ArrowFarCursor.png")},
+    {"key": "ibeam", "file": "IBeamCursor.png",
+     "label": "Ввод текста",
+     "set_rel": Path("Cursors") / "KeyboardMouse" / "IBeamCursor.png",
+     "target_rel": (Path("content") / "textures" / "Cursors"
+                    / "KeyboardMouse" / "IBeamCursor.png")},
+)
+CURSOR_SLOT_BY_KEY = {slot["key"]: slot for slot in CURSOR_SLOTS}
+CURSOR_SLOT_BY_FILE = {slot["file"].lower(): slot for slot in CURSOR_SLOTS}
 
 if getattr(sys, "frozen", False):
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", "."))
@@ -133,6 +164,8 @@ DEFAULT_CONFIG = {
     "graphics_mode": "",
     "quality_level": 0,
     "apply_flags_on_launch": True,
+    "use_custom_cursors": True,
+    "cursor_set": "",
     "accent": "#00c48c",
     "theme": DEFAULT_THEME,
     "window_geometry": "",
@@ -245,6 +278,7 @@ def load_config(path=None):
     for key in ("default_place_id", "last_place_id"):
         value = str(cfg.get(key) or "")
         cfg[key] = value if value.isdigit() else ""
+    cfg["cursor_set"] = str(cfg.get("cursor_set") or "")
 
     for key in ("favorites", "history"):
         clean = []
@@ -258,7 +292,7 @@ def load_config(path=None):
         cfg[key] = clean[:40]
 
     for flag in ("auto_close", "save_history", "remember_last",
-                 "apply_flags_on_launch"):
+                 "apply_flags_on_launch", "use_custom_cursors"):
         cfg[flag] = bool(cfg.get(flag))
     try:
         cfg["fps_limit"] = max(0, min(1000, int(cfg.get("fps_limit") or 0)))
@@ -658,6 +692,562 @@ def write_json_dict(path, data):
         return True, ""
     except OSError as exc:
         return False, str(exc)
+
+
+# ---- свои курсоры ------------------------------------------------------------
+
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+CURSOR_README = """\
+MaklyxaLauncher — наборы курсоров Roblox
+========================================
+
+Каждый набор — отдельная папка внутри CursorSets.
+Создавай, переименовывай и удаляй наборы во вкладке «Курсоры».
+
+В наборе четыре слота (структура совместима с Froststrap):
+  MouseLockedCursor.png                   ShiftLock
+  Cursors\\KeyboardMouse\\ArrowCursor.png      обычная стрелка
+  Cursors\\KeyboardMouse\\ArrowFarCursor.png   стрелка в игре
+  Cursors\\KeyboardMouse\\IBeamCursor.png      ввод текста
+
+PNG с прозрачным фоном, рекомендуемый размер — 64x64.
+Набор можно импортировать и экспортировать ZIP-архивом.
+
+Файлы копируются в установленный клиент Roblox и в Modifications
+Froststrap/Bloxstrap. Исходники сохраняются в cursor_backup,
+кнопка «Вернуть исходные» откатывает замену.
+"""
+
+
+def ensure_cursor_sets_dir(folder=None):
+    """Создаёт папку наборов и памятку. None — если папка недоступна."""
+    folder = Path(folder or CURSOR_SETS_DIR)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    readme = folder / "README.txt"
+    if not readme.exists():
+        try:
+            readme.write_text(CURSOR_README, encoding="utf-8-sig")
+        except OSError:
+            pass
+    return folder
+
+
+def png_info_bytes(data):
+    """(ширина, высота, возможно ли прозрачное изображение)."""
+    if len(data) < 26 or data[:8] != PNG_SIGNATURE:
+        raise ValueError("это не PNG или файл повреждён")
+    if data[12:16] != b"IHDR":
+        raise ValueError("нет заголовка PNG")
+    width = int.from_bytes(data[16:20], "big")
+    height = int.from_bytes(data[20:24], "big")
+    if width <= 0 or height <= 0:
+        raise ValueError("некорректный размер")
+    color_type = data[25]
+    return width, height, color_type in (3, 4, 6)
+
+
+def png_info(path):
+    try:
+        data = Path(path).read_bytes()
+    except OSError as exc:
+        raise ValueError(str(exc)) from exc
+    return png_info_bytes(data)
+
+
+def valid_cursor_set_name(name):
+    name = str(name or "").strip()
+    if not name or name in (".", "..") or len(name) > 48:
+        return False
+    if name.endswith((" ", ".")):
+        return False
+    if any(ch in '<>:"/\\|?*' or ord(ch) < 32 for ch in name):
+        return False
+    return True
+
+
+def _cursor_sets_base(sets_dir=None):
+    return Path(sets_dir) if sets_dir is not None else CURSOR_SETS_DIR
+
+
+def list_cursor_sets(sets_dir=None):
+    base = ensure_cursor_sets_dir(sets_dir)
+    if base is None:
+        return []
+    try:
+        return sorted((p.name for p in base.iterdir() if p.is_dir()),
+                      key=str.lower)
+    except OSError:
+        return []
+
+
+def _unique_cursor_set_name(base, wanted):
+    wanted = str(wanted or "").strip()
+    if not valid_cursor_set_name(wanted):
+        wanted = "Набор"
+    name = wanted
+    index = 2
+    while (Path(base) / name).exists():
+        name = f"{wanted} ({index})"
+        index += 1
+    return name
+
+
+def create_cursor_set(name=None, sets_dir=None):
+    base = ensure_cursor_sets_dir(sets_dir)
+    if base is None:
+        return {"ok": False, "name": "", "error": "папка наборов недоступна"}
+    if name:
+        if not valid_cursor_set_name(name):
+            return {"ok": False, "name": "", "error": "недопустимое имя набора"}
+        if (base / name).exists():
+            return {"ok": False, "name": "", "error": "набор уже существует"}
+        final_name = str(name).strip()
+    else:
+        index = 1
+        while (base / f"Набор {index}").exists():
+            index += 1
+        final_name = f"Набор {index}"
+    try:
+        (base / final_name).mkdir()
+    except OSError as exc:
+        return {"ok": False, "name": "", "error": str(exc)}
+    return {"ok": True, "name": final_name, "error": ""}
+
+
+def rename_cursor_set(old, new, sets_dir=None):
+    base = _cursor_sets_base(sets_dir)
+    if not valid_cursor_set_name(old):
+        return {"ok": False, "name": "", "error": "набор не найден"}
+    old_path = base / str(old)
+    new = str(new or "").strip()
+    if not old_path.is_dir():
+        return {"ok": False, "name": "", "error": "набор не найден"}
+    if not valid_cursor_set_name(new):
+        return {"ok": False, "name": "", "error": "недопустимое имя набора"}
+    if new == old:
+        return {"ok": True, "name": new, "error": ""}
+    new_path = base / new
+    if new_path.exists():
+        return {"ok": False, "name": "",
+                "error": "набор с таким именем уже есть"}
+    try:
+        old_path.rename(new_path)
+    except OSError as exc:
+        return {"ok": False, "name": "", "error": str(exc)}
+    _rename_cursor_state_set(str(old), new)
+    return {"ok": True, "name": new, "error": ""}
+
+
+def delete_cursor_set(name, sets_dir=None):
+    base = _cursor_sets_base(sets_dir)
+    if not valid_cursor_set_name(name):
+        return {"ok": False, "error": "набор не найден"}
+    target = base / str(name)
+    if not target.is_dir():
+        return {"ok": False, "error": "набор не найден"}
+    try:
+        shutil.rmtree(target)
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "error": ""}
+
+
+def cursor_slot_path(set_name, key, sets_dir=None):
+    slot = CURSOR_SLOT_BY_KEY.get(key)
+    if slot is None or not valid_cursor_set_name(set_name):
+        return None
+    return _cursor_sets_base(sets_dir) / str(set_name) / slot["set_rel"]
+
+
+def cursor_set_files(set_name, sets_dir=None):
+    """Существующие файлы набора: {ключ слота: путь}."""
+    result = {}
+    for slot in CURSOR_SLOTS:
+        path = cursor_slot_path(set_name, slot["key"], sets_dir)
+        if path is not None and path.is_file():
+            result[slot["key"]] = path
+    return result
+
+
+def set_cursor_slot(set_name, key, source, sets_dir=None):
+    slot = CURSOR_SLOT_BY_KEY.get(key)
+    if slot is None:
+        return {"ok": False, "error": "неизвестный слот курсора"}
+    source = Path(source)
+    if not source.is_file():
+        return {"ok": False, "error": "файл не найден"}
+    try:
+        width, height, alpha = png_info(source)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    target = cursor_slot_path(set_name, key, sets_dir)
+    if target is None:
+        return {"ok": False, "error": "набор не найден"}
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.resolve() != target.resolve():
+            shutil.copyfile(source, target)
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "error": "", "path": target,
+            "width": width, "height": height, "alpha": alpha}
+
+
+def remove_cursor_slot(set_name, key, sets_dir=None):
+    path = cursor_slot_path(set_name, key, sets_dir)
+    if path is None or not path.exists():
+        return {"ok": False, "error": "файл не найден"}
+    try:
+        path.unlink()
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "error": ""}
+
+
+def cursor_set_warnings(set_name, sets_dir=None):
+    warnings = []
+    for path in cursor_set_files(set_name, sets_dir).values():
+        try:
+            width, height, alpha = png_info(path)
+        except ValueError as exc:
+            warnings.append(f"{path.name}: {exc}")
+            continue
+        if width > 64 or height > 64:
+            warnings.append(
+                f"{path.name}: {width}×{height}, рекомендуется 64×64")
+        if not alpha:
+            warnings.append(f"{path.name}: без прозрачности")
+    return warnings
+
+
+def find_player_dirs():
+    """Папки версий, где лежит именно игровой RobloxPlayerBeta.exe."""
+    roots = []
+    local = os.getenv("LOCALAPPDATA", "")
+    if local:
+        for name in ("Roblox", "Froststrap", "Bloxstrap"):
+            roots.append(Path(local) / name / "Versions")
+    roots.append(Path(r"C:\Program Files\Froststrap"))
+    roots.append(Path(r"C:\Program Files (x86)\Froststrap"))
+
+    found = {}
+    for root in roots:
+        try:
+            if not root.is_dir():
+                continue
+            for exe in root.glob("**/RobloxPlayerBeta.exe"):
+                if exe.is_file():
+                    found[str(exe.parent).lower()] = exe.parent
+        except OSError:
+            continue
+    return sorted(found.values(), key=lambda p: str(p).lower())
+
+
+def cursor_install_roots(prefer_mods=False):
+    """Корни клиента и модов: версии игры и Modifications бутстраперов."""
+    version_roots = list(find_player_dirs())
+    mod_roots = []
+    local = os.getenv("LOCALAPPDATA", "")
+    if local:
+        for name in ("Froststrap", "Bloxstrap"):
+            base = Path(local) / name
+            if base.is_dir():
+                mod_roots.append(base / "Modifications")
+
+    roots = mod_roots + version_roots if prefer_mods \
+        else version_roots + mod_roots
+    seen, unique = set(), []
+    for path in roots:
+        key = str(path).lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def _cursor_backup_path(target, backup_dir):
+    digest = hashlib.sha1(str(target).lower().encode("utf-8")).hexdigest()[:20]
+    return Path(backup_dir) / f"{digest}_{target.name}"
+
+
+def _load_cursor_state(path):
+    data = read_json_dict(Path(path))
+    items = data.get("files")
+    if not isinstance(items, list):
+        return []
+    clean = []
+    for item in items:
+        if not isinstance(item, dict) or not item.get("target"):
+            continue
+        backup = str(item.get("backup") or "")
+        clean.append({"target": str(item["target"]), "backup": backup,
+                      "source": str(item.get("source") or "")})
+    return clean
+
+
+def _save_cursor_state(path, items, set_name=""):
+    write_json_dict(Path(path), {"files": items,
+                                 "set": str(set_name or "")})
+
+
+def _rename_cursor_state_set(old, new):
+    data = read_json_dict(CURSOR_STATE_PATH)
+    if str(data.get("set") or "") != str(old):
+        return
+    data["set"] = str(new)
+    write_json_dict(CURSOR_STATE_PATH, data)
+
+
+def cursor_state_info(state_path=None):
+    data = read_json_dict(Path(state_path or CURSOR_STATE_PATH))
+    items = data.get("files")
+    return {"set": str(data.get("set") or ""),
+            "files": len(items) if isinstance(items, list) else 0}
+
+
+def restore_custom_cursors(state_path=None, backup_dir=None):
+    """Вернуть файлы, которые были до замены, и очистить состояние."""
+    state_path = Path(state_path or CURSOR_STATE_PATH)
+    backup_dir = Path(backup_dir or CURSOR_BACKUP_DIR)
+    items = _load_cursor_state(state_path)
+    remaining = []
+    errors = []
+    restored = 0
+
+    for item in items:
+        try:
+            target = Path(item["target"])
+            backup = Path(item["backup"]) if item["backup"] else None
+            if not target.parent.exists():
+                if backup and backup.exists():
+                    backup.unlink()
+                restored += 1
+                continue
+            if backup is not None:
+                if not backup.exists():
+                    if target.exists():
+                        raise OSError("резервная копия не найдена")
+                    restored += 1
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(backup, target)
+                try:
+                    backup.unlink()
+                except OSError:
+                    pass
+            elif target.exists():
+                target.unlink()
+            restored += 1
+        except (OSError, ValueError) as exc:
+            remaining.append(item)
+            errors.append(f"{Path(item.get('target', '')).name}: {exc}")
+
+    _save_cursor_state(state_path, remaining)
+    return {"ok": not errors, "restored": restored, "errors": errors}
+
+
+def _cursor_error(message, set_name=""):
+    return {"ok": False, "files": 0, "installs": 0, "copied": 0,
+            "errors": [message], "error": message,
+            "set": str(set_name or "")}
+
+
+def apply_cursor_set(name, roots=None, state_path=None, backup_dir=None,
+                     sets_dir=None):
+    """Скопировать набор в клиент, сохранив исходные файлы для отката."""
+    base = ensure_cursor_sets_dir(sets_dir)
+    if base is None:
+        return _cursor_error("папка наборов недоступна", name)
+    name = str(name or "")
+    if not valid_cursor_set_name(name):
+        return _cursor_error("набор не найден", name)
+    set_dir = base / name
+    if not set_dir.is_dir():
+        return _cursor_error("набор не найден", name)
+
+    files = []
+    for slot in CURSOR_SLOTS:
+        source = set_dir / slot["set_rel"]
+        if not source.is_file():
+            continue
+        try:
+            png_info(source)
+        except ValueError as exc:
+            return _cursor_error(f"{slot['file']}: {exc}", name)
+        files.append((slot, source))
+    if not files:
+        return _cursor_error("в наборе нет курсоров", name)
+
+    raw_roots = (list(roots) if roots is not None
+                 else cursor_install_roots())
+    clean_roots, seen = [], set()
+    for root in raw_roots:
+        root = Path(root)
+        key = str(root).lower()
+        if key not in seen:
+            seen.add(key)
+            clean_roots.append(root)
+    if not clean_roots:
+        return _cursor_error("папки Roblox не найдены", name)
+
+    state_path = Path(state_path or CURSOR_STATE_PATH)
+    backup_dir = Path(backup_dir or CURSOR_BACKUP_DIR)
+    old = restore_custom_cursors(state_path, backup_dir)
+    if not old["ok"]:
+        return _cursor_error(
+            "не удалось вернуть исходные файлы: "
+            + "; ".join(old["errors"]), name)
+
+    applied, errors = [], []
+    copied = installs = 0
+    for root in clean_roots:
+        wrote_here = False
+        for slot, source in files:
+            target = root / slot["target_rel"]
+            backup = None
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists():
+                    backup = _cursor_backup_path(target, backup_dir)
+                    if not backup.exists():
+                        backup.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(target, backup)
+                applied.append({"target": str(target),
+                                "backup": str(backup) if backup else "",
+                                "source": str(source)})
+                shutil.copyfile(source, target)
+                copied += 1
+                wrote_here = True
+            except OSError as exc:
+                errors.append(f"{target}: {exc}")
+        if wrote_here:
+            installs += 1
+
+    _save_cursor_state(state_path, applied, name)
+    return {"ok": not errors, "files": len(files),
+            "installs": installs, "copied": copied,
+            "errors": errors, "error": errors[0] if errors else "",
+            "set": name}
+
+
+def copy_current_cursor_set(name, roots=None, sets_dir=None):
+    """Скопировать текущие файлы курсоров клиента в выбранный набор."""
+    base = ensure_cursor_sets_dir(sets_dir)
+    if (base is None or not valid_cursor_set_name(name)
+            or not (base / str(name)).is_dir()):
+        return {"ok": False, "copied": 0, "missing": [],
+                "errors": ["набор не найден"], "error": "набор не найден"}
+    raw_roots = (cursor_install_roots(prefer_mods=True)
+                 if roots is None else list(roots))
+    copied, missing, errors = 0, [], []
+    for slot in CURSOR_SLOTS:
+        source = None
+        for root in raw_roots:
+            candidate = Path(root) / slot["target_rel"]
+            if candidate.is_file():
+                source = candidate
+                break
+        dest = cursor_slot_path(name, slot["key"], sets_dir)
+        if source is None:
+            missing.append(slot["label"])
+            try:
+                if dest.exists():
+                    dest.unlink()
+            except OSError as exc:
+                errors.append(f"{slot['label']}: {exc}")
+            continue
+        try:
+            png_info(source)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, dest)
+            copied += 1
+        except (OSError, ValueError) as exc:
+            errors.append(f"{slot['label']}: {exc}")
+    if copied == 0 and not errors:
+        errors.append("в клиенте не найдены файлы курсоров")
+    return {"ok": not errors, "copied": copied, "missing": missing,
+            "errors": errors, "error": errors[0] if errors else ""}
+
+
+def export_cursor_set(name, zip_path, sets_dir=None):
+    files = cursor_set_files(name, sets_dir)
+    if not files:
+        return {"ok": False, "files": 0, "error": "в наборе нет курсоров"}
+    zip_path = Path(zip_path)
+    try:
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for slot in CURSOR_SLOTS:
+                path = files.get(slot["key"])
+                if path is not None:
+                    zf.write(path, slot["set_rel"].as_posix())
+    except (OSError, zipfile.BadZipFile) as exc:
+        return {"ok": False, "files": 0, "error": str(exc)}
+    return {"ok": True, "files": len(files), "path": zip_path, "error": ""}
+
+
+def import_cursor_set(zip_path, name=None, sets_dir=None):
+    """Импортировать ZIP (в том числе набор Froststrap) в новый набор."""
+    base = ensure_cursor_sets_dir(sets_dir)
+    if base is None:
+        return {"ok": False, "name": "", "files": 0, "skipped": 0,
+                "error": "папка наборов недоступна"}
+    zip_path = Path(zip_path)
+    if not zip_path.is_file():
+        return {"ok": False, "name": "", "files": 0, "skipped": 0,
+                "error": "архив не найден"}
+
+    found, skipped = {}, 0
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                base_name = info.filename.replace("\\", "/").rsplit("/", 1)[-1]
+                slot = CURSOR_SLOT_BY_FILE.get(base_name.lower())
+                if slot is None:
+                    continue
+                if slot["key"] in found or info.file_size > 8 * 1024 * 1024:
+                    skipped += 1
+                    continue
+                try:
+                    data = zf.read(info)
+                    png_info_bytes(data)
+                except (OSError, ValueError):
+                    skipped += 1
+                    continue
+                found[slot["key"]] = data
+    except (OSError, zipfile.BadZipFile) as exc:
+        return {"ok": False, "name": "", "files": 0, "skipped": skipped,
+                "error": str(exc)}
+
+    if not found:
+        return {"ok": False, "name": "", "files": 0, "skipped": skipped,
+                "error": "в архиве нет PNG с именами курсоров"}
+
+    wanted = name or zip_path.stem
+    if not valid_cursor_set_name(wanted):
+        wanted = "Импорт"
+    final_name = _unique_cursor_set_name(base, wanted)
+    created = create_cursor_set(final_name, sets_dir)
+    if not created["ok"]:
+        return {"ok": False, "name": "", "files": 0, "skipped": skipped,
+                "error": created["error"]}
+
+    try:
+        for key, data in found.items():
+            dest = cursor_slot_path(final_name, key, sets_dir)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+    except OSError as exc:
+        shutil.rmtree(base / final_name, ignore_errors=True)
+        return {"ok": False, "name": "", "files": 0, "skipped": skipped,
+                "error": str(exc)}
+    return {"ok": True, "name": final_name, "files": len(found),
+            "skipped": skipped, "error": ""}
 
 
 def find_bootstrapper_settings():
