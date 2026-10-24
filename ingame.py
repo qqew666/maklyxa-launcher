@@ -15,6 +15,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 import tkinter as tk
+import tkinter.font as tkfont
 
 try:
     import core
@@ -697,6 +698,7 @@ class Overlay:
     def __init__(self, root, cfg):
         self.root = root
         self.cfg = cfg
+        self.FONT = self._load_overlay_font(cfg)
         self.top = tk.Toplevel(root)
         self.top.withdraw()
         self.top.overrideredirect(True)
@@ -731,6 +733,33 @@ class Overlay:
             except ValueError:
                 pass
         return "#00c48c"
+
+    def _load_overlay_font(self, cfg):
+        """Подключить сохранённый TTF/OTF только к процессу оверлея."""
+        if core is None:
+            return "Segoe UI"
+        path = None
+        try:
+            state = core.ui_font_state()
+            path = state.get("path")
+            if path is None or not core.load_private_font(path):
+                return "Segoe UI"
+            available = {str(name).casefold(): str(name)
+                         for name in tkfont.families(self.root)}
+            candidates = list(state.get("families") or [])
+            candidates.append((cfg or {}).get("ui_font_family") or "")
+            for candidate in candidates:
+                key = str(candidate or "").strip().casefold()
+                if key and key in available:
+                    return available[key]
+            core.unload_private_font(path)
+        except Exception:  # noqa: BLE001 — шрифт не должен ломать оверлей
+            if path is not None:
+                try:
+                    core.unload_private_font(path)
+                except Exception:
+                    pass
+        return "Segoe UI"
 
     def _build(self):
         self.fps_var = tk.StringVar(value="—")

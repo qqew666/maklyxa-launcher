@@ -72,20 +72,20 @@ from core import (
     focus_roblox_window, fmt_num, gallery_assign, gallery_cache_load,
     gallery_cache_save, gallery_seed_places, gallery_stats,
     gallery_thumb_path, game_launch_url, hit_test, import_cursor_set,
-    import_launch_icon, import_launch_sound, import_theme_set,
+    import_launch_icon, import_launch_sound, import_sky_image, import_theme_set,
     import_ui_font, inspect_ui_font, launch_game_as,
     launch_icon_state, launch_sound_path, list_cursor_sets, list_theme_sets,
     load_config, load_private_font, load_theme_palette, mb, merge_flags_into,
     migrate_old_config, parse_place_id, png_info, player_pids,
     play_launch_sound, probe_protocol, protect_secret, read_json_dict,
     remove_account, remove_cursor_slot, remove_launch_icon,
-    remove_launch_sound, remove_theme_image, remove_ui_font,
+    remove_launch_sound, remove_sky_image, remove_theme_image, remove_ui_font,
     rename_cursor_set, rename_theme_set, resize_geometry,
     resolve_gallery_places, restore_custom_cursors,
     restore_launch_icon_shortcuts, roblox_status, scan_screenshots,
     screenshots_dir, save_config, set_active_account, set_cursor_slot,
-    set_theme_image,
-    shade, shortcut_backup_count, stop_launch_sound, theme_set_info, trunc,
+    set_theme_image, shade, shortcut_backup_count, sky_image_path,
+    stop_launch_sound, theme_set_info, trunc,
     ui_font_path, ui_font_state, unload_private_font, unprotect_secret,
     update_theme_set, valid_cursor_set_name, valid_discord_app_id,
     valid_geometry, valid_theme_set_name, version_tuple, work_area,
@@ -122,10 +122,8 @@ def _resolve_tk_family(root, candidates):
     return ""
 
 
-def _prepare_ui_font(root, cfg):
-    """Подключить сохранённый шрифт к процессу до сборки интерфейса."""
-    global UI_FONT
-    UI_FONT = "Segoe UI"
+def _prepare_preview_font(root, cfg):
+    """Подключить сохранённый шрифт для превью; UI лаунчера — Segoe UI."""
     path = ui_font_path()
     if path is None:
         return None, ""
@@ -137,7 +135,6 @@ def _prepare_ui_font(root, cfg):
     if not family:
         unload_private_font(path)
         return None, ""
-    UI_FONT = family
     return path, family
 
 
@@ -820,7 +817,7 @@ class App:
                        else self.cfg["accent"])
         self._loaded_font_path = None
         self._ui_font_family = ""
-        self._loaded_font_path, self._ui_font_family = _prepare_ui_font(
+        self._loaded_font_path, self._ui_font_family = _prepare_preview_font(
             self.root, self.cfg)
 
         self.q = queue.Queue()
@@ -874,9 +871,11 @@ class App:
         self.launch_sound_status_var = tk.StringVar(value="")
         self.error_sound_status_var = tk.StringVar(value="")
         self.ui_font_status_var = tk.StringVar(value="")
+        self.sky_status_var = tk.StringVar(value="")
         self.launch_shortcut_status_var = tk.StringVar(value="")
         self.launch_style_note_var = tk.StringVar(value="")
         self._launch_icon_photo_ref = None
+        self._sky_photo_ref = None
         self._shortcut_busy = False
         self._launch_splash = None
         self._launch_splash_job = None
@@ -1185,7 +1184,7 @@ class App:
         self.status_var = tk.StringVar(value="Готово")
 
         # нижняя статусная строка — внутри рабочей области
-        statusbar = tk.Frame(main, bg=c["panel"], height=34)
+        statusbar = tk.Frame(main, bg=c["panel"], height=38)
         statusbar.pack(fill="x", side="bottom")
         statusbar.pack_propagate(False)
         self.status_dot = tk.Label(statusbar, text="●", bg=c["panel"],
@@ -1194,9 +1193,12 @@ class App:
         tk.Label(statusbar, textvariable=self.proto_var, bg=c["panel"],
                  fg=c["muted"], font=(UI_FONT, 9)).pack(
                      side="left", padx=(7, 0))
+        self.btn_save_all = self._button(
+            statusbar, "Сохранить всё", self.save_everything, kind="primary",
+            side="right", padx=(0, 14))
         tk.Label(statusbar, textvariable=self.status_var, bg=c["panel"],
                  fg=c["text"], font=(UI_FONT, 9)).pack(
-                     side="right", padx=(0, 18))
+                     side="right", padx=(0, 14))
         tk.Frame(main, bg=c["border"], height=1).pack(
             fill="x", side="bottom")
 
@@ -1320,13 +1322,20 @@ class App:
         except Exception:
             return ""
 
-    # -- фон из картинки своей темы -------------------------------------------------
+    # -- фон из картинки своей темы или своего неба --------------------------------
+
+    def _sky_source(self):
+        if not self.cfg.get("sky_enabled", True):
+            return None
+        return sky_image_path()
 
     def _theme_image_source(self):
-        source = str(self.c.get("image") or "")
+        source = self._sky_source()
+        if source is None:
+            source = self.c.get("image") or ""
         try:
             if source and Path(source).is_file():
-                return source
+                return str(source)
         except OSError:
             pass
         return ""
@@ -2762,10 +2771,11 @@ class App:
 
         btn_row2 = tk.Frame(self.boot_body, bg=c["surface"])
         btn_row2.pack(fill="x", pady=(8, 0))
-        self.btn_boot_save = self._button(
-            btn_row2, "Сохранить", self.save_boot_panel, side="left")
         self._button(btn_row2, "Обновить из файла", self.refresh_boot_panel,
-                     side="left", padx=8)
+                     side="left")
+        tk.Label(btn_row2, text="изменения запишет «Сохранить всё» внизу",
+                 bg=c["surface"], fg=c["muted"],
+                 font=(UI_FONT, 8)).pack(side="left", padx=10)
         self.boot_body.pack(fill="x")
 
         self.boot_none = tk.Label(
@@ -2803,7 +2813,6 @@ class App:
         self._boot_extras(kind == "froststrap")
         name = "Froststrap" if kind == "froststrap" else "Bloxstrap"
         self.boot_title.configure(text=f"Конфиг: {name}")
-        self.btn_boot_save.configure(text=f"Сохранить в {name}")
         data = read_json_dict(path)
         if kind == "froststrap":
             regions = datacenter_regions()
@@ -2818,11 +2827,11 @@ class App:
         if note:
             self.boot_status.set(note)
 
-    def save_boot_panel(self):
+    def _write_boot_panel(self):
+        """Записать панель бутстрапера. Возвращает текст ошибки или \"\"."""
         kind, path = find_bootstrapper_settings()
         if not path:
-            self.boot_status.set("Конфиг не найден")
-            return
+            return ""
         data = read_json_dict(path)
         if kind == "froststrap":
             data["SelectedRegion"] = self.combo_region.get().strip() or "Auto"
@@ -2832,14 +2841,14 @@ class App:
         if not ok:
             self.boot_status.set("Ошибка записи")
             self.log(f"Не удалось записать {path}: {err}")
-            return
+            return "бутстрапер: ошибка записи"
         name = "Froststrap" if kind == "froststrap" else "Bloxstrap"
         note = f"Сохранено в {name}"
         if bootstrapper_running():
             note += " (бутстрапер запущен — при выходе может перезаписать)"
         self.boot_status.set(note)
-        self.status_var.set(f"Настройки {name} сохранены")
         self.log(f"Настройки {name} сохранены: {path}")
+        return ""
 
     def refresh_boot_panel(self):
         self._load_boot_panel(note="Обновлено из файла")
@@ -2877,9 +2886,11 @@ class App:
 
     def _on_api_change(self, _event=None):
         raw = self.combo_api.get()
-        self.cfg["graphics_mode"] = (
-            "" if raw == "Авто" else raw if raw in GRAPHICS_MODES else "")
+        value = "" if raw == "Авто" else raw if raw in GRAPHICS_MODES else ""
         self._update_api_hint()
+        if value == str(self.cfg.get("graphics_mode") or ""):
+            return
+        self.cfg["graphics_mode"] = value
         self._flags_changed("Графический API")
 
     def _update_api_hint(self):
@@ -2902,9 +2913,12 @@ class App:
     def _on_quality_change(self, _event=None):
         raw = self.combo_quality.get()
         try:
-            self.cfg["quality_level"] = 0 if raw == "Как в игре" else int(raw)
+            value = 0 if raw == "Как в игре" else int(raw)
         except ValueError:
-            self.cfg["quality_level"] = 0
+            value = 0
+        if value == int(self.cfg.get("quality_level") or 0):
+            return
+        self.cfg["quality_level"] = value
         self._flags_changed("Качество графики")
 
     def _flags_changed(self, what):
@@ -4278,22 +4292,56 @@ class App:
 
         self._page_header(
             pad, "✎", "Кастомизация",
-            "Свой шрифт интерфейса, сигналы лаунчера, иконка, звук "
+            "Небо и шрифт оверлея, сигналы лаунчера, иконка, звук "
             "и экран запуска. Файлы Roblox не изменяются.")
 
+        sky = self._card(
+            pad, title="Небо лаунчера",
+            subtitle="Своя картинка на фоне окна", glyph="☁")
+        self.sky_preview_label = tk.Label(
+            sky, text="Небо не выбрано — будет фон темы",
+            bg=c["surface2"], fg=c["muted"], font=(UI_FONT, 10),
+            height=5, anchor="center", justify="center",
+            highlightthickness=1, highlightbackground=c["border"])
+        self.sky_preview_label.pack(fill="x", pady=(10, 0))
+        tk.Label(sky, textvariable=self.sky_status_var,
+                 bg=c["surface"], fg=c["text"],
+                 font=(UI_FONT, 10, "bold"), anchor="w",
+                 justify="left", wraplength=560).pack(
+                     fill="x", pady=(9, 0))
+        self.var_sky_enabled = tk.BooleanVar(
+            value=bool(self.cfg.get("sky_enabled", True)))
+        self._checkbox(
+            sky, "Показывать небо фоном", self.var_sky_enabled,
+            command=self._save_sky_flag).pack(anchor="w", pady=(7, 0))
+        row_sky = tk.Frame(sky, bg=c["surface"])
+        row_sky.pack(fill="x", pady=(9, 0))
+        self._button(row_sky, "Выбрать небо", self.choose_sky_image,
+                     kind="primary", side="left")
+        self.btn_sky_remove = self._button(
+            row_sky, "Убрать", self.remove_sky_image_ui,
+            side="left", padx=8)
+        self._hint(
+            sky, "PNG, JPG, WEBP или BMP до 20 МБ. Небо — это фон окна "
+                 "лаунчера; Roblox и его файлы не меняются. Если у темы "
+                 "есть своя картинка, небо показывается вместо неё.",
+            wrap=560)
+
         inner_font = self._card(
-            pad, title="Шрифт лаунчера",
-            subtitle="TTF или OTF вместо стандартного Segoe UI",
+            pad, title="Шрифт оверлея",
+            subtitle="TTF или OTF для внутриигрового оверлея",
             glyph="A")
         tk.Label(inner_font, textvariable=self.ui_font_status_var,
                  bg=c["surface"], fg=c["text"],
                  font=(UI_FONT, 11, "bold"), anchor="w",
                  justify="left", wraplength=560).pack(fill="x")
-        tk.Label(
+        self.ui_font_sample = tk.Label(
             inner_font,
-            text="Пример: MaklyxaLauncher — быстрый запуск Roblox",
-            bg=c["surface2"], fg=c["text"], font=(UI_FONT, 12),
-            anchor="w", padx=12, pady=10).pack(fill="x", pady=(10, 0))
+            text="Пример: 60 FPS · 62 °C · 15:42:07 · RAM 47%",
+            bg=c["surface2"], fg=c["text"],
+            font=(self._ui_font_family or UI_FONT, 12),
+            anchor="w", padx=12, pady=10)
+        self.ui_font_sample.pack(fill="x", pady=(10, 0))
         row_font = tk.Frame(inner_font, bg=c["surface"])
         row_font.pack(fill="x", pady=(10, 0))
         self._button(row_font, "Выбрать шрифт", self.choose_ui_font,
@@ -4303,9 +4351,10 @@ class App:
             side="left", padx=8)
         self._hint(
             inner_font,
-            "TTF или OTF до 20 МБ. Шрифт подключается только к окну "
-            "лаунчера и не устанавливается в Windows; клиент Roblox "
-            "и его шрифты остаются нетронутыми.", wrap=560)
+            "TTF или OTF до 20 МБ. Шрифт подключается только к оверлею "
+            "Maklyxa (FPS, время, память) и не меняет интерфейс Roblox; "
+            "лаунчер остаётся на Segoe UI. Применится к оверлею при "
+            "следующем запуске.", wrap=560)
 
         inner = self._card(
             pad, title="Иконка",
@@ -4454,7 +4503,7 @@ class App:
                      self.open_customize_dir, side="left")
         self._button(row_files, "Открыть папку стиля",
                      self.open_launch_dir, side="left", padx=8)
-        self._hint(inner4, "Шрифт лаунчера, звуки и резервные копии "
+        self._hint(inner4, "Шрифт оверлея, небо, звуки и резервные копии "
                            "ярлыков хранятся локально.", wrap=560)
 
         inner5 = self._card(
@@ -4464,8 +4513,8 @@ class App:
             text="Шрифты и звуки внутри клиента Roblox — часть его "
                  "файлов. Их замена считается вмешательством в клиент "
                  "и может привести к блокировке аккаунта. Поэтому "
-                 "лаунчер меняет только собственное окно и добавляет "
-                 "свои сигналы, не трогая установленный Roblox.",
+                 "лаунчер меняет только собственное окно: шрифт оверлея, "
+                 "небо, свои сигналы, не трогая установленный Roblox.",
             bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
             anchor="w", justify="left", wraplength=560).pack(fill="x")
 
@@ -4473,6 +4522,7 @@ class App:
 
     def _refresh_launch_style_ui(self):
         self._refresh_launch_icon()
+        self._refresh_sky()
         self._refresh_launch_sound()
         self._refresh_error_sound()
         self._refresh_ui_font()
@@ -4549,6 +4599,126 @@ class App:
             f"Резервных копий ярлыков: {count}" if count
             else "Ярлыки пока не менялись")
 
+    def _sky_preview_photo(self, source, size=(520, 130)):
+        if not HAVE_PIL or source is None:
+            return None
+        try:
+            with Image.open(source) as raw:
+                image = raw.convert("RGB")
+                scale = max(size[0] / image.width, size[1] / image.height)
+                resized = (max(1, int(image.width * scale + 0.5)),
+                           max(1, int(image.height * scale + 0.5)))
+                image = image.resize(
+                    resized,
+                    getattr(getattr(Image, "Resampling", Image), "LANCZOS"))
+                left = max(0, (image.width - size[0]) // 2)
+                top = max(0, (image.height - size[1]) // 2)
+                image = image.crop((left, top, left + size[0],
+                                    top + size[1]))
+            return ImageTk.PhotoImage(image)
+        except Exception:  # noqa: BLE001 — битая картинка не ломает UI
+            return None
+
+    def _sky_image_size(self, path):
+        if not HAVE_PIL or path is None:
+            return 0, 0
+        try:
+            with Image.open(path) as raw:
+                return raw.width, raw.height
+        except Exception:  # noqa: BLE001
+            return 0, 0
+
+    def _refresh_sky(self):
+        path = sky_image_path()
+        enabled = bool(self.cfg.get("sky_enabled", True))
+        if hasattr(self, "var_sky_enabled"):
+            try:
+                self.var_sky_enabled.set(enabled)
+            except tk.TclError:
+                pass
+        photo = None
+        if path is not None:
+            photo = self._sky_preview_photo(path)
+            width, height = self._sky_image_size(path)
+            name = str(self.cfg.get("sky_name") or path.name)
+            bits = [f"Небо: {name}"]
+            if width and height:
+                bits.append(f"{width}×{height}")
+            if not enabled:
+                bits.append("выключено")
+            self.sky_status_var.set(" · ".join(bits))
+        else:
+            self.sky_status_var.set(
+                "Небо не выбрано — фон берётся из темы")
+        self._sky_photo_ref = photo
+        label = getattr(self, "sky_preview_label", None)
+        if label is not None:
+            try:
+                if photo is not None:
+                    label.configure(image=photo, text="", height=0)
+                else:
+                    label.configure(
+                        image="",
+                        text=("Небо не читается — выбери другой файл"
+                              if path is not None
+                              else "Небо не выбрано — будет фон темы"),
+                        height=5)
+            except tk.TclError:
+                pass
+        btn = getattr(self, "btn_sky_remove", None)
+        if btn is not None:
+            try:
+                btn.configure(state="normal" if path is not None
+                              else "disabled")
+            except tk.TclError:
+                pass
+
+    def choose_sky_image(self):
+        path = filedialog.askopenfilename(
+            parent=self.root, title="Небо лаунчера",
+            filetypes=[("Картинки", "*.png *.jpg *.jpeg *.webp *.bmp"),
+                       ("Все файлы", "*.*")])
+        if not path:
+            return
+        result = import_sky_image(path)
+        if not result["ok"]:
+            self._launch_action_error(
+                f"Не удалось добавить небо: {result['error']}")
+            return
+        self.cfg["sky_name"] = result.get("name") or Path(path).name[:80]
+        self.cfg["sky_enabled"] = True
+        save_config(self.cfg)
+        self._refresh_sky()
+        self._refresh_backdrops()
+        self.status_var.set("Небо лаунчера обновлено")
+        self.log(f"Небо лаунчера: {Path(path).name}")
+
+    def remove_sky_image_ui(self):
+        result = remove_sky_image()
+        self.cfg["sky_name"] = ""
+        save_config(self.cfg)
+        self._refresh_sky()
+        self._refresh_backdrops()
+        if result["ok"]:
+            self.status_var.set("Небо лаунчера убрано")
+            self.log("Небо лаунчера удалено")
+        else:
+            self._launch_action_error(
+                f"Небо убрано не полностью: {result['error']}")
+
+    def _save_sky_flag(self):
+        enabled = bool(self.var_sky_enabled.get())
+        self.cfg["sky_enabled"] = enabled
+        save_config(self.cfg)
+        self._refresh_sky()
+        self._refresh_backdrops()
+        if enabled:
+            self.status_var.set("Небо включено фоном лаунчера")
+            self.log("Небо лаунчера включено")
+        else:
+            self.status_var.set("Небо выключено — фон берётся из темы")
+            self.log("Небо лаунчера выключено")
+
     def _refresh_launch_sound(self):
         path = launch_sound_path()
         if hasattr(self, "var_launch_sound"):
@@ -4588,18 +4758,25 @@ class App:
 
     def _refresh_ui_font(self):
         state = ui_font_state()
+        family = self._ui_font_family or ""
         if state["custom"] and self._loaded_font_path is not None:
             name = str(self.cfg.get("ui_font_name")
                        or Path(state["path"]).name)
             self.ui_font_status_var.set(
-                f"Свой шрифт: {name} · {UI_FONT}")
+                f"Свой шрифт оверлея: {name} · {family}")
         elif state["custom"]:
             self.ui_font_status_var.set(
                 "Шрифт сохранён, но Windows не смог его подключить — "
                 "выбери другой файл")
         else:
             self.ui_font_status_var.set(
-                "Стандартный шрифт Windows (Segoe UI)")
+                "Стандартный шрифт оверлея (Segoe UI)")
+        sample = getattr(self, "ui_font_sample", None)
+        if sample is not None:
+            try:
+                sample.configure(font=(family or UI_FONT, 12))
+            except tk.TclError:
+                pass
 
     def _launch_action_error(self, message):
         self.status_var.set(message)
@@ -4711,14 +4888,13 @@ class App:
 
     def choose_ui_font(self):
         path = filedialog.askopenfilename(
-            parent=self.root, title="Шрифт лаунчера",
+            parent=self.root, title="Шрифт оверлея",
             filetypes=[("Шрифты TTF и OTF", "*.ttf *.otf"),
                        ("Все файлы", "*.*")])
         if path:
             self.apply_ui_font_file(path)
 
     def apply_ui_font_file(self, source):
-        global UI_FONT
         info = inspect_ui_font(source)
         if not info["ok"]:
             self._launch_action_error(
@@ -4753,38 +4929,33 @@ class App:
             self._launch_action_error(
                 "Windows не смог подключить шрифт из папки лаунчера")
             return False
-        UI_FONT = family
         self._loaded_font_path = dest
         self._ui_font_family = family
         self.cfg["ui_font_name"] = info["name"]
         self.cfg["ui_font_family"] = family
         save_config(self.cfg)
-        self._rebuild()
         self._refresh_ui_font()
-        self.status_var.set(f"Шрифт интерфейса: {family}")
-        self.log(f"Шрифт лаунчера: {info['name']} ({family})")
+        self.status_var.set(f"Шрифт оверлея: {family}")
+        self.log(f"Шрифт оверлея: {info['name']} ({family})")
         return True
 
     def reset_ui_font(self):
-        global UI_FONT
         old_path = self._loaded_font_path
         if old_path is not None:
             unload_private_font(old_path)
         result = remove_ui_font()
-        UI_FONT = "Segoe UI"
         self._loaded_font_path = None
         self._ui_font_family = ""
         self.cfg["ui_font_name"] = ""
         self.cfg["ui_font_family"] = ""
         save_config(self.cfg)
-        self._rebuild()
         self._refresh_ui_font()
         if not result["ok"]:
             self._launch_action_error(
                 f"Шрифт сброшен, но файл не удалился: {result['error']}")
             return
-        self.status_var.set("Шрифт интерфейса сброшен")
-        self.log("Шрифт лаунчера: стандартный Segoe UI")
+        self.status_var.set("Шрифт оверлея сброшен")
+        self.log("Шрифт оверлея: стандартный Segoe UI")
 
     def choose_error_sound(self):
         path = filedialog.askopenfilename(
@@ -6518,8 +6689,9 @@ class App:
         self.var_default = tk.StringVar(value=self.cfg["default_place_id"])
         ttk.Entry(row, textvariable=self.var_default).pack(
             side="left", fill="x", expand=True, ipady=3)
-        self._button(row, "Применить", self.apply_default,
-                     side="left", padx=(8, 0))
+        tk.Label(row, text="сохранит «Сохранить всё» внизу",
+                 bg=c["surface"], fg=c["muted"],
+                 font=(UI_FONT, 8)).pack(side="left", padx=10)
 
         # Discord Rich Presence
         inner_d = self._card(
@@ -6532,16 +6704,16 @@ class App:
             value=self.cfg.get("discord_app_id") or "")
         self._checkbox(
             inner_d, "Показывать статус лаунчера в Discord",
-            self.var_discord_rpc, command=self.apply_discord_settings).pack(
-                anchor="w", pady=(4, 8))
+            self.var_discord_rpc).pack(anchor="w", pady=(4, 8))
         tk.Label(inner_d, text="Application ID", bg=c["surface"],
                  fg=c["text"], font=(UI_FONT, 10)).pack(anchor="w")
         row_d = tk.Frame(inner_d, bg=c["surface"])
         row_d.pack(fill="x", pady=(4, 0))
         ttk.Entry(row_d, textvariable=self.var_discord_id).pack(
             side="left", fill="x", expand=True, ipady=3)
-        self._button(row_d, "Сохранить", self.apply_discord_settings,
-                     kind="primary", side="left", padx=(8, 0))
+        tk.Label(inner_d, text="ID применит «Сохранить всё» внизу",
+                 bg=c["surface"], fg=c["muted"],
+                 font=(UI_FONT, 8), anchor="w").pack(fill="x", pady=(4, 0))
         row_d2 = tk.Frame(inner_d, bg=c["surface"])
         row_d2.pack(fill="x", pady=(8, 0))
         self._button(row_d2, "Создать приложение",
@@ -6739,25 +6911,61 @@ class App:
         save_config(self.cfg)
         self.status_var.set("Настройки сохранены")
 
-    def apply_default(self):
-        raw = self.var_default.get().strip()
-        if not raw:
-            self.cfg["default_place_id"] = ""
-            save_config(self.cfg)
-            self.status_var.set("Игра по умолчанию очищена")
-            return
-        pid = parse_place_id(raw)
-        if not pid:
-            self.status_var.set("Некорректный ID")
-            if self.interactive:
-                messagebox.showwarning(
-                    APP_NAME, "Не удалось распознать Place ID.",
-                    parent=self.root)
-            return
-        self.var_default.set(pid)
-        self.cfg["default_place_id"] = pid
-        save_config(self.cfg)
-        self.status_var.set(f"Игра по умолчанию: {pid}")
+    def save_everything(self):
+        """Единая кнопка внизу: сохранить настройки всех разделов."""
+        problems = []
+
+        if hasattr(self, "var_apply_flags"):
+            self.cfg["apply_flags_on_launch"] = bool(
+                self.var_apply_flags.get())
+        if hasattr(self, "combo_fps"):
+            self._on_fps_change()
+            self._on_api_change()
+            self._on_quality_change()
+
+        if hasattr(self, "var_auto_close"):
+            self.cfg["auto_close"] = bool(self.var_auto_close.get())
+            self.cfg["save_history"] = bool(self.var_save_history.get())
+            self.cfg["remember_last"] = bool(self.var_remember.get())
+            raw = self.var_default.get().strip()
+            if raw:
+                pid = parse_place_id(raw)
+                if pid:
+                    self.var_default.set(pid)
+                    self.cfg["default_place_id"] = pid
+                else:
+                    problems.append("игра по умолчанию: некорректный ID")
+            else:
+                self.cfg["default_place_id"] = ""
+
+        if hasattr(self, "var_discord_id"):
+            if not self.apply_discord_settings(quiet=True):
+                problems.append("Discord: Application ID — только цифры")
+
+        if hasattr(self, "var_ingame_overlay"):
+            self._save_ingame_cfg(message="Сохранено")
+
+        if hasattr(self, "var_sky_enabled"):
+            self.cfg["sky_enabled"] = bool(self.var_sky_enabled.get())
+        if hasattr(self, "var_launch_sound"):
+            self.cfg["launch_sound"] = bool(self.var_launch_sound.get())
+        if hasattr(self, "var_error_sound"):
+            self.cfg["error_sound"] = bool(self.var_error_sound.get())
+
+        if hasattr(self, "boot_vars"):
+            boot_error = self._write_boot_panel()
+            if boot_error:
+                problems.append(boot_error)
+
+        if not save_config(self.cfg):
+            problems.append("config.json: ошибка записи")
+        if problems:
+            text = "Сохранено с замечаниями — " + "; ".join(problems)
+            self.status_var.set(text)
+            self.log(text)
+        else:
+            self.status_var.set("Все настройки сохранены")
+            self.log("Все настройки сохранены")
 
     # -- Discord Rich Presence ---------------------------------------------------
 
@@ -6806,31 +7014,35 @@ class App:
         self.discord_status_var.set(self._discord_status_text())
         self.root.after(2000, self._poll_discord_status)
 
-    def apply_discord_settings(self):
+    def apply_discord_settings(self, quiet=False):
         raw = self.var_discord_id.get().strip()
         app_id = valid_discord_app_id(raw)
         if raw and not app_id:
             self.status_var.set("Application ID — только цифры")
-            if self.interactive:
+            if not quiet and self.interactive:
                 messagebox.showwarning(
                     APP_NAME, "Application ID приложения Discord "
                     "состоит только из цифр.", parent=self.root)
-            return
+            return False
+        previous = (bool(self.cfg.get("discord_rpc", True)),
+                    self.cfg.get("discord_app_id") or "")
         self.cfg["discord_rpc"] = bool(self.var_discord_rpc.get())
         self.cfg["discord_app_id"] = app_id
         self.var_discord_id.set(app_id)
         save_config(self.cfg)
-        self._stop_presence()
-        self._start_presence()
+        if previous != (self.cfg["discord_rpc"], app_id):
+            self._stop_presence()
+            self._start_presence()
+            self.log("Discord Rich Presence: "
+                     f"{'вкл' if self.cfg['discord_rpc'] else 'выкл'}"
+                     + (f", ID {app_id}" if app_id else ""))
         if not app_id:
             self.status_var.set("Discord: укажи Application ID")
         elif self.cfg["discord_rpc"]:
             self.status_var.set("Discord: статус включён")
         else:
             self.status_var.set("Discord: статус выключен")
-        self.log("Discord Rich Presence: "
-                 f"{'вкл' if self.cfg['discord_rpc'] else 'выкл'}"
-                 + (f", ID {app_id}" if app_id else ""))
+        return True
 
     def open_discord_portal(self):
         webbrowser.open(DISCORD_PORTAL_URL)
@@ -8659,6 +8871,42 @@ def run_selftest():
     except Exception as exc:  # noqa: BLE001
         failures.append(f"ui font test: {exc}")
 
+    # 6f2) своё небо лаунчера: импорт, путь, удаление, мусор
+    try:
+        import core as core_module
+
+        with tempfile.TemporaryDirectory(prefix="maklyxa-sky-") as td:
+            base = Path(td) / "Sky"
+            src = Path(td) / "sky.png"
+            src.write_bytes(base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
+                "2mP8z8BQDwAFgwJ/lK3dGQAAAABJRU5ErkJggg=="))
+            info = core_module.inspect_sky_image(src)
+            if not info["ok"]:
+                failures.append(f"небо: картинка не разобрана {info}")
+            imported = core_module.import_sky_image(src, base)
+            if not imported["ok"] or not Path(imported["path"]).is_file():
+                failures.append(f"небо: не импортировано {imported}")
+            elif core_module.sky_image_path(base) != Path(imported["path"]):
+                failures.append("небо: путь к картинке не совпал")
+            else:
+                removed = core_module.remove_sky_image(base)
+                if not removed["ok"] or removed["removed"] != 1:
+                    failures.append(f"небо: не удалилось {removed}")
+                if core_module.sky_image_path(base) is not None:
+                    failures.append("небо: файл остался после удаления")
+            bad = Path(td) / "bad.png"
+            bad.write_text("not an image", encoding="utf-8")
+            if core_module.inspect_sky_image(bad)["ok"]:
+                failures.append("небо: мусор принят за картинку")
+            huge = Path(td) / "huge.png"
+            with huge.open("wb") as fh:
+                fh.truncate(21 * 1024 * 1024)
+            if core_module.inspect_sky_image(huge)["ok"]:
+                failures.append("небо: файл больше 20 МБ принят")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"sky test: {exc}")
+
     # 6g) галерея: разбор снимков, сессии, группировка, кэш, миниатюры
     try:
         import core as core_module
@@ -9037,6 +9285,7 @@ def run_selftest():
         core_module.AVATARS_DIR = ui_data / "avatars"
         core_module.CONFIG_PATH = ui_data / "config.json"
         core_module.UI_FONT_DIR = ui_data / "Customize" / "Fonts"
+        core_module.SKY_DIR = ui_data / "Customize" / "Sky"
         ui_launch = ui_data / "Launch"
         core_module.LAUNCH_DIR = ui_launch
         core_module.LAUNCH_ICON_PATH = ui_launch / "icon.ico"
@@ -9078,9 +9327,74 @@ def run_selftest():
             failures.append("UI: нет выбора экрана запуска")
         if not hasattr(app, "ui_font_status_var"):
             failures.append("UI: нет статуса своего шрифта")
+        if (not hasattr(app, "sky_status_var")
+                or not hasattr(app, "var_sky_enabled")
+                or not hasattr(app, "sky_preview_label")):
+            failures.append("UI: нет карточки «Небо лаунчера»")
         if (not hasattr(app, "error_sound_status_var")
                 or not hasattr(app, "var_error_sound")):
             failures.append("UI: нет настройки звука ошибки")
+
+        # единая кнопка сохранения внизу и отсутствие других «Сохранить»
+        if not hasattr(app, "btn_save_all"):
+            failures.append("UI: нет единой кнопки сохранения")
+        else:
+            save_buttons = []
+
+            def _collect_save_buttons(widget):
+                for child in widget.winfo_children():
+                    try:
+                        text = str(child.cget("text")).strip().lower()
+                    except tk.TclError:
+                        text = ""
+                    if isinstance(child, tk.Button) and text.startswith(
+                            "сохранить"):
+                        save_buttons.append(child)
+                    _collect_save_buttons(child)
+
+            _collect_save_buttons(root)
+            if len(save_buttons) != 1:
+                failures.append(
+                    f"UI: кнопок «Сохранить» {len(save_buttons)}, нужна одна")
+            elif save_buttons[0] is not app.btn_save_all:
+                failures.append("UI: единая кнопка сохранения не внизу")
+
+        # единая кнопка записывает поля всех разделов
+        before_save = {key: app.cfg.get(key) for key in
+                       ("auto_close", "default_place_id", "discord_rpc")}
+        original_apply_flags = app.cfg.get("apply_flags_on_launch")
+        original_boot_find = globals()["find_bootstrapper_settings"]
+        app.cfg["apply_flags_on_launch"] = False
+        globals()["find_bootstrapper_settings"] = lambda: (None, None)
+        try:
+            app.var_auto_close.set(not bool(before_save["auto_close"]))
+            app.var_default.set("920587237")
+            app.var_discord_rpc.set(False)
+            app.var_discord_id.set("")
+            app.save_everything()
+            root.update()
+            saved_all = load_config()
+            if saved_all.get("default_place_id") != "920587237":
+                failures.append(
+                    "UI: единое сохранение не записало игру по умолчанию")
+            if bool(saved_all.get("auto_close")) != bool(
+                    app.var_auto_close.get()):
+                failures.append("UI: единое сохранение не записало поведение")
+            if saved_all.get("discord_rpc") is not False:
+                failures.append("UI: единое сохранение не записало Discord")
+            if "Все настройки сохранены" not in app.status_var.get():
+                failures.append(
+                    f"UI: статус единого сохранения "
+                    f"{app.status_var.get()!r}")
+        finally:
+            globals()["find_bootstrapper_settings"] = original_boot_find
+            app.cfg["apply_flags_on_launch"] = original_apply_flags
+            for key, value in before_save.items():
+                app.cfg[key] = value
+            app.var_auto_close.set(bool(before_save["auto_close"]))
+            app.var_default.set(before_save["default_place_id"] or "")
+            app.var_discord_rpc.set(bool(before_save["discord_rpc"]))
+
         for attr in ("var_ingame_overlay", "var_ingame_start",
                      "var_ingame_afk", "var_ingame_auto",
                      "combo_ingame_corner", "combo_ingame_mode",
@@ -9158,9 +9472,11 @@ def run_selftest():
             failures.append("UI: свой шрифт не применился")
         else:
             root.update()
-            if UI_FONT == "Segoe UI":
-                print("  note: выбранный шрифт совпал с Segoe UI — "
-                      "смена семейства не проверена")
+            if UI_FONT != "Segoe UI":
+                failures.append(
+                    f"UI: лаунчер сменил шрифт на {UI_FONT!r} вместо Segoe UI")
+            if not app._ui_font_family:
+                failures.append("UI: семейство шрифта оверлея не определилось")
             if "Свой шрифт" not in app.ui_font_status_var.get():
                 failures.append(
                     f"UI: статус шрифта {app.ui_font_status_var.get()!r}")
@@ -9171,12 +9487,52 @@ def run_selftest():
             app.reset_ui_font()
             root.update()
             if UI_FONT != "Segoe UI":
-                failures.append(f"UI: шрифт не сброшен ({UI_FONT})")
+                failures.append(f"UI: шрифт лаунчера не Segoe UI ({UI_FONT})")
+            if app._ui_font_family:
+                failures.append(
+                    f"UI: семейство шрифта не сброшено "
+                    f"({app._ui_font_family})")
             if ui_font_path() is not None:
                 failures.append("UI: файл шрифта остался после сброса")
             if "Стандартный" not in app.ui_font_status_var.get():
                 failures.append(
                     f"UI: статус сброса {app.ui_font_status_var.get()!r}")
+
+        with tempfile.TemporaryDirectory(prefix="maklyxa-sky-") as td:
+            sky_src = Path(td) / "sky.png"
+            sky_src.write_bytes(base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
+                "2mP8z8BQDwAFgwJ/lK3dGQAAAABJRU5ErkJggg=="))
+            imported = import_sky_image(sky_src)
+            if not imported["ok"]:
+                failures.append(f"UI: небо не импортировалось {imported}")
+            else:
+                app.cfg["sky_name"] = imported["name"]
+                app.cfg["sky_enabled"] = True
+                save_config(app.cfg)
+                app._refresh_sky()
+                root.update()
+                if sky_image_path() is None:
+                    failures.append("UI: файл неба не сохранился")
+                if app._sky_source() is None:
+                    failures.append("UI: небо не стало источником фона")
+                if not app.sky_status_var.get().startswith("Небо:"):
+                    failures.append(
+                        f"UI: статус неба {app.sky_status_var.get()!r}")
+                app.var_sky_enabled.set(False)
+                app._save_sky_flag()
+                if app._sky_source() is not None:
+                    failures.append("UI: выключенное небо осталось фоном")
+                app.var_sky_enabled.set(True)
+                app._save_sky_flag()
+                app.remove_sky_image_ui()
+                if sky_image_path() is not None:
+                    failures.append("UI: файл неба остался после удаления")
+                if "не выбрано" not in app.sky_status_var.get():
+                    failures.append(
+                        f"UI: статус после удаления "
+                        f"{app.sky_status_var.get()!r}")
+
         app.var_error_sound.set(False)
         app._save_error_sound_flag()
         if app.cfg.get("error_sound"):
