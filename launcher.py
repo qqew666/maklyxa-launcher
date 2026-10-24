@@ -72,19 +72,19 @@ from core import (
     focus_roblox_window, fmt_num, gallery_assign, gallery_cache_load,
     gallery_cache_save, gallery_seed_places, gallery_stats,
     gallery_thumb_path, game_launch_url, hit_test, import_cursor_set,
-    import_launch_icon, import_launch_sound, import_sky_image, import_theme_set,
+    import_launch_icon, import_launch_sound, import_theme_set,
     import_ui_font, inspect_ui_font, launch_game_as,
     launch_icon_state, launch_sound_path, list_cursor_sets, list_theme_sets,
     load_config, load_private_font, load_theme_palette, mb, merge_flags_into,
     migrate_old_config, parse_place_id, png_info, player_pids,
     play_launch_sound, probe_protocol, protect_secret, read_json_dict,
     remove_account, remove_cursor_slot, remove_launch_icon,
-    remove_launch_sound, remove_sky_image, remove_theme_image, remove_ui_font,
+    remove_launch_sound, remove_theme_image, remove_ui_font,
     rename_cursor_set, rename_theme_set, resize_geometry,
     resolve_gallery_places, restore_custom_cursors,
     restore_launch_icon_shortcuts, roblox_status, scan_screenshots,
     screenshots_dir, save_config, set_active_account, set_cursor_slot,
-    set_theme_image, shade, shortcut_backup_count, sky_image_path,
+    set_theme_image, shade, shortcut_backup_count,
     stop_launch_sound, theme_set_info, trunc,
     ui_font_path, ui_font_state, unload_private_font, unprotect_secret,
     update_theme_set, valid_cursor_set_name, valid_discord_app_id,
@@ -871,11 +871,9 @@ class App:
         self.launch_sound_status_var = tk.StringVar(value="")
         self.error_sound_status_var = tk.StringVar(value="")
         self.ui_font_status_var = tk.StringVar(value="")
-        self.sky_status_var = tk.StringVar(value="")
         self.launch_shortcut_status_var = tk.StringVar(value="")
         self.launch_style_note_var = tk.StringVar(value="")
         self._launch_icon_photo_ref = None
-        self._sky_photo_ref = None
         self._shortcut_busy = False
         self._launch_splash = None
         self._launch_splash_job = None
@@ -1322,17 +1320,10 @@ class App:
         except Exception:
             return ""
 
-    # -- фон из картинки своей темы или своего неба --------------------------------
-
-    def _sky_source(self):
-        if not self.cfg.get("sky_enabled", True):
-            return None
-        return sky_image_path()
+    # -- фон из картинки своей темы ------------------------------------------------
 
     def _theme_image_source(self):
-        source = self._sky_source()
-        if source is None:
-            source = self.c.get("image") or ""
+        source = self.c.get("image") or ""
         try:
             if source and Path(source).is_file():
                 return str(source)
@@ -4292,40 +4283,8 @@ class App:
 
         self._page_header(
             pad, "✎", "Кастомизация",
-            "Небо и шрифт оверлея, сигналы лаунчера, иконка, звук "
+            "Шрифт оверлея, сигналы лаунчера, иконка, звук "
             "и экран запуска. Файлы Roblox не изменяются.")
-
-        sky = self._card(
-            pad, title="Небо лаунчера",
-            subtitle="Своя картинка на фоне окна", glyph="☁")
-        self.sky_preview_label = tk.Label(
-            sky, text="Небо не выбрано — будет фон темы",
-            bg=c["surface2"], fg=c["muted"], font=(UI_FONT, 10),
-            height=5, anchor="center", justify="center",
-            highlightthickness=1, highlightbackground=c["border"])
-        self.sky_preview_label.pack(fill="x", pady=(10, 0))
-        tk.Label(sky, textvariable=self.sky_status_var,
-                 bg=c["surface"], fg=c["text"],
-                 font=(UI_FONT, 10, "bold"), anchor="w",
-                 justify="left", wraplength=560).pack(
-                     fill="x", pady=(9, 0))
-        self.var_sky_enabled = tk.BooleanVar(
-            value=bool(self.cfg.get("sky_enabled", True)))
-        self._checkbox(
-            sky, "Показывать небо фоном", self.var_sky_enabled,
-            command=self._save_sky_flag).pack(anchor="w", pady=(7, 0))
-        row_sky = tk.Frame(sky, bg=c["surface"])
-        row_sky.pack(fill="x", pady=(9, 0))
-        self._button(row_sky, "Выбрать небо", self.choose_sky_image,
-                     kind="primary", side="left")
-        self.btn_sky_remove = self._button(
-            row_sky, "Убрать", self.remove_sky_image_ui,
-            side="left", padx=8)
-        self._hint(
-            sky, "PNG, JPG, WEBP или BMP до 20 МБ. Небо — это фон окна "
-                 "лаунчера; Roblox и его файлы не меняются. Если у темы "
-                 "есть своя картинка, небо показывается вместо неё.",
-            wrap=560)
 
         inner_font = self._card(
             pad, title="Шрифт оверлея",
@@ -4503,7 +4462,7 @@ class App:
                      self.open_customize_dir, side="left")
         self._button(row_files, "Открыть папку стиля",
                      self.open_launch_dir, side="left", padx=8)
-        self._hint(inner4, "Шрифт оверлея, небо, звуки и резервные копии "
+        self._hint(inner4, "Шрифт оверлея, звуки и резервные копии "
                            "ярлыков хранятся локально.", wrap=560)
 
         inner5 = self._card(
@@ -4514,7 +4473,7 @@ class App:
                  "файлов. Их замена считается вмешательством в клиент "
                  "и может привести к блокировке аккаунта. Поэтому "
                  "лаунчер меняет только собственное окно: шрифт оверлея, "
-                 "небо, свои сигналы, не трогая установленный Roblox.",
+                 "свои сигналы, не трогая установленный Roblox.",
             bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
             anchor="w", justify="left", wraplength=560).pack(fill="x")
 
@@ -4522,7 +4481,6 @@ class App:
 
     def _refresh_launch_style_ui(self):
         self._refresh_launch_icon()
-        self._refresh_sky()
         self._refresh_launch_sound()
         self._refresh_error_sound()
         self._refresh_ui_font()
@@ -4598,126 +4556,6 @@ class App:
         self.launch_shortcut_status_var.set(
             f"Резервных копий ярлыков: {count}" if count
             else "Ярлыки пока не менялись")
-
-    def _sky_preview_photo(self, source, size=(520, 130)):
-        if not HAVE_PIL or source is None:
-            return None
-        try:
-            with Image.open(source) as raw:
-                image = raw.convert("RGB")
-                scale = max(size[0] / image.width, size[1] / image.height)
-                resized = (max(1, int(image.width * scale + 0.5)),
-                           max(1, int(image.height * scale + 0.5)))
-                image = image.resize(
-                    resized,
-                    getattr(getattr(Image, "Resampling", Image), "LANCZOS"))
-                left = max(0, (image.width - size[0]) // 2)
-                top = max(0, (image.height - size[1]) // 2)
-                image = image.crop((left, top, left + size[0],
-                                    top + size[1]))
-            return ImageTk.PhotoImage(image)
-        except Exception:  # noqa: BLE001 — битая картинка не ломает UI
-            return None
-
-    def _sky_image_size(self, path):
-        if not HAVE_PIL or path is None:
-            return 0, 0
-        try:
-            with Image.open(path) as raw:
-                return raw.width, raw.height
-        except Exception:  # noqa: BLE001
-            return 0, 0
-
-    def _refresh_sky(self):
-        path = sky_image_path()
-        enabled = bool(self.cfg.get("sky_enabled", True))
-        if hasattr(self, "var_sky_enabled"):
-            try:
-                self.var_sky_enabled.set(enabled)
-            except tk.TclError:
-                pass
-        photo = None
-        if path is not None:
-            photo = self._sky_preview_photo(path)
-            width, height = self._sky_image_size(path)
-            name = str(self.cfg.get("sky_name") or path.name)
-            bits = [f"Небо: {name}"]
-            if width and height:
-                bits.append(f"{width}×{height}")
-            if not enabled:
-                bits.append("выключено")
-            self.sky_status_var.set(" · ".join(bits))
-        else:
-            self.sky_status_var.set(
-                "Небо не выбрано — фон берётся из темы")
-        self._sky_photo_ref = photo
-        label = getattr(self, "sky_preview_label", None)
-        if label is not None:
-            try:
-                if photo is not None:
-                    label.configure(image=photo, text="", height=0)
-                else:
-                    label.configure(
-                        image="",
-                        text=("Небо не читается — выбери другой файл"
-                              if path is not None
-                              else "Небо не выбрано — будет фон темы"),
-                        height=5)
-            except tk.TclError:
-                pass
-        btn = getattr(self, "btn_sky_remove", None)
-        if btn is not None:
-            try:
-                btn.configure(state="normal" if path is not None
-                              else "disabled")
-            except tk.TclError:
-                pass
-
-    def choose_sky_image(self):
-        path = filedialog.askopenfilename(
-            parent=self.root, title="Небо лаунчера",
-            filetypes=[("Картинки", "*.png *.jpg *.jpeg *.webp *.bmp"),
-                       ("Все файлы", "*.*")])
-        if not path:
-            return
-        result = import_sky_image(path)
-        if not result["ok"]:
-            self._launch_action_error(
-                f"Не удалось добавить небо: {result['error']}")
-            return
-        self.cfg["sky_name"] = result.get("name") or Path(path).name[:80]
-        self.cfg["sky_enabled"] = True
-        save_config(self.cfg)
-        self._refresh_sky()
-        self._refresh_backdrops()
-        self.status_var.set("Небо лаунчера обновлено")
-        self.log(f"Небо лаунчера: {Path(path).name}")
-
-    def remove_sky_image_ui(self):
-        result = remove_sky_image()
-        self.cfg["sky_name"] = ""
-        save_config(self.cfg)
-        self._refresh_sky()
-        self._refresh_backdrops()
-        if result["ok"]:
-            self.status_var.set("Небо лаунчера убрано")
-            self.log("Небо лаунчера удалено")
-        else:
-            self._launch_action_error(
-                f"Небо убрано не полностью: {result['error']}")
-
-    def _save_sky_flag(self):
-        enabled = bool(self.var_sky_enabled.get())
-        self.cfg["sky_enabled"] = enabled
-        save_config(self.cfg)
-        self._refresh_sky()
-        self._refresh_backdrops()
-        if enabled:
-            self.status_var.set("Небо включено фоном лаунчера")
-            self.log("Небо лаунчера включено")
-        else:
-            self.status_var.set("Небо выключено — фон берётся из темы")
-            self.log("Небо лаунчера выключено")
 
     def _refresh_launch_sound(self):
         path = launch_sound_path()
@@ -6945,8 +6783,6 @@ class App:
         if hasattr(self, "var_ingame_overlay"):
             self._save_ingame_cfg(message="Сохранено")
 
-        if hasattr(self, "var_sky_enabled"):
-            self.cfg["sky_enabled"] = bool(self.var_sky_enabled.get())
         if hasattr(self, "var_launch_sound"):
             self.cfg["launch_sound"] = bool(self.var_launch_sound.get())
         if hasattr(self, "var_error_sound"):
@@ -8871,42 +8707,6 @@ def run_selftest():
     except Exception as exc:  # noqa: BLE001
         failures.append(f"ui font test: {exc}")
 
-    # 6f2) своё небо лаунчера: импорт, путь, удаление, мусор
-    try:
-        import core as core_module
-
-        with tempfile.TemporaryDirectory(prefix="maklyxa-sky-") as td:
-            base = Path(td) / "Sky"
-            src = Path(td) / "sky.png"
-            src.write_bytes(base64.b64decode(
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
-                "2mP8z8BQDwAFgwJ/lK3dGQAAAABJRU5ErkJggg=="))
-            info = core_module.inspect_sky_image(src)
-            if not info["ok"]:
-                failures.append(f"небо: картинка не разобрана {info}")
-            imported = core_module.import_sky_image(src, base)
-            if not imported["ok"] or not Path(imported["path"]).is_file():
-                failures.append(f"небо: не импортировано {imported}")
-            elif core_module.sky_image_path(base) != Path(imported["path"]):
-                failures.append("небо: путь к картинке не совпал")
-            else:
-                removed = core_module.remove_sky_image(base)
-                if not removed["ok"] or removed["removed"] != 1:
-                    failures.append(f"небо: не удалилось {removed}")
-                if core_module.sky_image_path(base) is not None:
-                    failures.append("небо: файл остался после удаления")
-            bad = Path(td) / "bad.png"
-            bad.write_text("not an image", encoding="utf-8")
-            if core_module.inspect_sky_image(bad)["ok"]:
-                failures.append("небо: мусор принят за картинку")
-            huge = Path(td) / "huge.png"
-            with huge.open("wb") as fh:
-                fh.truncate(21 * 1024 * 1024)
-            if core_module.inspect_sky_image(huge)["ok"]:
-                failures.append("небо: файл больше 20 МБ принят")
-    except Exception as exc:  # noqa: BLE001
-        failures.append(f"sky test: {exc}")
-
     # 6g) галерея: разбор снимков, сессии, группировка, кэш, миниатюры
     try:
         import core as core_module
@@ -9285,7 +9085,6 @@ def run_selftest():
         core_module.AVATARS_DIR = ui_data / "avatars"
         core_module.CONFIG_PATH = ui_data / "config.json"
         core_module.UI_FONT_DIR = ui_data / "Customize" / "Fonts"
-        core_module.SKY_DIR = ui_data / "Customize" / "Sky"
         ui_launch = ui_data / "Launch"
         core_module.LAUNCH_DIR = ui_launch
         core_module.LAUNCH_ICON_PATH = ui_launch / "icon.ico"
@@ -9327,10 +9126,6 @@ def run_selftest():
             failures.append("UI: нет выбора экрана запуска")
         if not hasattr(app, "ui_font_status_var"):
             failures.append("UI: нет статуса своего шрифта")
-        if (not hasattr(app, "sky_status_var")
-                or not hasattr(app, "var_sky_enabled")
-                or not hasattr(app, "sky_preview_label")):
-            failures.append("UI: нет карточки «Небо лаунчера»")
         if (not hasattr(app, "error_sound_status_var")
                 or not hasattr(app, "var_error_sound")):
             failures.append("UI: нет настройки звука ошибки")
@@ -9497,41 +9292,6 @@ def run_selftest():
             if "Стандартный" not in app.ui_font_status_var.get():
                 failures.append(
                     f"UI: статус сброса {app.ui_font_status_var.get()!r}")
-
-        with tempfile.TemporaryDirectory(prefix="maklyxa-sky-") as td:
-            sky_src = Path(td) / "sky.png"
-            sky_src.write_bytes(base64.b64decode(
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
-                "2mP8z8BQDwAFgwJ/lK3dGQAAAABJRU5ErkJggg=="))
-            imported = import_sky_image(sky_src)
-            if not imported["ok"]:
-                failures.append(f"UI: небо не импортировалось {imported}")
-            else:
-                app.cfg["sky_name"] = imported["name"]
-                app.cfg["sky_enabled"] = True
-                save_config(app.cfg)
-                app._refresh_sky()
-                root.update()
-                if sky_image_path() is None:
-                    failures.append("UI: файл неба не сохранился")
-                if app._sky_source() is None:
-                    failures.append("UI: небо не стало источником фона")
-                if not app.sky_status_var.get().startswith("Небо:"):
-                    failures.append(
-                        f"UI: статус неба {app.sky_status_var.get()!r}")
-                app.var_sky_enabled.set(False)
-                app._save_sky_flag()
-                if app._sky_source() is not None:
-                    failures.append("UI: выключенное небо осталось фоном")
-                app.var_sky_enabled.set(True)
-                app._save_sky_flag()
-                app.remove_sky_image_ui()
-                if sky_image_path() is not None:
-                    failures.append("UI: файл неба остался после удаления")
-                if "не выбрано" not in app.sky_status_var.get():
-                    failures.append(
-                        f"UI: статус после удаления "
-                        f"{app.sky_status_var.get()!r}")
 
         app.var_error_sound.set(False)
         app._save_error_sound_flag()

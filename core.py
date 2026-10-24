@@ -47,7 +47,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.8.3"
+VERSION = "1.8.4"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -81,9 +81,6 @@ CUSTOMIZE_DIR = CONFIG_DIR / "Customize"
 UI_FONT_DIR = CUSTOMIZE_DIR / "Fonts"
 UI_FONT_MAX = 20 * 1024 * 1024
 UI_FONT_EXTS = (".ttf", ".otf")
-SKY_DIR = CUSTOMIZE_DIR / "Sky"
-SKY_IMAGE_MAX = 20 * 1024 * 1024
-SKY_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
 SCREENSHOTS_DIR = Path.home() / "Pictures" / "Roblox"
 GALLERY_DIR = CONFIG_DIR / "Gallery"
 GALLERY_CACHE_PATH = GALLERY_DIR / "cache.json"
@@ -220,8 +217,6 @@ DEFAULT_CONFIG = {
     "error_sound_name": "",
     "ui_font_name": "",
     "ui_font_family": "",
-    "sky_enabled": True,
-    "sky_name": "",
     "ingame_overlay": True,
     "ingame_overlay_start": False,
     "ingame_overlay_corner": "tr",
@@ -355,7 +350,7 @@ def load_config(path=None):
     for flag in ("auto_close", "save_history", "remember_last",
                  "apply_flags_on_launch", "use_custom_cursors",
                  "discord_rpc", "launch_sound", "error_sound",
-                 "sky_enabled", "ingame_overlay", "ingame_overlay_start",
+                 "ingame_overlay", "ingame_overlay_start",
                  "ingame_auto", "ingame_afk"):
         cfg[flag] = bool(cfg.get(flag))
     corner = str(cfg.get("ingame_overlay_corner") or "").lower()
@@ -377,7 +372,6 @@ def load_config(path=None):
     cfg["error_sound_name"] = str(cfg.get("error_sound_name") or "").strip()[:80]
     cfg["ui_font_name"] = str(cfg.get("ui_font_name") or "").strip()[:80]
     cfg["ui_font_family"] = str(cfg.get("ui_font_family") or "").strip()[:80]
-    cfg["sky_name"] = str(cfg.get("sky_name") or "").strip()[:80]
     splash = str(cfg.get("launch_splash") or "").lower()
     cfg["launch_splash"] = splash if splash in SPLASH_STYLES else "card"
     try:
@@ -2863,88 +2857,6 @@ def unload_private_font(path):
             str(Path(path)), UI_FONT_PRIVATE, 0))
     except (AttributeError, OSError):
         return False
-
-
-# ---- кастомизация лаунчера: своё небо ------------------------------------------
-
-
-def _sky_error(message):
-    return {"ok": False, "error": str(message), "path": None,
-            "name": "", "kind": ""}
-
-
-def sky_image_path(sky_dir=None):
-    base = Path(sky_dir or SKY_DIR)
-    for ext in SKY_IMAGE_EXTS:
-        path = base / f"sky{ext}"
-        if path.is_file():
-            return path
-    return None
-
-
-def inspect_sky_image(source):
-    source = Path(source)
-    if not source.is_file():
-        return _sky_error("файл не найден")
-    try:
-        size = source.stat().st_size
-    except OSError as exc:
-        return _sky_error(exc)
-    if size <= 0:
-        return _sky_error("файл пустой")
-    if size > SKY_IMAGE_MAX:
-        return _sky_error("картинка больше 20 МБ")
-    kind = theme_image_kind(source)
-    if kind not in SKY_IMAGE_EXTS or kind == ".gif":
-        return _sky_error("нужна картинка PNG, JPG, WEBP или BMP")
-    return {"ok": True, "error": "", "path": source,
-            "name": source.name[:80], "kind": kind}
-
-
-def import_sky_image(source, sky_dir=None):
-    """Скопировать картинку неба в папку лаунчера (с заменой старой)."""
-    info = inspect_sky_image(source)
-    if not info["ok"]:
-        return info
-    base = Path(sky_dir or SKY_DIR)
-    ext = info["kind"]
-    dest = base / f"sky{ext}"
-    temp = base / f"sky{ext}.tmp"
-    try:
-        base.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(Path(source), temp)
-        os.replace(temp, dest)
-    except OSError as exc:
-        try:
-            temp.unlink()
-        except OSError:
-            pass
-        return _sky_error(exc)
-    for other in SKY_IMAGE_EXTS:
-        old = base / f"sky{other}"
-        if old != dest:
-            try:
-                old.unlink()
-            except OSError:
-                pass
-    info["path"] = dest
-    return info
-
-
-def remove_sky_image(sky_dir=None):
-    base = Path(sky_dir or SKY_DIR)
-    removed = 0
-    errors = []
-    for ext in SKY_IMAGE_EXTS:
-        path = base / f"sky{ext}"
-        try:
-            if path.exists():
-                path.unlink()
-                removed += 1
-        except OSError as exc:
-            errors.append(str(exc))
-    return {"ok": not errors, "removed": removed,
-            "error": errors[0] if errors else ""}
 
 
 def refresh_shell_icons():
