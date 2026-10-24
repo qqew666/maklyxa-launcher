@@ -15,9 +15,11 @@ UI v3 (полный редизайн):
   * компактная статусная строка и переработанный экран запуска игры.
 
 Ядро (логика) — в core.py.
-Запуск: python launcher.py [--page game|favorites|gallery|flags|cursors|
-                                   themes|launchstyle|settings|log]
+Запуск: python launcher.py [--page game|favorites|gallery|ingame|flags|
+                                   cursors|themes|launchstyle|settings|log]
                             [--theme dark|light|glass]
+                            [--ingame]
+        --ingame — служебный режим внутриигрового помощника (оверлей и AFK).
 """
 
 import base64
@@ -43,6 +45,8 @@ try:
     HAVE_PIL = True
 except Exception:  # Pillow не обязателен для запуска
     HAVE_PIL = False
+
+import ingame as ingame_mod
 
 from core import (
     ACCENT_PRESETS, APP_NAME, BOOT_BOOLS_FROST, BOOT_BOOLS_SHARED,
@@ -156,6 +160,7 @@ NAV_ITEMS = [
     ("accounts", "◉", "Аккаунты"),
     ("favorites", "★", "Избранное"),
     ("gallery", "▦", "Галерея"),
+    ("ingame", "◳", "В игре"),
     ("flags", "⚑", "Флаги"),
     ("cursors", "◈", "Курсоры"),
     ("themes", "◐", "Темы"),
@@ -167,6 +172,7 @@ NAV_ITEMS = [
 NAV_GROUPS = [
     ("ЗАПУСК", ("game", "accounts", "favorites")),
     ("МЕДИА", ("gallery",)),
+    ("В ИГРЕ", ("ingame",)),
     ("ПРЕДУСТАНОВЛЕННЫЕ\nМОДИФИКАЦИИ",
      ("flags", "cursors", "themes", "launchstyle")),
     ("СИСТЕМА", ("settings", "log")),
@@ -895,6 +901,15 @@ class App:
         self._gallery_viewer_index = 0
         self._gallery_assign_dialog = None
         self._gallery_clean_dialog = None
+        self.ingame_helper_var = tk.StringVar(value="Помощник не запущен")
+        self.ingame_roblox_var = tk.StringVar(value="Roblox: не запущен")
+        self.ingame_overlay_state_var = tk.StringVar(value="Оверлей: выключен")
+        self.ingame_hotkey_var = tk.StringVar(value="Shift+F1: не проверен")
+        self.ingame_afk_state_var = tk.StringVar(value="AFK: выключен")
+        self.ingame_message_var = tk.StringVar(value="")
+        self._ingame_busy = False
+        self._ingame_last = None
+        self._ingame_poll_job = None
 
         self._debounce = None
         self._dl_active = False
@@ -924,6 +939,8 @@ class App:
         self.discord_status_var.set(self._discord_status_text())
         if self.interactive:
             self._poll_discord_status()
+            self._ingame_poll_job = self.root.after(
+                1600, self._poll_ingame_status)
 
     # -- сборка / пересборка ----------------------------------------------------
 
@@ -934,6 +951,7 @@ class App:
         self._build_page_accounts()
         self._build_page_favorites()
         self._build_page_gallery()
+        self._build_page_ingame()
         self._build_page_flags()
         self._build_page_cursors()
         self._build_page_themes()
@@ -5916,6 +5934,554 @@ class App:
         self._close_clean_background_dialog()
         self.refresh_gallery()
 
+    # -- страница «В игре» ---------------------------------------------------------
+
+    def _build_page_ingame(self):
+        c = self.c
+        pad = self._scroll_page("ingame")
+
+        self._page_header(
+            pad, "◳", "В игре",
+            "Оверлей поверх Roblox по Shift+F1 и AFK-режим. Помощник — "
+            "отдельный процесс: не внедряется в клиент и не меняет его файлы.")
+
+        self.var_ingame_overlay = tk.BooleanVar(
+            value=bool(self.cfg.get("ingame_overlay")))
+        self.var_ingame_start = tk.BooleanVar(
+            value=bool(self.cfg.get("ingame_overlay_start")))
+        self.var_ingame_auto = tk.BooleanVar(
+            value=bool(self.cfg.get("ingame_auto")))
+        self.var_ingame_afk = tk.BooleanVar(
+            value=bool(self.cfg.get("ingame_afk")))
+        mode_key = self.cfg.get("ingame_afk_mode") or "mouse"
+        self.var_ingame_mode = tk.StringVar(
+            value=ingame_mod.AFK_MODE_LABELS.get(mode_key,
+                                                 ingame_mod.AFK_MODE_LABELS["mouse"]))
+        key_key = self.cfg.get("ingame_afk_key") or "space"
+        self.var_ingame_key = tk.StringVar(
+            value=ingame_mod.AFK_KEY_LABELS.get(key_key,
+                                                ingame_mod.AFK_KEY_LABELS["space"]))
+        self.var_ingame_minutes = tk.StringVar(
+            value=f"{int(self.cfg.get('ingame_afk_minutes') or 5)} мин")
+
+        self.btn_ingame_overlay = None
+        self.btn_ingame_start = None
+        self.btn_ingame_stop = None
+
+        # -- оверлей
+        inner = self._card(
+            pad, title="Оверлей",
+            subtitle="Неактивируемое окно поверх Roblox: клики проходят "
+                     "сквозь него в игру",
+            glyph="◳")
+        self._checkbox(
+            inner, "Показывать оверлей поверх Roblox (Shift+F1)",
+            self.var_ingame_overlay, command=self._save_ingame_cfg).pack(
+                anchor="w", pady=(6, 0))
+        self._checkbox(
+            inner, "Показывать сразу при входе в игру",
+            self.var_ingame_start, command=self._save_ingame_cfg).pack(
+                anchor="w", pady=(5, 0))
+
+        preview_row = tk.Frame(inner, bg=c["surface"])
+        preview_row.pack(fill="x", pady=(12, 0))
+        preview = tk.Frame(preview_row, bg="#0b0f14", padx=12, pady=9,
+                           highlightthickness=1, highlightbackground="#243040")
+        preview.pack(side="right", anchor="n")
+        head = tk.Frame(preview, bg="#0b0f14")
+        head.pack(fill="x")
+        tk.Label(head, text="MAKLYXA", bg="#0b0f14", fg=self.accent,
+                 font=(UI_FONT, 8, "bold")).pack(side="left")
+        tk.Label(head, text="  IN-GAME", bg="#0b0f14", fg="#8fa3b8",
+                 font=(UI_FONT, 8, "bold")).pack(side="left")
+        tk.Label(head, text="21:40:05", bg="#0b0f14", fg="#e7eef7",
+                 font=(UI_FONT, 10, "bold")).pack(side="right")
+        tk.Frame(preview, bg="#243040", height=1).pack(fill="x", pady=(6, 5))
+        metrics = tk.Frame(preview, bg="#0b0f14")
+        metrics.pack(fill="x")
+        for title, value, sub in (
+                ("FPS", "—", "Roblox: Shift+F5"),
+                ("GPU", "52°C", "1.2 ГБ"),
+                ("ПАМЯТЬ", "43%", "13.7 / 31.9 ГБ")):
+            cell = tk.Frame(metrics, bg="#0b0f14")
+            cell.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            tk.Label(cell, text=title, bg="#0b0f14", fg="#8fa3b8",
+                     font=(UI_FONT, 7, "bold"), anchor="w").pack(fill="x")
+            tk.Label(cell, text=value, bg="#0b0f14", fg=self.accent,
+                     font=(UI_FONT, 14, "bold"), anchor="w").pack(fill="x")
+            tk.Label(cell, text=sub, bg="#0b0f14", fg="#8fa3b8",
+                     font=(UI_FONT, 7), anchor="w").pack(fill="x")
+        foot = tk.Frame(preview, bg="#0b0f14")
+        foot.pack(fill="x", pady=(4, 0))
+        tk.Label(foot, text="Shift+F1 скрыть", bg="#0b0f14", fg="#8fa3b8",
+                 font=(UI_FONT, 7)).pack(side="left")
+        tk.Label(foot, text="AFK 4:59", bg="#0b0f14", fg="#8fa3b8",
+                 font=(UI_FONT, 7)).pack(side="right")
+        tk.Label(preview, text="пример оформления", bg="#0b0f14",
+                 fg="#5d7186", font=(UI_FONT, 7)).pack(anchor="e",
+                                                      pady=(4, 0))
+
+        note = tk.Frame(preview_row, bg=c["surface"])
+        note.pack(side="left", fill="both", expand=True)
+        tk.Label(note, text="ТАК ВЫГЛЯДИТ ОВЕРЛЕЙ", bg=c["surface"],
+                 fg=c["muted"], font=(UI_FONT, 8, "bold"),
+                 anchor="w").pack(fill="x")
+        tk.Label(
+            note,
+            text="FPS честно оставлен «—»: Roblox не отдаёт кадры другим "
+                 "процессам без внедрения. Нажми Shift+F5 в игре — откроется "
+                 "нативный счётчик Roblox.\n"
+                 "Температура GPU — NVIDIA через NVML; RAM и время настоящие.",
+            bg=c["surface"], fg=c["text"], font=(UI_FONT, 9),
+            anchor="w", justify="left", wraplength=400).pack(
+                fill="x", pady=(6, 0))
+
+        row_pos = tk.Frame(inner, bg=c["surface"])
+        row_pos.pack(fill="x", pady=(12, 0))
+        tk.Label(row_pos, text="Угол оверлея", bg=c["surface"],
+                 fg=c["text"], font=(UI_FONT, 10)).pack(side="left")
+        self.combo_ingame_corner = ttk.Combobox(
+            row_pos, values=list(ingame_mod.CORNER_LABELS.values()),
+            state="readonly", width=18)
+        self.combo_ingame_corner.set(ingame_mod.CORNER_LABELS.get(
+            self.cfg.get("ingame_overlay_corner") or "tr",
+            ingame_mod.CORNER_LABELS["tr"]))
+        self.combo_ingame_corner.bind("<<ComboboxSelected>>",
+                                      self._save_ingame_cfg)
+        self.combo_ingame_corner.pack(side="left", padx=(12, 0))
+
+        row_overlay = tk.Frame(inner, bg=c["surface"])
+        row_overlay.pack(fill="x", pady=(10, 0))
+        self.btn_ingame_overlay = self._button(
+            row_overlay, "Показать оверлей", self._ingame_toggle_overlay,
+            kind="primary", side="left")
+        self._hint(
+            inner,
+            "Оверлей виден только когда окно Roblox активно. Shift+F1 "
+            "переключает его глобально; если комбинацию занял другой "
+            "программой — пользуйся кнопкой.", wrap=560)
+
+        # -- AFK
+        afk = self._card(
+            pad, title="AFK-режим",
+            subtitle="Микро-действие только когда Roblox в фокусе и ты "
+                     "не трогал мышь и клавиатуру",
+            glyph="◷")
+        self._checkbox(
+            afk, "Не давать серверу кикнуть за бездействие",
+            self.var_ingame_afk, command=self._save_ingame_cfg).pack(
+                anchor="w", pady=(6, 8))
+        grid = tk.Frame(afk, bg=c["surface"])
+        grid.pack(fill="x")
+        grid.grid_columnconfigure(1, weight=1)
+
+        def _row(row, label, widget):
+            tk.Label(grid, text=label, bg=c["surface"], fg=c["text"],
+                     font=(UI_FONT, 10)).grid(
+                         row=row, column=0, sticky="w", pady=4,
+                         padx=(0, 14))
+            widget.grid(row=row, column=1, sticky="w", pady=4)
+
+        self.combo_ingame_mode = ttk.Combobox(
+            grid, values=list(ingame_mod.AFK_MODE_LABELS.values()),
+            state="readonly", width=28)
+        self.combo_ingame_mode.set(self.var_ingame_mode.get())
+        self.combo_ingame_mode.bind("<<ComboboxSelected>>",
+                                    self._save_ingame_cfg)
+        _row(0, "Действие", self.combo_ingame_mode)
+
+        self.combo_ingame_key = ttk.Combobox(
+            grid, values=[label for _key, label, _vk in ingame_mod.AFK_KEYS],
+            state="readonly", width=14)
+        self.combo_ingame_key.set(self.var_ingame_key.get())
+        self.combo_ingame_key.bind("<<ComboboxSelected>>",
+                                   self._save_ingame_cfg)
+        _row(1, "Клавиша", self.combo_ingame_key)
+
+        self.combo_ingame_minutes = ttk.Combobox(
+            grid, values=[f"{n} мин" for n in range(1, 16)],
+            state="readonly", width=12)
+        self.combo_ingame_minutes.set(self.var_ingame_minutes.get())
+        self.combo_ingame_minutes.bind("<<ComboboxSelected>>",
+                                       self._save_ingame_cfg)
+        _row(2, "Интервал", self.combo_ingame_minutes)
+
+        tk.Label(afk, textvariable=self.ingame_afk_state_var,
+                 bg=c["surface"], fg=self.accent,
+                 font=(UI_FONT, 10, "bold"), anchor="w").pack(
+                     fill="x", pady=(9, 0))
+        self._hint(
+            afk,
+            "Действие отправляется системным вводом Windows (SendInput) — "
+            "без DLL, без чтения памяти и без изменения файлов Roblox. "
+            "Режим молчит, пока окно игры не в фокусе, и не срабатывает, "
+            "если ты только что пользовался компьютером (порог 60 секунд). "
+            "На некоторых играх правило 20 минут строже — интервал можно "
+            "уменьшить.", wrap=560)
+
+        # -- помощник
+        box = self._card(
+            pad, title="Помощник",
+            subtitle="Отдельный процесс, который живёт и после закрытия "
+                     "лаунчера",
+            glyph="⚙")
+        self._checkbox(
+            box, "Запускать помощник вместе с игрой",
+            self.var_ingame_auto, command=self._save_ingame_cfg).pack(
+                anchor="w", pady=(6, 0))
+
+        state_grid = tk.Frame(box, bg=c["surface2"], padx=12, pady=10)
+        state_grid.pack(fill="x", pady=(10, 0))
+        state_grid.grid_columnconfigure(0, weight=1)
+        state_grid.grid_columnconfigure(1, weight=1)
+        for index, var in enumerate((self.ingame_helper_var,
+                                     self.ingame_hotkey_var,
+                                     self.ingame_roblox_var,
+                                     self.ingame_overlay_state_var)):
+            tk.Label(state_grid, textvariable=var, bg=c["surface2"],
+                     fg=c["text"], font=(UI_FONT, 9), anchor="w",
+                     justify="left", wraplength=300).grid(
+                         row=index // 2, column=index % 2, sticky="w",
+                         padx=(0, 12), pady=2)
+        tk.Label(state_grid, textvariable=self.ingame_message_var,
+                 bg=c["surface2"], fg=self.c["muted"],
+                 font=(UI_FONT, 9), anchor="w", justify="left",
+                 wraplength=600).grid(row=2, column=0, columnspan=2,
+                                      sticky="w", pady=(4, 0))
+
+        row_btns = tk.Frame(box, bg=c["surface"])
+        row_btns.pack(fill="x", pady=(10, 0))
+        self.btn_ingame_start = self._button(
+            row_btns, "Запустить помощник", self._ingame_start_now,
+            kind="primary", side="left")
+        self.btn_ingame_stop = self._button(
+            row_btns, "Остановить", self._ingame_stop, side="left", padx=8)
+
+        row_files = tk.Frame(box, bg=c["surface"])
+        row_files.pack(fill="x", pady=(9, 0))
+        self._button(row_files, "Открыть папку", self._open_ingame_dir,
+                     side="left")
+        self._button(row_files, "Журнал", self._open_ingame_log,
+                     side="left", padx=8)
+        tk.Label(box, text=str(ingame_mod.status_path().parent),
+                 bg=c["surface"], fg=c["muted"], font=(UI_FONT, 8),
+                 anchor="w", justify="left", wraplength=560).pack(
+                     fill="x", pady=(7, 0))
+        self._hint(
+            box,
+            "Помощник завершится сам примерно через 90 секунд после "
+            "закрытия Roblox и через 4 минуты, если игра так и не "
+            "появилась. Закрытие лаунчера его не останавливает — "
+            "используй кнопку «Остановить».", wrap=560)
+
+        # -- безопасность
+        safe = self._card(pad, title="Безопасность", glyph="⛨")
+        tk.Label(
+            safe,
+            bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
+            justify="left", anchor="w", wraplength=600, text=(
+                "•  Оверлей — отдельное окно Windows. Оно неактивируемое, "
+                "клики проходят сквозь него в игру, а при потере фокуса "
+                "Roblox скрывается.\n"
+                "•  Помощник не внедряет DLL, не читает память Roblox, "
+                "не патчит и не изменяет файлы клиента.\n"
+                "•  AFK использует только системный ввод Windows и молчит, "
+                "когда игра не в фокусе.\n"
+                "•  Точный FPS снаружи без внедрения недоступен — поэтому "
+                "в оверлее «—» и подсказка Shift+F5."
+            )).pack(fill="x")
+
+        self._refresh_ingame_status()
+
+    def _save_ingame_cfg(self, _event=None, message=None):
+        if not hasattr(self, "var_ingame_overlay"):
+            return
+        self.cfg["ingame_overlay"] = bool(self.var_ingame_overlay.get())
+        self.cfg["ingame_overlay_start"] = bool(self.var_ingame_start.get())
+        self.cfg["ingame_auto"] = bool(self.var_ingame_auto.get())
+        self.cfg["ingame_afk"] = bool(self.var_ingame_afk.get())
+        corner = ingame_mod.CORNER_BY_LABEL.get(
+            self.combo_ingame_corner.get(), "tr")
+        self.cfg["ingame_overlay_corner"] = corner
+        mode = ingame_mod.AFK_MODE_BY_LABEL.get(
+            self.combo_ingame_mode.get(), "mouse")
+        self.cfg["ingame_afk_mode"] = mode
+        key = ingame_mod.AFK_KEY_BY_LABEL.get(
+            self.combo_ingame_key.get(), "space")
+        self.cfg["ingame_afk_key"] = key
+        try:
+            minutes = int(str(self.combo_ingame_minutes.get()).split()[0])
+        except (IndexError, ValueError):
+            minutes = 5
+        self.cfg["ingame_afk_minutes"] = max(1, min(15, minutes))
+        self.var_ingame_mode.set(self.combo_ingame_mode.get())
+        self.var_ingame_key.set(self.combo_ingame_key.get())
+        self.var_ingame_minutes.set(self.combo_ingame_minutes.get())
+        save_config(self.cfg)
+        running = ingame_mod.helper_running()
+        if message is None:
+            message = ("Сохранено — помощник применит изменения "
+                       "в течение 4 секунд" if running else "Сохранено")
+        self.ingame_message_var.set(message)
+        self.status_var.set("Настройки «В игре» сохранены")
+        self._ingame_update_controls()
+        self.log("In-game: настройки обновлены")
+
+    def _ingame_update_controls(self):
+        if not hasattr(self, "combo_ingame_corner"):
+            return
+        overlay_on = bool(self.var_ingame_overlay.get())
+        afk_on = bool(self.var_ingame_afk.get())
+        key_mode = (self.var_ingame_mode.get()
+                    == ingame_mod.AFK_MODE_LABELS["key"])
+        running = ingame_mod.helper_running()
+        self.combo_ingame_corner.configure(
+            state="readonly" if overlay_on else "disabled")
+        self.combo_ingame_mode.configure(
+            state="readonly" if afk_on else "disabled")
+        self.combo_ingame_key.configure(
+            state="readonly" if afk_on and key_mode else "disabled")
+        self.combo_ingame_minutes.configure(
+            state="readonly" if afk_on else "disabled")
+        desired = bool(self._ingame_last
+                       and self._ingame_last.get("overlay_desired"))
+        if self.btn_ingame_overlay is not None:
+            self._btn_state(
+                self.btn_ingame_overlay, "primary", overlay_on,
+                text="Скрыть оверлей" if desired else "Показать оверлей")
+        if self.btn_ingame_start is not None:
+            self._btn_state(self.btn_ingame_start, "primary",
+                            not running and not self._ingame_busy,
+                            text="Запускаю…" if self._ingame_busy
+                            else "Запустить помощник")
+        if self.btn_ingame_stop is not None:
+            self._btn_state(self.btn_ingame_stop, "ghost",
+                            running or self._ingame_busy,
+                            text="Останавливаю…" if self._ingame_busy
+                            else "Остановить")
+
+    def _refresh_ingame_status(self):
+        if not hasattr(self, "ingame_helper_var"):
+            return
+        try:
+            running = ingame_mod.helper_running()
+        except Exception:  # noqa: BLE001
+            running = False
+        status = ingame_mod.read_status(max_age=6) if running else None
+        self._ingame_last = status
+        if running:
+            pid = (status or {}).get("pid")
+            self.ingame_helper_var.set(
+                f"Помощник: работает (PID {pid})" if pid
+                else "Помощник: работает")
+        else:
+            self.ingame_helper_var.set("Помощник: не запущен")
+        if status is None:
+            if running:
+                self.ingame_roblox_var.set("Roblox: нет ответа")
+                self.ingame_overlay_state_var.set("Оверлей: нет данных")
+                self.ingame_hotkey_var.set("Shift+F1: нет данных")
+                self.ingame_afk_state_var.set("AFK: нет данных")
+            else:
+                self.ingame_roblox_var.set("Roblox: не запущен")
+                self.ingame_overlay_state_var.set(
+                    "Оверлей: выключен" if not self.cfg.get("ingame_overlay")
+                    else "Оверлей: помощник не запущен")
+                self.ingame_hotkey_var.set("Shift+F1: проверится при запуске")
+                self.ingame_afk_state_var.set(
+                    "AFK: выключен" if not self.cfg.get("ingame_afk")
+                    else "AFK: помощник не запущен")
+        else:
+            if status.get("foreground"):
+                roblox = "Roblox: в фокусе"
+            elif status.get("roblox"):
+                roblox = "Roblox: окно найдено"
+            else:
+                roblox = "Roblox: не запущен"
+            self.ingame_roblox_var.set(roblox)
+            if not self.cfg.get("ingame_overlay"):
+                overlay = "Оверлей: выключен"
+            elif status.get("overlay"):
+                overlay = "Оверлей: показан"
+            elif status.get("overlay_desired"):
+                overlay = "Оверлей: ждёт Roblox в фокусе"
+            else:
+                overlay = "Оверлей: скрыт (Shift+F1)"
+            self.ingame_overlay_state_var.set(overlay)
+            self.ingame_hotkey_var.set(
+                "Shift+F1: свободен" if status.get("hotkey")
+                else "Shift+F1: занят другой программой")
+            if not self.cfg.get("ingame_afk"):
+                afk = "AFK: выключен"
+            elif not status.get("roblox"):
+                afk = "AFK: ждёт Roblox"
+            elif not status.get("foreground"):
+                afk = "AFK: пауза — Roblox не в фокусе"
+            elif status.get("afk_next_in") is None:
+                afk = "AFK: пауза"
+            else:
+                afk = ("AFK: действие через "
+                       + ingame_mod.format_countdown(status["afk_next_in"]))
+            self.ingame_afk_state_var.set(afk)
+        self._ingame_update_controls()
+
+    def _poll_ingame_status(self):
+        if self._closing:
+            return
+        self._refresh_ingame_status()
+        self._ingame_poll_job = self.root.after(1200,
+                                                self._poll_ingame_status)
+
+    def _ingame_start(self, show=False):
+        if self._ingame_busy or self._closing:
+            return
+        if not (self.cfg.get("ingame_overlay")
+                or self.cfg.get("ingame_afk")):
+            self.ingame_message_var.set(
+                "Сначала включи оверлей или AFK-режим")
+            return
+        if ingame_mod.helper_running():
+            if show and self.cfg.get("ingame_overlay"):
+                status = ingame_mod.read_status(max_age=10)
+                if status and not status.get("overlay_desired"):
+                    ingame_mod.toggle_overlay()
+                    self.ingame_message_var.set(
+                        "Оверлей включён — появится, когда Roblox "
+                        "будет в фокусе")
+                elif status:
+                    self.ingame_message_var.set("Оверлей уже включён")
+                else:
+                    self.ingame_message_var.set(
+                        "Помощник уже работает, но ещё не отчитался")
+            return
+        self._ingame_busy = True
+        self._ingame_update_controls()
+        self.ingame_message_var.set("Запускаю помощник…")
+
+        def worker():
+            ok, message = ingame_mod.start_helper(wait=4.0)
+            if ok and show and self.cfg.get("ingame_overlay"):
+                for _ in range(20):
+                    status = ingame_mod.read_status(max_age=5)
+                    if status and status.get("running"):
+                        if not status.get("overlay_desired"):
+                            ingame_mod.toggle_overlay()
+                        break
+                    time.sleep(0.05)
+            self.q.put(lambda: self._ingame_start_done(ok, message))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _ingame_start_now(self):
+        self._ingame_start(show=False)
+
+    def _ingame_start_done(self, ok, message):
+        self._ingame_busy = False
+        if self._closing:
+            return
+        if ok:
+            self.ingame_message_var.set("Помощник запущен")
+            self.log("In-game: помощник запущен")
+        else:
+            self.ingame_message_var.set(
+                f"Не удалось запустить: {message}")
+            self.log(f"In-game: {message}")
+        self._ingame_update_controls()
+        self.root.after(600, self._refresh_ingame_status)
+
+    def _ingame_stop(self):
+        if self._ingame_busy:
+            return
+        if ingame_mod.stop_helper():
+            self.ingame_message_var.set("Останавливаю помощник…")
+            self.root.after(900, self._ingame_stopped)
+        else:
+            self.ingame_message_var.set("Помощник уже не запущен")
+            self._refresh_ingame_status()
+        self._ingame_update_controls()
+
+    def _ingame_stopped(self):
+        if self._closing:
+            return
+        self._refresh_ingame_status()
+        if ingame_mod.helper_running():
+            self.ingame_message_var.set("Помощник ещё завершается…")
+        else:
+            self.ingame_message_var.set("Помощник остановлен")
+            self.log("In-game: помощник остановлен")
+
+    def _ingame_toggle_overlay(self):
+        if not self.cfg.get("ingame_overlay"):
+            self.ingame_message_var.set(
+                "Оверлей выключен — включи его выше")
+            return
+        if not ingame_mod.helper_running():
+            self._ingame_start(show=True)
+            return
+        status = ingame_mod.read_status(max_age=10)
+        if status is None:
+            self.ingame_message_var.set(
+                "Помощник ещё не готов — повтори через секунду")
+            return
+        want_show = not bool(status.get("overlay_desired"))
+        if not ingame_mod.toggle_overlay():
+            self.ingame_message_var.set("Не удалось переключить оверлей")
+            return
+        if want_show:
+            self.ingame_message_var.set(
+                "Оверлей включён — появится поверх Roblox")
+        else:
+            self.ingame_message_var.set("Оверлей скрыт")
+        self.root.after(500, self._refresh_ingame_status)
+
+    def _open_ingame_dir(self):
+        folder = ingame_mod.status_path().parent
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(folder))
+        except OSError as exc:
+            self.ingame_message_var.set(f"Не удалось открыть папку: {exc}")
+
+    def _open_ingame_log(self):
+        path = ingame_mod.status_path().parent / "helper.log"
+        try:
+            if not path.exists():
+                self.ingame_message_var.set(
+                    "Журнал пока пуст — помощник ещё не писал событий")
+                return
+            os.startfile(str(path))
+        except OSError as exc:
+            self.ingame_message_var.set(f"Не удалось открыть журнал: {exc}")
+
+    def _start_ingame_helper_after_launch(self):
+        if self._closing:
+            return
+        if not self.cfg.get("ingame_auto"):
+            return
+        if not (self.cfg.get("ingame_overlay")
+                or self.cfg.get("ingame_afk")):
+            return
+        if ingame_mod.helper_running():
+            return
+
+        def worker():
+            ok, message = ingame_mod.start_helper(wait=4.0)
+            self.q.put(lambda: self._ingame_auto_done(ok, message))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _ingame_auto_done(self, ok, message):
+        if self._closing:
+            return
+        if ok:
+            self.ingame_message_var.set("Помощник запущен вместе с игрой")
+            self.log("In-game: помощник запущен вместе с игрой")
+        else:
+            self.ingame_message_var.set(
+                f"Помощник не запустился: {message}")
+            self.log(f"In-game: {message}")
+        self._refresh_ingame_status()
+
     # -- страница «Настройки» ----------------------------------------------------------
 
     def _build_page_settings(self):
@@ -7141,6 +7707,7 @@ class App:
             self.cfg["last_place_id"] = pid
         save_config(self.cfg)
         self._refresh_lists()
+        self._start_ingame_helper_after_launch()
         if self.cfg["auto_close"]:
             self.log("Автозакрытие через 1.5 с…")
             self.root.after(1500, self.close)
@@ -7363,6 +7930,54 @@ def run_selftest():
                 failures.append("миграция: сработала повторно")
     except Exception as exc:  # noqa: BLE001
         failures.append(f"config test: {exc}")
+
+    # 2b) конфиг: валидация ключей внутриигрового помощника
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            ingame_path = Path(td) / "config.json"
+            ingame_path.write_text(json.dumps({
+                "ingame_overlay_corner": "xx",
+                "ingame_afk_mode": "teleport",
+                "ingame_afk_key": "Space!!!",
+                "ingame_afk_minutes": 99,
+            }), encoding="utf-8")
+            ingame_cfg = load_config(path=ingame_path)
+            expected_ingame = {
+                "ingame_overlay_corner": "tr",
+                "ingame_afk_mode": "mouse",
+                "ingame_afk_key": "space",
+                "ingame_afk_minutes": 15,
+                "ingame_overlay": True,
+                "ingame_afk": False,
+            }
+            for key, want in expected_ingame.items():
+                if ingame_cfg.get(key) != want:
+                    failures.append(
+                        f"config in-game: {key}={ingame_cfg.get(key)!r} "
+                        f"!= {want!r}")
+            ingame_path.write_text(json.dumps({
+                "ingame_overlay": 0, "ingame_overlay_start": 1,
+                "ingame_auto": None, "ingame_afk": "да",
+                "ingame_afk_minutes": "abc",
+                "ingame_overlay_corner": "BL",
+            }), encoding="utf-8")
+            ingame_cfg = load_config(path=ingame_path)
+            if ingame_cfg["ingame_overlay"] or not ingame_cfg[
+                    "ingame_overlay_start"]:
+                failures.append(
+                    "config in-game: булевы флаги разобраны неверно "
+                    f"{ingame_cfg['ingame_overlay']} / "
+                    f"{ingame_cfg['ingame_overlay_start']}")
+            if ingame_cfg["ingame_afk_minutes"] != 5:
+                failures.append(
+                    "config in-game: битые минуты "
+                    f"{ingame_cfg['ingame_afk_minutes']}")
+            if ingame_cfg["ingame_overlay_corner"] != "bl":
+                failures.append(
+                    "config in-game: регистр угла "
+                    f"{ingame_cfg['ingame_overlay_corner']}")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"config in-game test: {exc}")
 
     cfg_real = load_config()
     if not save_config(cfg_real):
@@ -8291,6 +8906,93 @@ def run_selftest():
     except Exception as exc:  # noqa: BLE001
         failures.append(f"gallery test: {type(exc).__name__}: {exc}")
 
+    # 6h) внутриигровой помощник: геометрия, AFK, статус
+    try:
+        import ingame as ingame_module
+
+        geometry_cases = [
+            ((100, 40, 1700, 940), (320, 160), "tl", (116, 56)),
+            ((100, 40, 1700, 940), (320, 160), "tr", (1364, 56)),
+            ((100, 40, 1700, 940), (320, 160), "bl", (116, 764)),
+            ((100, 40, 1700, 940), (320, 160), "br", (1364, 764)),
+            ((0, 0, 100, 80), (320, 160), "br", (4, 4)),
+            ((0, 0, 100, 80), (320, 160), "tl", (4, 4)),
+            ((0, 0, 1280, 720), (320, 160), "nope", (944, 544)),
+        ]
+        for rect, size, corner, want in geometry_cases:
+            got = ingame_module.overlay_origin(rect, size, corner)
+            if got != want:
+                failures.append(
+                    f"overlay_origin({corner}): {got} != {want}")
+
+        countdown_cases = [
+            (65, "1:05"), (5, "0:05"), (0, "0:00"), (-8, "0:00"),
+            (3661, "1:01:01"), (None, "0:00"),
+        ]
+        for seconds, want in countdown_cases:
+            got = ingame_module.format_countdown(seconds)
+            if got != want:
+                failures.append(
+                    f"format_countdown({seconds!r}): {got!r} != {want!r}")
+
+        if ingame_module.afk_interval_seconds(5, jitter=False) != 300:
+            failures.append("afk_interval: 5 минут != 300 с")
+        if ingame_module.afk_interval_seconds(1, jitter=False) != 60:
+            failures.append("afk_interval: 1 минута != 60 с")
+        if ingame_module.afk_interval_seconds(99, jitter=False) != 900:
+            failures.append("afk_interval: 99 минут не ограничены 15")
+        for _ in range(40):
+            value = ingame_module.afk_interval_seconds(1)
+            if not (55.2 <= value <= 64.8):
+                failures.append(f"afk_interval: джиттер {value}")
+                break
+        for key, want in (("space", 0x20), ("Z", 0x5A), ("x", 0x58),
+                          ("unknown", 0x20), (None, 0x20)):
+            got = ingame_module.afk_vk(key)
+            if got != want:
+                failures.append(f"afk_vk({key!r}): {got} != {want}")
+        for key in ("mouse", "key"):
+            if ingame_module.AFK_MODE_BY_LABEL[
+                    ingame_module.AFK_MODE_LABELS[key]] != key:
+                failures.append(f"AFK_MODE_BY_LABEL: {key}")
+        for key in ("space", "shift", "z", "x", "c", "v", "b"):
+            if ingame_module.AFK_KEY_BY_LABEL[
+                    ingame_module.AFK_KEY_LABELS[key]] != key:
+                failures.append(f"AFK_KEY_BY_LABEL: {key}")
+        for key in ("tl", "tr", "bl", "br"):
+            if ingame_module.CORNER_BY_LABEL[
+                    ingame_module.CORNER_LABELS[key]] != key:
+                failures.append(f"CORNER_BY_LABEL: {key}")
+        if "Shift+F5" not in ingame_module.FPS_NOTE:
+            failures.append("FPS_NOTE: нет подсказки Shift+F5")
+
+        with tempfile.TemporaryDirectory(prefix="maklyxa-ingame-") as td:
+            status_file = Path(td) / "status.json"
+            if not ingame_module.write_status(
+                    {"running": True, "overlay": True,
+                     "hotkey": True}, path=status_file):
+                failures.append("статус: не записался")
+            loaded = ingame_module.read_status(
+                path=status_file, max_age=60)
+            if (not loaded or loaded.get("running") is not True
+                    or loaded.get("overlay") is not True
+                    or "updated" not in loaded):
+                failures.append(f"статус: прочитан неверно {loaded}")
+            if ingame_module.read_status(
+                    path=status_file, max_age=-1) is not None:
+                failures.append("статус: устаревшие данные не отсечены")
+            status_file.write_text(json.dumps(
+                {"updated": time.time() - 300, "running": True}),
+                encoding="utf-8")
+            if ingame_module.read_status(
+                    path=status_file, max_age=20) is not None:
+                failures.append("статус: старый файл не отсечён по возрасту")
+            status_file.write_text("не json", encoding="utf-8")
+            if ingame_module.read_status(path=status_file) is not None:
+                failures.append("статус: битый JSON не проигнорирован")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"ingame test: {type(exc).__name__}: {exc}")
+
     # 7) пути записи флагов (регрессия на неверный путь Roblox/…)
     try:
         for path in client_settings_paths():
@@ -8356,8 +9058,8 @@ def run_selftest():
         root.update()
 
         for page_key in ("game", "accounts", "favorites", "gallery",
-                         "flags", "cursors", "themes", "launchstyle",
-                         "settings", "log"):
+                         "ingame", "flags", "cursors", "themes",
+                         "launchstyle", "settings", "log"):
             app.show_page(page_key)
             root.update()
             if app.current_page != page_key:
@@ -8379,6 +9081,67 @@ def run_selftest():
         if (not hasattr(app, "error_sound_status_var")
                 or not hasattr(app, "var_error_sound")):
             failures.append("UI: нет настройки звука ошибки")
+        for attr in ("var_ingame_overlay", "var_ingame_start",
+                     "var_ingame_afk", "var_ingame_auto",
+                     "combo_ingame_corner", "combo_ingame_mode",
+                     "combo_ingame_key", "combo_ingame_minutes",
+                     "ingame_helper_var", "btn_ingame_start",
+                     "btn_ingame_stop", "btn_ingame_overlay"):
+            if not hasattr(app, attr):
+                failures.append(f"UI: нет поля «В игре» {attr}")
+        app.show_page("ingame")
+        root.update()
+        app._refresh_ingame_status()
+        root.update()
+        if not app.ingame_helper_var.get():
+            failures.append("UI: пустой статус помощника")
+        for combo, label in ((app.combo_ingame_mode, "режим"),
+                             (app.combo_ingame_key, "клавиша"),
+                             (app.combo_ingame_minutes, "интервал")):
+            if str(combo.cget("state")) != "disabled":
+                failures.append(
+                    f"UI «В игре»: {label} AFK активен при выключенном AFK")
+        if str(app.combo_ingame_corner.cget("state")) != "readonly":
+            failures.append(
+                "UI «В игре»: угол оверлея недоступен при включённом оверлее")
+        app.var_ingame_overlay.set(True)
+        app.var_ingame_start.set(True)
+        app.var_ingame_afk.set(True)
+        app.var_ingame_auto.set(True)
+        app.combo_ingame_corner.set("Слева снизу")
+        app.combo_ingame_mode.set("Клавиша")
+        app.combo_ingame_key.set("X")
+        app.combo_ingame_minutes.set("7 мин")
+        app._save_ingame_cfg(message="тест")
+        root.update()
+        saved_ingame = load_config()
+        expected_saved = {
+            "ingame_overlay": True, "ingame_overlay_start": True,
+            "ingame_afk": True, "ingame_auto": True,
+            "ingame_overlay_corner": "bl", "ingame_afk_mode": "key",
+            "ingame_afk_key": "x", "ingame_afk_minutes": 7,
+        }
+        for key, want in expected_saved.items():
+            if saved_ingame.get(key) != want:
+                failures.append(
+                    f"UI «В игре»: {key}={saved_ingame.get(key)!r} "
+                    f"!= {want!r}")
+        if app.var_ingame_mode.get() != "Клавиша":
+            failures.append("UI «В игре»: режим AFK не синхронизирован")
+        for combo, label in ((app.combo_ingame_corner, "угол"),
+                             (app.combo_ingame_mode, "режим"),
+                             (app.combo_ingame_key, "клавиша"),
+                             (app.combo_ingame_minutes, "интервал")):
+            if str(combo.cget("state")) != "readonly":
+                failures.append(
+                    f"UI «В игре»: {label} остался disabled после включения")
+        app.var_ingame_mode.set("Мышь — микро-движение")
+        app._ingame_update_controls()
+        if str(app.combo_ingame_key.cget("state")) != "disabled":
+            failures.append(
+                "UI «В игре»: клавиша AFK активна в режиме мыши")
+        app.var_ingame_mode.set("Клавиша")
+        app._ingame_update_controls()
         if app._rpc is not None:
             failures.append("UI: presence запустился без интерактива")
         if app.discord_status_var.get() == "":
@@ -8850,6 +9613,8 @@ _INSTANCE = None
 
 def main():
     global _INSTANCE
+    if "--ingame" in sys.argv:
+        sys.exit(ingame_mod.main())
     if "--selftest" in sys.argv:
         sys.exit(run_selftest())
 

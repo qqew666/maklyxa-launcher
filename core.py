@@ -47,7 +47,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -217,6 +217,14 @@ DEFAULT_CONFIG = {
     "error_sound_name": "",
     "ui_font_name": "",
     "ui_font_family": "",
+    "ingame_overlay": True,
+    "ingame_overlay_start": False,
+    "ingame_overlay_corner": "tr",
+    "ingame_auto": True,
+    "ingame_afk": False,
+    "ingame_afk_mode": "mouse",
+    "ingame_afk_key": "space",
+    "ingame_afk_minutes": 5,
 }
 
 # ---- FastFlags и бутстраперы -----------------------------------------------
@@ -341,8 +349,24 @@ def load_config(path=None):
 
     for flag in ("auto_close", "save_history", "remember_last",
                  "apply_flags_on_launch", "use_custom_cursors",
-                 "discord_rpc", "launch_sound", "error_sound"):
+                 "discord_rpc", "launch_sound", "error_sound",
+                 "ingame_overlay", "ingame_overlay_start", "ingame_auto",
+                 "ingame_afk"):
         cfg[flag] = bool(cfg.get(flag))
+    corner = str(cfg.get("ingame_overlay_corner") or "").lower()
+    cfg["ingame_overlay_corner"] = (
+        corner if corner in ("tl", "tr", "bl", "br") else "tr")
+    afk_mode = str(cfg.get("ingame_afk_mode") or "").lower()
+    cfg["ingame_afk_mode"] = (
+        afk_mode if afk_mode in ("mouse", "key") else "mouse")
+    cfg["ingame_afk_key"] = (
+        re.sub(r"[^a-z0-9_]", "",
+               str(cfg.get("ingame_afk_key") or "").lower())[:16] or "space")
+    try:
+        cfg["ingame_afk_minutes"] = max(
+            1, min(15, int(cfg.get("ingame_afk_minutes") or 5)))
+    except (TypeError, ValueError):
+        cfg["ingame_afk_minutes"] = 5
     cfg["discord_app_id"] = valid_discord_app_id(cfg.get("discord_app_id"))
     cfg["launch_sound_name"] = str(cfg.get("launch_sound_name") or "").strip()[:80]
     cfg["error_sound_name"] = str(cfg.get("error_sound_name") or "").strip()[:80]
