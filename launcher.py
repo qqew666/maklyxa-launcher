@@ -83,7 +83,7 @@ NAV_ITEMS = [
 
 NAV_GROUPS = [
     ("ЗАПУСК", ("game", "favorites")),
-    ("ТЮНИНГ", ("flags", "cursors")),
+    ("ПРЕДУСТАНОВЛЕННЫЕ\nМОДИФИКАЦИИ", ("flags", "cursors")),
     ("СИСТЕМА", ("settings", "log")),
 ]
 
@@ -792,7 +792,8 @@ class App:
         items = {key: (icon, text) for key, icon, text in NAV_ITEMS}
         for title, keys in NAV_GROUPS:
             tk.Label(nav, text=title, bg=c["panel"], fg=c["muted"],
-                     font=("Segoe UI", 8, "bold"), anchor="w").pack(
+                     font=("Segoe UI", 8, "bold"), anchor="w",
+                     justify="left").pack(
                          fill="x", padx=9, pady=(18 if title == "ЗАПУСК"
                                                else 16, 6))
             for key in keys:
@@ -1166,11 +1167,41 @@ class App:
         pad = self._scroll_page("game")
 
         self._page_header(
-            pad, "▶", "Запуск игры",
-            "Вставь ссылку на игру или Place ID — лаунчер откроет "
-            "официальный клиент Roblox.")
+            pad, "▶", "Запуск",
+            "Просто открой клиент Roblox или запусти игру по ссылке "
+            "или Place ID.")
 
-        # большая карточка запуска
+        # быстрый запуск клиента и недавние
+        top = tk.Frame(pad, bg=c["bg"])
+        top.pack(fill="x", pady=(0, 16))
+
+        left = self._side_card(top, "Клиент Roblox", "left", glyph="◉")
+        tk.Label(left, text="Открыть клиент без игры — игру можно выбрать "
+                            "позже.",
+                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                 anchor="w", justify="left", wraplength=320).pack(
+                     fill="x", pady=(0, 10))
+        self.btn_client = tk.Button(
+            left, text="▶   ПРОСТО В ROBLOX", relief="flat", bd=0,
+            cursor="hand2", font=("Segoe UI", 12, "bold"), pady=12,
+            takefocus=True, command=self.launch_client,
+            highlightthickness=0)
+        self.btn_client.pack(fill="x")
+        self.primary_buttons.append(self.btn_client)
+        base, fg, hot = self._btn_colors("primary")
+        self.btn_client.configure(bg=base, fg=fg, activebackground=hot,
+                                  activeforeground=fg)
+        self._bind_hover(self.btn_client, "primary")
+        self._hint(left, "Если клиент открыт, лаунчер выведет его окно "
+                         "вперёд.", wrap=320)
+
+        right = self._side_card(top, "Недавние", "right", glyph="◷")
+        self.recent_box, _ = self._make_listbox(right, height=4)
+        self.recent_box.bind("<Double-Button-1>", self._recent_activate)
+        self._hint(right, "Enter или двойной клик — запустить игру.",
+                   wrap=270)
+
+        # запуск игры по ссылке или Place ID
         inner = self._card(pad)
         tk.Label(inner, text="ВЫБРАННАЯ ИГРА", bg=c["surface"],
                  fg=c["muted"], font=("Segoe UI", 8, "bold"),
@@ -1218,9 +1249,9 @@ class App:
                      side="left", padx=(8, 0))
 
         self.btn_play = tk.Button(
-            inner, text="▶   P L A Y", relief="flat", bd=0, cursor="hand2",
-            font=("Segoe UI", 13, "bold"), pady=12, takefocus=True,
-            command=self.play, highlightthickness=0)
+            inner, text="▶   ИГРАТЬ ПО ID", relief="flat", bd=0,
+            cursor="hand2", font=("Segoe UI", 13, "bold"), pady=12,
+            takefocus=True, command=self.play, highlightthickness=0)
         self.btn_play.pack(fill="x", pady=(12, 0))
         self.primary_buttons.append(self.btn_play)
         base, fg, hot = self._btn_colors("primary")
@@ -1229,36 +1260,13 @@ class App:
         self._bind_hover(self.btn_play, "primary")
 
         actions = tk.Frame(pad, bg=c["bg"])
-        actions.pack(fill="x", pady=(8, 2))
+        actions.pack(fill="x")
         self._button(actions, "Открыть в браузере", self.open_in_browser,
                      side="left")
         self._button(actions, "В избранное", self.add_favorite,
                      side="left", padx=8)
         self._button(actions, "Копировать ID", self.copy_id,
                      side="left")
-
-        # клиент и недавние — в два столбца
-        bottom = tk.Frame(pad, bg=c["bg"])
-        bottom.pack(fill="x", pady=(2, 0))
-
-        left = self._side_card(bottom, "Клиент Roblox", "left", glyph="◉")
-        tk.Label(left, text="Открыть клиент без игры — сервер и игру можно "
-                            "выбрать позже.",
-                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
-                 anchor="w", justify="left", wraplength=250).pack(
-                     fill="x", pady=(0, 10))
-        self.btn_client = self._button(
-            left, "Запустить Roblox без игры", self.launch_client,
-            kind="primary")
-        self.btn_client.pack_configure(fill="x")
-        self._hint(left, "Если клиент уже открыт, лаунчер выведет его "
-                         "окно на передний план.", wrap=270)
-
-        right = self._side_card(bottom, "Недавние", "right", glyph="◷")
-        self.recent_box, _ = self._make_listbox(right, height=4)
-        self.recent_box.bind("<Double-Button-1>", self._recent_activate)
-        self._hint(right, "Enter или двойной клик — запустить игру.",
-                   wrap=270)
 
     # -- страница «Избранное» --------------------------------------------------------
 
@@ -3045,7 +3053,7 @@ class App:
             return
         self._client_busy = False
         self._btn_state(self.btn_client, "primary", True,
-                        text="Запустить Roblox без игры")
+                        text="▶   ПРОСТО В ROBLOX")
         if outcome == "already":
             if focused:
                 self.status_var.set("Roblox уже запущен — окно впереди")
@@ -3068,7 +3076,7 @@ class App:
             return
         self._client_busy = False
         self._btn_state(self.btn_client, "primary", True,
-                        text="Запустить Roblox без игры")
+                        text="▶   ПРОСТО В ROBLOX")
         self.log("Клиент не найден — предлагаю скачать")
         if self.interactive and messagebox.askyesno(
                 APP_NAME, "Roblox не установлен.\n"

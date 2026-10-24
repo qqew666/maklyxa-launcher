@@ -5,10 +5,16 @@ import zlib
 from pathlib import Path
 
 SIZES = [16, 32, 48, 64, 128, 256]
-BG = (21, 21, 43, 255)      # тёмно-синий фон
-GRN = (0, 196, 140, 255)    # зелёный кружок
-WHT = (245, 245, 250, 255)  # белый треугольник play
-SS = 3                      # суперсэмплинг (антиалиасинг)
+TILE_TOP = (0, 214, 158, 255)    # верх градиента плашки
+TILE_BOT = (0, 140, 104, 255)    # низ градиента плашки
+DARK = (11, 17, 24, 255)         # монограмма «M»
+SS = 3                           # суперсэмплинг (антиалиасинг)
+
+# «M» — ломаная: левая стойка, диагонали вниз-вверх, правая стойка
+M_POINTS = [(0.305, 0.710), (0.305, 0.290), (0.500, 0.540),
+            (0.695, 0.290), (0.695, 0.710)]
+M_HALF_STROKE = 0.082
+TILE_RADIUS = 0.225
 
 
 def sd_roundrect(cx, cy, half, r):
@@ -22,51 +28,53 @@ def sd_roundrect(cx, cy, half, r):
     return outside + inside - r
 
 
-def in_triangle(x, y, verts):
-    (x1, y1), (x2, y2), (x3, y3) = verts
-    d1 = (x - x2) * (y1 - y2) - (x1 - x2) * (y - y2)
-    d2 = (x - x3) * (y2 - y3) - (x2 - x3) * (y - y3)
-    d3 = (x - x1) * (y3 - y1) - (x3 - x1) * (y - y1)
-    has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
-    has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
-    return not (has_neg and has_pos)
+def seg_dist(px, py, ax, ay, bx, by):
+    vx, vy = bx - ax, by - ay
+    wx, wy = px - ax, py - ay
+    l2 = vx * vx + vy * vy
+    t = 0.0 if l2 == 0 else max(0.0, min(1.0, (wx * vx + wy * vy) / l2))
+    dx, dy = px - (ax + t * vx), py - (ay + t * vy)
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def lerp_color(a, b, t):
+    return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(4))
 
 
 def render(size):
     half = size / 2.0
-    r = size * 0.24
-    circ_r = size * 0.335
-    tri = [(-0.115 * size + half, -0.185 * size + half),
-           (0.205 * size + half, half),
-           (-0.115 * size + half, 0.185 * size + half)]
+    r = size * TILE_RADIUS
+    hw = size * M_HALF_STROKE
+    pts = [(x * size, y * size) for x, y in M_POINTS]
     px = bytearray(size * size * 4)
     step = 1.0 / SS
-    n = SS * SS
+    total = SS * SS
     for y in range(size):
         for x in range(size):
-            ra = ga = ba = aa = 0
+            ra = ga = ba = covered = 0
             for j in range(SS):
                 sy = y + (j + 0.5) * step
                 for i in range(SS):
                     sx = x + (i + 0.5) * step
-                    cx = sx - half
-                    cy = sy - half
+                    cx, cy = sx - half, sy - half
                     if sd_roundrect(cx, cy, half, r) > 0:
                         continue
-                    cr, cg, cb, ca = BG
-                    if cx * cx + cy * cy <= circ_r * circ_r:
-                        cr, cg, cb, ca = GRN
-                    if in_triangle(sx, sy, tri):
-                        cr, cg, cb, ca = WHT
-                    ra += cr
-                    ga += cg
-                    ba += cb
-                    aa += ca
+                    col = lerp_color(TILE_TOP, TILE_BOT, sy / size)
+                    d = min(seg_dist(sx, sy, pts[k][0], pts[k][1],
+                                     pts[k + 1][0], pts[k + 1][1])
+                            for k in range(len(pts) - 1))
+                    if d <= hw:
+                        col = DARK
+                    ra += col[0]
+                    ga += col[1]
+                    ba += col[2]
+                    covered += 1
             o = (y * size + x) * 4
-            px[o] = ra // n
-            px[o + 1] = ga // n
-            px[o + 2] = ba // n
-            px[o + 3] = aa // n
+            if covered:
+                px[o] = ra // covered
+                px[o + 1] = ga // covered
+                px[o + 2] = ba // covered
+                px[o + 3] = 255 * covered // total
     return bytes(px)
 
 
