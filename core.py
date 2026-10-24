@@ -45,7 +45,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.6.4"
+VERSION = "1.6.5"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -1289,19 +1289,37 @@ THEME_PALETTE_KEYS = ("bg", "panel", "surface", "surface2", "hover", "entry",
                       "list", "border", "text", "muted", "on_accent",
                       "titlebar")
 THEME_IMAGE_MAX = 20 * 1024 * 1024
+# Нейтральное «стекло» для режима «только картинка»: цвета темы отключены,
+# остаются тёмные поверхности и светлый акцент.
+IMAGE_ONLY_PALETTE = {
+    "bg": "#0b0f0d",
+    "panel": "#101512",
+    "surface": "#151b18",
+    "surface2": "#1d2521",
+    "hover": "#27312c",
+    "entry": "#131917",
+    "list": "#0e1311",
+    "border": "#2b3630",
+    "text": "#f1f5f3",
+    "muted": "#97a39d",
+    "on_accent": "#0b100e",
+    "titlebar": "#090d0b",
+}
+IMAGE_ONLY_ACCENT = "#dfe8e3"
 THEME_README = """\
 MaklyxaLauncher — свои темы
 ===========================
 
 Каждая тема — папка внутри ThemeSets:
   theme.json     цвета и настройки
-  background.*   картинка для шапки (PNG, JPG, WEBP, BMP или GIF)
+  background.*   картинка-фон (PNG, JPG, WEBP, BMP или GIF)
 
 Тему можно создать в лаунчере (раздел «Темы»), поменять цвета,
 поставить свою картинку и экспортировать ZIP-архивом.
 
 Цвета задаются в theme.json в формате #RRGGBB. Картинка
-показывается в верхней части окна лаунчера.
+показывается фоном рабочей области лаунчера. Режим
+"image_only": true убирает цвета темы и оставляет только картинку.
 """
 
 
@@ -1330,11 +1348,27 @@ def _luma(hex_color):
     return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
 
 
-def build_theme_palette(base="dark", tint="#00c48c", accent="#00c48c"):
-    """Палитра своей темы: базовая тёмная/светлая + оттенок и акцент."""
+def build_theme_palette(base="dark", tint="#00c48c", accent="#00c48c",
+                        image_only=False):
+    """Палитра своей темы: базовая тёмная/светлая + оттенок и акцент.
+
+    image_only=True — цвета темы отключены, интерфейс нейтральный,
+    картинка остаётся единственным оформлением.
+    """
     base_key = "light" if str(base).lower() == "light" else "dark"
     tint = str(tint).lower() if _hex_ok(tint) else "#00c48c"
     accent = str(accent).lower() if _hex_ok(accent) else "#00c48c"
+    if image_only:
+        palette = dict(IMAGE_ONLY_PALETTE)
+        palette.update({
+            "alpha": 1.0,
+            "label": "",
+            "base": "dark",
+            "tint": IMAGE_ONLY_ACCENT,
+            "accent": IMAGE_ONLY_ACCENT,
+            "image_only": True,
+        })
+        return palette
     source = THEMES[base_key]
     ratios = ({
         "bg": 0.06, "panel": 0.10, "surface": 0.14, "surface2": 0.20,
@@ -1356,6 +1390,7 @@ def build_theme_palette(base="dark", tint="#00c48c", accent="#00c48c"):
         "base": base_key,
         "tint": tint,
         "accent": accent,
+        "image_only": False,
     })
     return palette
 
@@ -1473,23 +1508,31 @@ def load_theme_palette(name, sets_dir=None):
     base_key = "light" if str(raw.get("base")).lower() == "light" else "dark"
     tint = str(raw.get("tint") or "").lower()
     accent = str(raw.get("accent") or "").lower()
+    tint = tint if _hex_ok(tint) else "#00c48c"
+    accent = accent if _hex_ok(accent) else tint
+    image_only = bool(raw.get("image_only"))
     palette = raw.get("palette")
     valid = (isinstance(palette, dict)
              and all(_hex_ok(palette.get(key)) for key in THEME_PALETTE_KEYS))
-    if not valid or not _hex_ok(tint) or not _hex_ok(accent):
-        tint = tint if _hex_ok(tint) else "#00c48c"
-        accent = accent if _hex_ok(accent) else tint
+    if image_only:
+        palette = build_theme_palette(base_key, tint, accent,
+                                      image_only=True)
+    elif not valid:
         palette = build_theme_palette(base_key, tint, accent)
     else:
         palette = dict(palette)
     palette.update({
         "label": str(name),
-        "base": base_key,
-        "tint": tint,
-        "accent": accent,
+        "base": palette.get("base") or base_key,
+        "tint": palette.get("tint") or tint,
+        "accent": palette.get("accent") or accent,
+        "stored_base": base_key,
+        "stored_tint": tint,
+        "stored_accent": accent,
         "alpha": 1.0,
         "custom": True,
         "image": None,
+        "image_only": image_only,
     })
     image = theme_image_file(name, sets_dir)
     if image is not None:
@@ -1508,13 +1551,17 @@ def theme_set_info(name, sets_dir=None):
             width, height, _alpha = png_info(image)
         except ValueError:
             width = height = 0
-    return {"ok": True, "name": str(name), "base": palette["base"],
-            "tint": palette["tint"], "accent": palette["accent"],
+    return {"ok": True, "name": str(name),
+            "base": palette.get("stored_base") or palette["base"],
+            "tint": palette.get("stored_tint") or palette["tint"],
+            "accent": palette.get("stored_accent") or palette["accent"],
+            "image_only": bool(palette.get("image_only")),
             "image": Path(image) if image else None,
             "width": width, "height": height, "error": ""}
 
 
-def _write_theme_json(set_dir, name, base, tint, accent, palette, image=""):
+def _write_theme_json(set_dir, name, base, tint, accent, palette, image="",
+                      image_only=False):
     data = {
         "version": 1,
         "name": str(name),
@@ -1522,6 +1569,7 @@ def _write_theme_json(set_dir, name, base, tint, accent, palette, image=""):
         "tint": tint,
         "accent": accent,
         "image": image,
+        "image_only": bool(image_only),
         "palette": palette,
     }
     return write_json_dict(Path(set_dir) / "theme.json", data)
@@ -1587,7 +1635,8 @@ def remove_theme_image(name, sets_dir=None):
 
 
 def create_theme_set(name=None, base="dark", tint="#00c48c",
-                     accent="#00c48c", image=None, sets_dir=None):
+                     accent="#00c48c", image=None, image_only=False,
+                     sets_dir=None):
     base_dir = ensure_theme_sets_dir(sets_dir)
     if base_dir is None:
         return {"ok": False, "name": "", "error": "папка тем недоступна"}
@@ -1607,9 +1656,10 @@ def create_theme_set(name=None, base="dark", tint="#00c48c",
         set_dir.mkdir()
     except OSError as exc:
         return {"ok": False, "name": "", "error": str(exc)}
-    palette = build_theme_palette(base_key, tint, accent)
+    palette = build_theme_palette(base_key, tint, accent,
+                                  image_only=bool(image_only))
     ok, err = _write_theme_json(set_dir, final_name, base_key, tint, accent,
-                                palette)
+                                palette, image_only=image_only)
     if not ok:
         shutil.rmtree(set_dir, ignore_errors=True)
         return {"ok": False, "name": "", "error": err}
@@ -1622,18 +1672,23 @@ def create_theme_set(name=None, base="dark", tint="#00c48c",
 
 
 def update_theme_set(name, base=None, tint=None, accent=None, image=None,
-                     remove_image=False, sets_dir=None):
+                     remove_image=False, image_only=None, sets_dir=None):
     palette = load_theme_palette(name, sets_dir)
     if palette is None:
         return {"ok": False, "error": "тема не найдена"}
-    base_key = (str(base).lower() if base else palette["base"])
+    base_key = (str(base).lower() if base
+                else palette.get("stored_base") or palette["base"])
     base_key = "light" if base_key == "light" else "dark"
-    tint = str(tint).lower() if tint and _hex_ok(tint) else palette["tint"]
+    tint = (str(tint).lower() if tint and _hex_ok(tint)
+            else palette.get("stored_tint") or palette["tint"])
     accent = (str(accent).lower() if accent and _hex_ok(accent)
-              else palette["accent"])
-    new_palette = build_theme_palette(base_key, tint, accent)
+              else palette.get("stored_accent") or palette["accent"])
     set_dir = _theme_sets_base(sets_dir) / str(name)
     raw = read_json_dict(set_dir / "theme.json")
+    flag = (bool(raw.get("image_only")) if image_only is None
+            else bool(image_only))
+    new_palette = build_theme_palette(base_key, tint, accent,
+                                      image_only=flag)
     image_name = str(raw.get("image") or "")
     if remove_image:
         removed = remove_theme_image(name, sets_dir)
@@ -1646,8 +1701,10 @@ def update_theme_set(name, base=None, tint=None, accent=None, image=None,
             return added
         image_name = added["image"]
     ok, err = _write_theme_json(set_dir, name, base_key, tint, accent,
-                                new_palette, image_name)
-    return {"ok": ok, "name": str(name), "error": err}
+                                new_palette, image_name,
+                                image_only=flag)
+    return {"ok": ok, "name": str(name), "error": err,
+            "image_only": flag}
 
 
 def rename_theme_set(old, new, sets_dir=None):
@@ -1755,10 +1812,16 @@ def import_theme_set(zip_path, name=None, sets_dir=None):
     accent = str(raw.get("accent") or "").lower()
     tint = tint if _hex_ok(tint) else "#00c48c"
     accent = accent if _hex_ok(accent) else tint
-    palette = raw.get("palette")
-    if not (isinstance(palette, dict)
-            and all(_hex_ok(palette.get(key)) for key in THEME_PALETTE_KEYS)):
-        palette = build_theme_palette(base_key, tint, accent)
+    image_only = bool(raw.get("image_only"))
+    if image_only:
+        palette = build_theme_palette(base_key, tint, accent,
+                                      image_only=True)
+    else:
+        palette = raw.get("palette")
+        if not (isinstance(palette, dict)
+                and all(_hex_ok(palette.get(key))
+                        for key in THEME_PALETTE_KEYS)):
+            palette = build_theme_palette(base_key, tint, accent)
     set_dir = base / final_name
     try:
         set_dir.mkdir()
@@ -1772,12 +1835,13 @@ def import_theme_set(zip_path, name=None, sets_dir=None):
         shutil.rmtree(set_dir, ignore_errors=True)
         return {"ok": False, "name": "", "error": str(exc)}
     ok, err = _write_theme_json(set_dir, final_name, base_key, tint, accent,
-                                palette, image_name)
+                                palette, image_name,
+                                image_only=image_only)
     if not ok:
         shutil.rmtree(set_dir, ignore_errors=True)
         return {"ok": False, "name": "", "error": err}
     return {"ok": True, "name": final_name, "error": "",
-            "image": bool(image_data)}
+            "image": bool(image_data), "image_only": image_only}
 
 
 def find_bootstrapper_settings():
@@ -1812,7 +1876,6 @@ def datacenter_regions():
 # ---- аккаунты Roblox ---------------------------------------------------------
 
 ROBLOX_COOKIE_NAME = ".ROBLOSECURITY"
-ROBLOX_LOGIN_URL = "https://auth.roblox.com/v2/login"
 ROBLOX_AUTHENTICATED_URL = "https://users.roblox.com/v1/users/authenticated"
 ROBLOX_TICKET_URL = "https://auth.roblox.com/v1/authentication-ticket"
 ROBLOX_AVATAR_URL = ("https://thumbnails.roblox.com/v1/users/"
@@ -1856,19 +1919,6 @@ def _json_body(body):
         return {}
 
 
-def _extract_roblox_cookie(headers):
-    try:
-        rows = headers.get_all("Set-Cookie") or []
-    except AttributeError:
-        rows = []
-    for row in rows:
-        match = re.search(
-            r"(?:^|;\s*)\.?ROBLOSECURITY=([^;]+)", str(row), re.I)
-        if match:
-            return match.group(1).strip().strip('"')
-    return ""
-
-
 def verify_roblox_cookie(cookie, timeout=15):
     """Проверить сессию и получить id/имя аккаунта."""
     if not cookie:
@@ -1888,40 +1938,6 @@ def verify_roblox_cookie(cookie, timeout=15):
             "display": str(data.get("displayName") or name)}
 
 
-def _login_error_text(status, headers, body):
-    data = _json_body(body)
-    detail = ""
-    for err in data.get("errors") or []:
-        if isinstance(err, dict):
-            detail = str(err.get("userFacingMessage")
-                         or err.get("message") or "")
-            if detail:
-                break
-    lowered = detail.lower()
-    challenge = ""
-    try:
-        challenge = str(headers.get("rblx-challenge-type") or "").lower()
-    except AttributeError:
-        pass
-    if status == 429 or "too many" in lowered or "rate limit" in lowered:
-        return ("Слишком много попыток входа. Подожди немного "
-                "или войди через браузер.")
-    if ("captcha" in lowered or "challenge" in lowered or challenge
-            or "funCaptcha".lower() in lowered):
-        return ("Roblox просит капчу или проверку. Войди через браузер — "
-                "это надёжнее.")
-    if "two" in lowered and "step" in lowered or "verification" in lowered:
-        return ("На аккаунте включена двухфакторная защита. "
-                "Войди через браузер.")
-    if status in (400, 401) or "incorrect" in lowered or "invalid" in lowered:
-        return "Неверный логин или пароль."
-    if status == 0:
-        return "Нет связи с Roblox. Проверь интернет."
-    if detail:
-        return f"Roblox: {detail}"
-    return f"Не удалось войти (HTTP {status})."
-
-
 def _post_with_csrf(url, payload, cookie="", timeout=20):
     headers = dict(_AUTH_BASE_HEADERS)
     status, resp_headers, body = _http_request(
@@ -1936,31 +1952,6 @@ def _post_with_csrf(url, payload, cookie="", timeout=20):
             status, resp_headers, body = _http_request(
                 url, "POST", headers, payload, cookie, timeout)
     return status, resp_headers, body
-
-
-def roblox_login(username, password, timeout=20):
-    """Вход по логину и паролю. Пароль не сохраняется."""
-    username = str(username or "").strip()
-    password = str(password or "")
-    if not username or not password:
-        return {"ok": False, "error": "Введи логин и пароль."}
-    payload = json.dumps({
-        "ctype": "Username",
-        "cusername": username,
-        "cpassword": password,
-    }).encode("utf-8")
-    status, headers, body = _post_with_csrf(
-        ROBLOX_LOGIN_URL, payload, timeout=timeout)
-    cookie = _extract_roblox_cookie(headers)
-    if status == 200 and cookie:
-        profile = verify_roblox_cookie(cookie, timeout=timeout)
-        if profile.get("ok"):
-            return {"ok": True, "cookie": cookie, "profile": profile,
-                    "error": ""}
-        return {"ok": False, "error": profile.get("error") or
-                "Не удалось проверить аккаунт."}
-    return {"ok": False, "needs_browser": True,
-            "error": _login_error_text(status, headers, body)}
 
 
 def roblox_auth_ticket(cookie, timeout=20):
@@ -2549,7 +2540,8 @@ def browser_login(timeout=300, cancel_event=None, status_cb=None,
     exe = find_browser_exe()
     if exe is None:
         return {"ok": False, "cancelled": False,
-                "error": "Edge или Chrome не найден. Войди по логину и паролю."}
+                "error": "Edge или Chrome не найден — установи браузер, "
+                         "чтобы войти через сайт Roblox."}
     profile = Path(profile_dir or BROWSER_PROFILE_DIR)
     _cleanup_browser_profile(profile)
     try:
@@ -2588,7 +2580,8 @@ def browser_login(timeout=300, cancel_event=None, status_cb=None,
                 time.sleep(0.5)
         if not browser_ws_url:
             return {"ok": False, "cancelled": False,
-                    "error": "Браузер не ответил. Попробуй войти по паролю."}
+                    "error": "Браузер не ответил. Попробуй открыть вход "
+                             "через сайт ещё раз."}
 
         while time.time() < deadline:
             if cancel_event is not None and cancel_event.is_set():

@@ -37,7 +37,7 @@ import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
 try:
-    from PIL import Image, ImageDraw, ImageTk
+    from PIL import Image, ImageDraw, ImageFilter, ImageTk
     HAVE_PIL = True
 except Exception:  # Pillow не обязателен для запуска
     HAVE_PIL = False
@@ -48,6 +48,7 @@ from core import (
     DEFAULT_CONFIG, DEFAULT_THEME,
     DISCORD_PORTAL_URL, DISCOVER_URL, FPS_CHOICES, FLAG_API, FLAG_FPS, FLAG_QUALITY,
     GRAPHICS_MODES, HTTP_HEADERS, INSTALLER_URL,
+    IMAGE_ONLY_ACCENT, IMAGE_ONLY_PALETTE,
     THEMES, THEME_ORDER, VERSION, WINDOW_TITLE,
     THEME_SETS_DIR, THEME_TINTS,
     account_avatar_path, account_session, accounts_state, add_account,
@@ -66,7 +67,7 @@ from core import (
     migrate_old_config, parse_place_id, png_info, player_pids,
     probe_protocol, protect_secret, read_json_dict, remove_account,
     remove_cursor_slot, remove_theme_image, rename_cursor_set,
-    rename_theme_set, resize_geometry, restore_custom_cursors, roblox_login,
+    rename_theme_set, resize_geometry, restore_custom_cursors,
     roblox_status, save_config, set_active_account, set_cursor_slot,
     set_theme_image, shade, theme_set_info, trunc, unprotect_secret,
     update_theme_set, valid_cursor_set_name,
@@ -81,7 +82,8 @@ SIDEBAR_W = 216
 MIN_W, MIN_H = 960, 640
 BORDER_PX = 6
 DEFAULT_SIZE = (1080, 760)
-BANNER_H = 150
+HEADER_H = 126
+HEADER_H_COMPACT = 76
 THEME_PREVIEW_H = 148
 
 CURSORS = {
@@ -583,9 +585,13 @@ class App:
         self.active_meta_var = tk.StringVar(value="")
         self._accounts = {"active": "", "accounts": []}
         self._avatar_photos = {}
-        self._banner_photo = None
-        self._banner_cache = {}
-        self._banner_job = None
+        self._page_views = {}
+        self._page_layout_jobs = {}
+        self._header_canvases = []
+        self._backdrop_pil = None
+        self._backdrop_master = None
+        self._backdrop_key = None
+        self._backdrop_job = None
         self._play_busy = False
         self._theme_preview_photo = None
         self._theme_preview_cache = {}
@@ -594,6 +600,7 @@ class App:
         self._theme_tint = "#00c48c"
         self._theme_accent = "#00c48c"
         self._theme_image_path = None
+        self._theme_image_only = False
         self._login_cancel = None
         self._login_dialog = None
         self._login_busy = False
@@ -645,10 +652,31 @@ class App:
         page = keep_page if keep_page in self.pages else "game"
         self.show_page(page)
         self.apply_accent(self.accent)
+        self._bind_page_children()
+        for key in list(self._page_views):
+            self._schedule_page_layout(key, delay=60)
+        self._schedule_backdrops(80)
 
     def _rebuild(self):
         """Полная пересборка UI (смена темы)."""
         keep = self.current_page
+        for job in list(self._page_layout_jobs.values()):
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._page_layout_jobs.clear()
+        if self._backdrop_job is not None:
+            try:
+                self.root.after_cancel(self._backdrop_job)
+            except tk.TclError:
+                pass
+            self._backdrop_job = None
+        self._page_views.clear()
+        self._header_canvases.clear()
+        self._backdrop_key = None
+        self._backdrop_master = None
+        self._backdrop_pil = None
         for child in self.root.winfo_children():
             child.destroy()
         self.nav_buttons.clear()
@@ -855,19 +883,14 @@ class App:
         tk.Frame(main, bg=c["border"], height=1).pack(
             fill="x", side="bottom")
 
-        self.banner_canvas = tk.Canvas(
-            main, height=BANNER_H, bg=c["bg"], highlightthickness=0, bd=0)
-        if self.c.get("image"):
-            self.banner_canvas.pack(fill="x", side="top")
-            self.banner_canvas.bind("<Configure>",
-                                    self._on_banner_configure)
-            self.root.after_idle(self._render_banner)
-
         content = tk.Frame(main, bg=c["bg"])
         content.pack(fill="both", expand=True)
         content.grid_rowconfigure(0, weight=1)
         content.grid_columnconfigure(0, weight=1)
         self.content = content
+        if not getattr(self, "_root_configure_bound", False):
+            root.bind("<Configure>", self._on_root_configure, add="+")
+            self._root_configure_bound = True
 
     def _build_sidebar(self, sidebar):
         c = self.c
@@ -987,52 +1010,66 @@ class App:
         except Exception:
             return ""
 
-    # -- баннер своей темы -------------------------------------------------------
+    # -- фон из картинки своей темы -------------------------------------------------
 
-    def _on_banner_configure(self, _event=None):
-        if self._banner_job is not None:
+    def _theme_image_source(self):
+        source = str(self.c.get("image") or "")
+        try:
+            if source and Path(source).is_file():
+                return source
+        except OSError:
+            pass
+        return ""
+
+    def _on_root_configure(self, event=None):
+        if getattr(self, "_closing", False):
+            return
+        if event is not None and event.widget is not self.root:
+            return
+        self._schedule_backdrops()
+
+    def _schedule_backdrops(self, delay=120):
+        if getattr(self, "_closing", False):
+            return
+        if self._backdrop_job is not None:
             try:
-                self.root.after_cancel(self._banner_job)
+                self.root.after_cancel(self._backdrop_job)
             except tk.TclError:
                 pass
-        self._banner_job = self.root.after(120, self._render_banner)
-
-    def _render_banner(self, _event=None):
-        """Картинка темы в шапке контента, с затемнением под низ."""
-        self._banner_job = None
-        canvas = getattr(self, "banner_canvas", None)
-        source = str(self.c.get("image") or "")
-        if canvas is None or not source or not Path(source).is_file():
-            return
         try:
-            width = max(320, canvas.winfo_width())
-            height = BANNER_H
+            self._backdrop_job = self.root.after(delay, self._refresh_backdrops)
         except tk.TclError:
-            return
-        cache_key = (source, width, height)
-        photo = self._banner_cache.get(cache_key)
-        if photo is None:
-            try:
-                photo = self._make_banner_photo(source, width, height)
-            except Exception:
-                return
-            if photo is None:
-                return
-            self._banner_cache[cache_key] = photo
-            if len(self._banner_cache) > 6:
-                self._banner_cache.pop(next(iter(self._banner_cache)))
-        self._banner_photo = photo
-        try:
-            canvas.delete("all")
-            canvas.create_image(0, 0, image=photo, anchor="nw")
-            canvas.create_rectangle(0, height - 2, width, height,
-                                    fill=self.accent, outline="")
-        except tk.TclError:
-            pass
+            self._backdrop_job = None
 
-    def _make_banner_photo(self, source, width, height):
-        c = self.c
-        if HAVE_PIL:
+    def _refresh_backdrops(self):
+        self._backdrop_job = None
+        if getattr(self, "_closing", False):
+            return
+        self._backdrop_key = None
+        self._backdrop_master = None
+        self._backdrop_pil = None
+        for key in list(self._page_views):
+            self._sync_page_layout(key)
+        for canvas in list(self._header_canvases):
+            self._render_header(canvas)
+
+    def _ensure_backdrop_master(self):
+        """Фото на всё окно: затемнённое, с лёгким блюром."""
+        source = self._theme_image_source()
+        if not source or not HAVE_PIL:
+            return None
+        try:
+            width = max(1, self.root.winfo_width())
+            height = max(1, self.root.winfo_height())
+            stamp = Path(source).stat().st_mtime_ns
+        except (OSError, tk.TclError):
+            return None
+        if width < 40 or height < 40:
+            return None
+        key = (source, stamp, width, height, self.theme_name)
+        if key == self._backdrop_key and self._backdrop_master is not None:
+            return self._backdrop_master
+        try:
             image = Image.open(source).convert("RGB")
             scale = max(width / image.width, height / image.height)
             size = (max(1, int(image.width * scale + 0.5)),
@@ -1041,29 +1078,233 @@ class App:
             left = max(0, (image.width - width) // 2)
             top = max(0, (image.height - height) // 2)
             image = image.crop((left, top, left + width, top + height))
-            image = image.convert("RGBA")
+            image = image.filter(ImageFilter.GaussianBlur(1.1))
             try:
-                bg = c["bg"].lstrip("#")
-                rgb = tuple(int(bg[i:i + 2], 16) for i in (0, 2, 4))
-            except (ValueError, TypeError):
-                rgb = (10, 12, 16)
+                raw = self.c["bg"].lstrip("#")
+                base_rgb = tuple(int(raw[i:i + 2], 16) for i in (0, 2, 4))
+            except (ValueError, TypeError, KeyError):
+                base_rgb = (10, 12, 10)
+            base_rgb = tuple(int(value * 0.5) for value in base_rgb)
             overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
             draw = ImageDraw.Draw(overlay)
-            tint_alpha = 62 if c.get("base") != "light" else 88
-            draw.rectangle([0, 0, width, height], fill=rgb + (tint_alpha,))
-            fade = min(84, height // 2)
+            dim = 130 if self.c.get("image_only") else 112
+            draw.rectangle([0, 0, width, height], fill=base_rgb + (dim,))
+            fade = min(int(height * 0.30), 240)
             for index in range(fade):
-                alpha = int(215 * (index / max(1, fade - 1)) ** 1.5)
-                y = height - fade + index
-                draw.line([(0, y), (width, y)], fill=rgb + (alpha,))
-            image = Image.alpha_composite(image, overlay).convert("RGB")
-            return ImageTk.PhotoImage(image)
-        photo = tk.PhotoImage(file=source)
-        factor = max(1, min(photo.width() // max(1, width),
-                            photo.height() // max(1, height)))
-        if factor > 1:
-            photo = photo.subsample(factor, factor)
+                alpha = int(72 * (1 - index / max(1, fade - 1)) ** 2)
+                if alpha:
+                    draw.line([(0, index), (width, index)],
+                              fill=(0, 0, 0, alpha))
+            fade = min(int(height * 0.22), 180)
+            for index in range(fade):
+                alpha = int(80 * (index / max(1, fade - 1)) ** 2)
+                if alpha:
+                    y = height - fade + index
+                    draw.line([(0, y), (width, y)], fill=(0, 0, 0, alpha))
+            pil = Image.alpha_composite(image.convert("RGBA"),
+                                        overlay).convert("RGB")
+            photo = ImageTk.PhotoImage(pil)
+        except Exception:
+            return None
+        self._backdrop_pil = pil
+        self._backdrop_master = photo
+        self._backdrop_key = key
         return photo
+
+    def _apply_page_photo(self, key, photo=None):
+        data = self._page_views.get(key)
+        if data is None:
+            return
+        if photo is None:
+            photo = self._ensure_backdrop_master()
+        view, pad = data["view"], data["pad"]
+        data["photo"] = photo
+        try:
+            view.itemconfigure(
+                data["view_photo"], image=photo if photo is not None else "")
+            pad.itemconfigure(
+                data["pad_photo"], image=photo if photo is not None else "")
+        except tk.TclError:
+            return
+        if photo is not None:
+            self._position_page_photo(key)
+
+    def _position_page_photo(self, key):
+        data = self._page_views.get(key)
+        if data is None or data.get("photo") is None:
+            return
+        view, pad = data["view"], data["pad"]
+        try:
+            view_x = view.winfo_rootx() - self.root.winfo_rootx()
+            view_y = view.winfo_rooty() - self.root.winfo_rooty()
+            offset = view.canvasy(0)
+            view.coords(data["view_photo"], -view_x, offset - view_y)
+            pad.coords(data["pad_photo"],
+                       -view_x - data["padx"],
+                       offset - view_y - data["pady"])
+        except tk.TclError:
+            pass
+
+    def _on_page_scroll(self, key, first, last):
+        data = self._page_views.get(key)
+        if data is None:
+            return
+        try:
+            data["bar"].set(first, last)
+        except tk.TclError:
+            pass
+        self._position_page_photo(key)
+        for canvas in self._header_canvases:
+            if getattr(canvas, "_header_key", "") == key:
+                try:
+                    self._schedule_header(canvas, delay=40)
+                except tk.TclError:
+                    pass
+                break
+
+    def _schedule_page_layout(self, key, delay=50):
+        if getattr(self, "_closing", False):
+            return
+        job = self._page_layout_jobs.pop(key, None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+        try:
+            self._page_layout_jobs[key] = self.root.after(
+                delay, lambda k=key: self._sync_page_layout(k))
+        except tk.TclError:
+            pass
+
+    def _sync_page_layout(self, key):
+        self._page_layout_jobs.pop(key, None)
+        if getattr(self, "_closing", False):
+            return
+        data = self._page_views.get(key)
+        if data is None:
+            return
+        view, pad = data["view"], data["pad"]
+        try:
+            view_w = view.winfo_width()
+            view_h = view.winfo_height()
+        except tk.TclError:
+            return
+        if view_w <= 1 or view_h <= 1:
+            return
+        pad_w = max(160, view_w - 2 * data["padx"])
+        try:
+            current_w = int(float(view.itemcget(data["window"], "width") or 1))
+        except (tk.TclError, ValueError):
+            current_w = 0
+        if abs(current_w - pad_w) > 1:
+            try:
+                view.itemconfigure(data["window"], width=pad_w)
+                pad.update_idletasks()
+            except tk.TclError:
+                return
+        try:
+            content_h = max(1, pad.winfo_reqheight())
+            view.itemconfigure(data["window"], height=content_h)
+            view.configure(
+                scrollregion=(0, 0, view_w,
+                              content_h + 2 * data["pady"]))
+        except tk.TclError:
+            return
+        data["height"] = content_h
+        self._apply_page_photo(key)
+        self._position_page_photo(key)
+
+    def _bind_page_children(self):
+        for key, data in self._page_views.items():
+            try:
+                children = data["pad"].winfo_children()
+            except tk.TclError:
+                continue
+            for child in children:
+                if getattr(child, "_maklyxa_sync", False):
+                    continue
+                child._maklyxa_sync = True
+                child.bind(
+                    "<Configure>",
+                    lambda _e, k=key: self._schedule_page_layout(k),
+                    add="+")
+
+    def _render_header(self, canvas):
+        canvas._header_job = None
+        if getattr(self, "_closing", False):
+            return
+        spec = getattr(canvas, "_header_spec", None)
+        if not spec:
+            return
+        try:
+            width = canvas.winfo_width()
+            height = canvas.winfo_height()
+        except tk.TclError:
+            return
+        if width <= 2 or height <= 2:
+            return
+        glyph, title, subtitle = spec
+        c = self.c
+        accent = self.accent
+        compact = height < 100
+        canvas.delete("all")
+        canvas._header_photo = None
+        photo = self._ensure_backdrop_master()
+        if photo is not None and self._backdrop_pil is not None:
+            try:
+                x = canvas.winfo_rootx() - self.root.winfo_rootx()
+                y = canvas.winfo_rooty() - self.root.winfo_rooty()
+            except tk.TclError:
+                x = y = 0
+            try:
+                xs = min(max(0, x),
+                         max(0, self._backdrop_pil.width - width))
+                ys = min(max(0, y),
+                         max(0, self._backdrop_pil.height - height))
+                crop = self._backdrop_pil.crop(
+                    (xs, ys, xs + width, ys + height)).convert("RGBA")
+                overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(overlay)
+                for index in range(height):
+                    alpha = int(150 * (1 - index / max(1, height - 1)) ** 1.3)
+                    if alpha:
+                        draw.line([(0, index), (width, index)],
+                                  fill=(5, 8, 7, alpha))
+                header_photo = ImageTk.PhotoImage(
+                    Image.alpha_composite(crop, overlay).convert("RGB"))
+                canvas._header_photo = header_photo
+                canvas.create_image(0, 0, image=header_photo, anchor="nw")
+            except Exception:
+                canvas.configure(bg=c["bg"])
+        else:
+            canvas.configure(bg=c["bg"])
+        if compact:
+            canvas.create_rectangle(0, 10, 16, 12, fill=accent, outline="")
+            canvas.create_text(24, 4, text="M A K L Y X A", anchor="nw",
+                               fill=accent, font=("Segoe UI", 8, "bold"))
+            canvas.create_text(0, 24, text=title, anchor="nw", fill=c["text"],
+                               font=("Segoe UI", 19, "bold"))
+            badge = 44
+        else:
+            canvas.create_rectangle(0, 18, 18, 20, fill=accent, outline="")
+            canvas.create_text(26, 11, text="M A K L Y X A", anchor="nw",
+                               fill=accent, font=("Segoe UI", 8, "bold"))
+            canvas.create_text(0, 30, text=title, anchor="nw", fill=c["text"],
+                               font=("Segoe UI", 22, "bold"))
+            badge = 56
+            if subtitle:
+                canvas.create_text(
+                    0, 72, text=subtitle, anchor="nw", fill=c["muted"],
+                    font=("Segoe UI", 10), width=max(220, width - 130),
+                    justify="left")
+        by1 = 8
+        bx2 = width - 8
+        _round_rect(canvas, bx2 - badge, by1, bx2, by1 + badge, 12,
+                    fill=c["surface2"], outline=c["border"], width=1)
+        canvas.create_text(bx2 - badge // 2, by1 + badge // 2, text=glyph,
+                           fill=accent,
+                           font=("Segoe UI", 16 if compact else 20, "bold"))
 
     def _window_button(self, parent, glyph, command, danger=False):
         c = self.c
@@ -1101,28 +1342,33 @@ class App:
     # -- страницы -----------------------------------------------------------------
 
     def _scroll_page(self, key, padx=28, pady=18):
-        """Страница со скроллом; возвращает фрейм с учётом отступов."""
+        """Страница со скроллом; карточки лежат на фоне-картинке."""
         c = self.c
         holder = tk.Frame(self.content, bg=c["bg"])
         holder.grid(row=0, column=0, sticky="nsew")
         self.pages[key] = holder
 
-        canvas = tk.Canvas(holder, bg=c["bg"], highlightthickness=0, bd=0)
-        bar = self._vscroll(holder, canvas.yview, c["bg"], width=8)
-        canvas.configure(yscrollcommand=bar.set)
-        canvas.pack(side="left", fill="both", expand=True)
+        view = tk.Canvas(holder, bg=c["bg"], highlightthickness=0, bd=0)
+        bar = self._vscroll(holder, view.yview, c["bg"], width=8)
+        view.configure(
+            yscrollcommand=lambda f, l, k=key: self._on_page_scroll(k, f, l))
+        view.pack(side="left", fill="both", expand=True)
         bar.pack(side="right", fill="y")
 
-        inner = tk.Frame(canvas, bg=c["bg"])
-        window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>",
-                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>",
-                    lambda e: canvas.itemconfigure(window_id, width=e.width))
-        self.scroll_canvases[key] = canvas
-
-        pad = tk.Frame(inner, bg=c["bg"])
-        pad.pack(fill="both", expand=True, padx=padx, pady=pady)
+        view_photo = view.create_image(0, 0, anchor="nw")
+        pad = tk.Canvas(view, bg=c["bg"], highlightthickness=0, bd=0)
+        window_id = view.create_window((padx, pady), window=pad,
+                                       anchor="nw", width=1, height=1)
+        pad_photo = pad.create_image(0, 0, anchor="nw")
+        self._page_views[key] = {
+            "view": view, "bar": bar, "pad": pad, "window": window_id,
+            "padx": padx, "pady": pady, "view_photo": view_photo,
+            "pad_photo": pad_photo, "photo": None, "height": 0,
+        }
+        self.scroll_canvases[key] = view
+        view.bind("<Configure>",
+                  lambda _e, k=key: self._schedule_page_layout(k))
+        self.root.after_idle(lambda k=key: self._sync_page_layout(k))
         return pad
 
     def show_page(self, key):
@@ -1168,41 +1414,36 @@ class App:
     # -- хелперы виджетов -----------------------------------------------------------
 
     def _page_header(self, pad, glyph, title, subtitle=None):
-        """Шапка страницы: бренд, крупный заголовок и иконка раздела."""
+        """Шапка страницы поверх фото: бренд, заголовок и иконка."""
         c = self.c
-        row = tk.Frame(pad, bg=c["bg"])
-        row.pack(fill="x", pady=(0, 14))
+        height = HEADER_H if subtitle else HEADER_H_COMPACT
+        canvas = tk.Canvas(pad, bg=c["bg"], height=height,
+                           highlightthickness=0, bd=0)
+        canvas.pack(fill="x", pady=(0, 14))
+        canvas._header_spec = (glyph, title, subtitle)
+        canvas._header_job = None
+        canvas._header_key = next(
+            (k for k, d in self._page_views.items() if d["pad"] is pad), "")
+        self._header_canvases.append(canvas)
+        canvas.bind("<Configure>",
+                    lambda _e, cv=canvas: self._schedule_header(cv))
+        self.root.after_idle(lambda cv=canvas: self._render_header(cv))
+        return canvas
 
-        badge = tk.Frame(row, width=56, height=56, bg=c["surface2"],
-                         highlightthickness=1,
-                         highlightbackground=c["border"])
-        badge.pack(side="right", anchor="n")
-        badge.pack_propagate(False)
-        glyph_lbl = tk.Label(badge, text=glyph, bg=c["surface2"],
-                             fg=self.accent, font=("Segoe UI", 20, "bold"))
-        glyph_lbl.pack(fill="both", expand=True)
-        self.accent_fgs.append(glyph_lbl)
-
-        col = tk.Frame(row, bg=c["bg"])
-        col.pack(side="left", fill="x", expand=True, padx=(0, 18))
-        eyebrow = tk.Frame(col, bg=c["bg"])
-        eyebrow.pack(fill="x")
-        line = tk.Frame(eyebrow, bg=self.accent, width=18, height=2)
-        line.pack(side="left", pady=(5, 0))
-        self.accent_bgs.append(line)
-        eyebrow_lbl = tk.Label(
-            eyebrow, text="M A K L Y X A", bg=c["bg"], fg=self.accent,
-            font=("Segoe UI", 8, "bold"))
-        eyebrow_lbl.pack(side="left", padx=(8, 0))
-        self.accent_fgs.append(eyebrow_lbl)
-        tk.Label(col, text=title, bg=c["bg"], fg=c["text"],
-                 font=("Segoe UI", 22, "bold"), anchor="w").pack(
-                     fill="x", pady=(6, 2))
-        if subtitle:
-            tk.Label(col, text=subtitle, bg=c["bg"], fg=c["muted"],
-                     font=("Segoe UI", 10), anchor="w",
-                     justify="left", wraplength=540).pack(fill="x")
-        return row
+    def _schedule_header(self, canvas, delay=30):
+        if getattr(self, "_closing", False):
+            return
+        job = getattr(canvas, "_header_job", None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+        try:
+            canvas._header_job = self.root.after(
+                delay, lambda cv=canvas: self._render_header(cv))
+        except tk.TclError:
+            canvas._header_job = None
 
     def _card(self, parent, title=None, subtitle=None, expand=False,
               glyph=None):
@@ -1502,8 +1743,8 @@ class App:
         self._page_header(
             pad, "◉", "Аккаунты",
             "Быстрый переключатель: выбери аккаунт — и следующая игра "
-            "запустится под ним. Войти можно по логину и паролю или через "
-            "браузер.")
+            "запустится под ним. Вход — только через сайт Roblox в "
+            "браузере.")
 
         row = tk.Frame(pad, bg=c["bg"])
         row.pack(fill="x")
@@ -1519,8 +1760,8 @@ class App:
         self._button(btns, "Удалить", self._account_remove, side="left",
                      padx=8)
         self._hint(left, "Двойной клик — сделать аккаунт активным. "
-                         "Пароль не сохраняется: только зашифрованная "
-                         "сессия Roblox.", wrap=320)
+                         "Вход только через сайт Roblox: пароль лаунчеру "
+                         "не нужен и нигде не хранится.", wrap=320)
 
         right = self._side_card(row, "Активный аккаунт", "right", glyph="✓")
         head = tk.Frame(right, bg=c["surface"])
@@ -1569,10 +1810,11 @@ class App:
             "под нужным аккаунтом.",
             "Если Roblox уже запущен, лаунчер спросит, закрыть ли его "
             "перед сменой аккаунта.",
-            "Вход через браузер открывает отдельное окно Edge/Chrome "
+            "Вход открывает сайт Roblox в отдельном окне Edge/Chrome "
             "с временным профилем — основной браузер не затрагивается.",
-            "Пароль нигде не сохраняется. Сессия Roblox лежит в "
-            "accounts.json и зашифрована средствами Windows (DPAPI).",
+            "Пароль лаунчер не запрашивает и не сохраняет. Сессия "
+            "Roblox лежит в accounts.json и зашифрована средствами "
+            "Windows (DPAPI).",
         ):
             tk.Label(info, text="•  " + text, bg=c["surface"],
                      fg=c["muted"], font=("Segoe UI", 9), anchor="w",
@@ -1832,21 +2074,12 @@ class App:
 
     def _set_login_busy(self, busy, text=None):
         self._login_busy = busy
-        state = "disabled" if busy else "normal"
-        for attr in ("_login_user_entry", "_login_pass_entry"):
-            widget = getattr(self, attr, None)
-            if widget is not None:
-                try:
-                    widget.configure(state=state)
-                except tk.TclError:
-                    pass
-        for attr in ("_login_btn", "_login_browser_btn"):
-            widget = getattr(self, attr, None)
-            if widget is not None:
-                try:
-                    self._btn_state(widget, "primary", not busy)
-                except tk.TclError:
-                    pass
+        widget = getattr(self, "_login_browser_btn", None)
+        if widget is not None:
+            try:
+                self._btn_state(widget, "primary", not busy)
+            except tk.TclError:
+                pass
         if text is not None:
             self._set_login_status(text)
 
@@ -1870,70 +2103,41 @@ class App:
         win.transient(self.root)
         self._login_dialog = win
         self._login_cancel = None
-        self._login_user_var = tk.StringVar()
-        self._login_pass_var = tk.StringVar()
 
         body = tk.Frame(win, bg=c["bg"], padx=22, pady=18)
         body.pack(fill="both", expand=True)
         tk.Label(body, text="Добавить аккаунт", bg=c["bg"], fg=c["text"],
                  font=("Segoe UI", 16, "bold"), anchor="w").pack(fill="x")
-        tk.Label(body, text="Пароль не сохраняется — только зашифрованная "
-                            "сессия Roblox для запуска игр.",
+        tk.Label(body, text="Вход только через сайт Roblox в браузере. "
+                            "Пароль лаунчер не запрашивает и не сохраняет — "
+                            "только зашифрованную сессию для запуска игр.",
                  bg=c["bg"], fg=c["muted"], font=("Segoe UI", 9),
                  anchor="w", justify="left", wraplength=430).pack(
                      fill="x", pady=(4, 14))
 
-        def section(title):
-            outer = tk.Frame(body, bg=c["border"])
-            outer.pack(fill="x", pady=(0, 12))
-            frame = tk.Frame(outer, bg=c["surface"], padx=14, pady=12)
-            frame.pack(fill="x", padx=1, pady=1)
-            tk.Label(frame, text=title, bg=c["surface"], fg=c["muted"],
-                     font=("Segoe UI", 8, "bold"), anchor="w").pack(
-                         fill="x")
-            return frame
-
-        pw = section("ПО ЛОГИНУ И ПАРОЛЮ")
-        tk.Label(pw, text="Логин Roblox", bg=c["surface"], fg=c["text"],
-                 font=("Segoe UI", 9), anchor="w").pack(
-                     fill="x", pady=(8, 3))
-        self._login_user_entry = ttk.Entry(pw,
-                                           textvariable=self._login_user_var)
-        self._login_user_entry.pack(fill="x", ipady=3)
-        tk.Label(pw, text="Пароль", bg=c["surface"], fg=c["text"],
-                 font=("Segoe UI", 9), anchor="w").pack(
-                     fill="x", pady=(8, 3))
-        self._login_pass_entry = ttk.Entry(
-            pw, textvariable=self._login_pass_var, show="•")
-        self._login_pass_entry.pack(fill="x", ipady=3)
-        self._login_btn = self._button(pw, "Войти",
-                                       self._account_login_password,
-                                       kind="primary")
-        self._login_btn.pack_configure(fill="x", pady=(10, 0))
-        self._login_user_entry.bind(
-            "<Return>", lambda _e: self._login_pass_entry.focus_set())
-        self._login_pass_entry.bind(
-            "<Return>", lambda _e: self._account_login_password())
-        tk.Label(pw, text="Если Roblox попросит капчу или 2FA — используй "
-                          "вход через браузер.",
-                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 8),
-                 anchor="w", justify="left", wraplength=430).pack(
-                     fill="x", pady=(8, 0))
-
-        tk.Label(body, text="или", bg=c["bg"], fg=c["muted"],
-                 font=("Segoe UI", 9)).pack(pady=(0, 10))
-
-        br = section("ЧЕРЕЗ БРАУЗЕР")
-        tk.Label(br, text="Откроется отдельное окно Edge или Chrome. "
-                          "Войди в Roblox — лаунчер заберёт сессию и "
-                          "закроет окно.",
+        outer = tk.Frame(body, bg=c["border"])
+        outer.pack(fill="x", pady=(0, 12))
+        br = tk.Frame(outer, bg=c["surface"], padx=14, pady=12)
+        br.pack(fill="x", padx=1, pady=1)
+        tk.Label(br, text="ВХОД ЧЕРЕЗ САЙТ", bg=c["surface"],
+                 fg=c["muted"], font=("Segoe UI", 8, "bold"),
+                 anchor="w").pack(fill="x")
+        tk.Label(br, text="Откроется отдельное окно Edge или Chrome с "
+                          "временным профилем. Войди на сайте Roblox — "
+                          "лаунчер заберёт сессию и закроет окно. Капча "
+                          "и 2FA вводятся прямо на сайте.",
                  bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
                  anchor="w", justify="left", wraplength=430).pack(
                      fill="x", pady=(8, 10))
         self._login_browser_btn = self._button(
-            br, "Войти через браузер", self._account_login_browser,
+            br, "Войти через сайт Roblox", self._account_login_browser,
             kind="primary")
         self._login_browser_btn.pack_configure(fill="x")
+        tk.Label(br, text="Основной браузер не затрагивается: профиль "
+                          "создаётся во временной папке и удаляется.",
+                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 8),
+                 anchor="w", justify="left", wraplength=430).pack(
+                     fill="x", pady=(8, 0))
 
         self._login_status_var = tk.StringVar(value="")
         self._login_status_lbl = tk.Label(
@@ -1966,7 +2170,7 @@ class App:
         win.deiconify()
         try:
             win.grab_set()
-            self._login_user_entry.focus_set()
+            self._login_browser_btn.focus_set()
         except tk.TclError:
             pass
 
@@ -1978,13 +2182,12 @@ class App:
             except Exception:
                 pass
         self._login_dialog = None
-        for attr in ("_login_btn", "_login_browser_btn"):
-            widget = getattr(self, attr, None)
-            if widget is not None:
-                try:
-                    self.primary_buttons.remove(widget)
-                except ValueError:
-                    pass
+        widget = getattr(self, "_login_browser_btn", None)
+        if widget is not None:
+            try:
+                self.primary_buttons.remove(widget)
+            except ValueError:
+                pass
         if win is None:
             return
         try:
@@ -1995,26 +2198,6 @@ class App:
             win.destroy()
         except tk.TclError:
             pass
-
-    def _account_login_password(self):
-        if self._login_busy:
-            return
-        username = self._login_user_var.get().strip()
-        password = self._login_pass_var.get()
-        self._login_pass_var.set("")
-        if not username or not password:
-            self._set_login_status("Введи логин и пароль.", error=True)
-            return
-        self._set_login_busy(True, "Вхожу в Roblox…")
-
-        def worker():
-            result = roblox_login(username, password)
-            added = None
-            if result.get("ok"):
-                added = add_account(result["cookie"], result.get("profile"))
-            self.q.put(lambda: self._password_login_done(result, added))
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def _finish_account_add(self, added, method):
         account = (added or {}).get("account") or {}
@@ -2030,7 +2213,7 @@ class App:
             return
         self._login_cancel = threading.Event()
         cancel = self._login_cancel
-        self._set_login_busy(True, "Открываю браузер…")
+        self._set_login_busy(True, "Открываю сайт Roblox…")
 
         def report(text):
             self.q.put(lambda t=text: self._set_login_status(t))
@@ -2044,30 +2227,13 @@ class App:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _password_login_done(self, result, added):
-        self._login_busy = False
-        if self._login_window_alive():
-            self._set_login_busy(False)
-        if not result.get("ok"):
-            error = result.get("error") or "Не удалось войти."
-            if result.get("needs_browser"):
-                error += "\nПопробуй «Войти через браузер»."
-            self._set_login_status(error, error=True)
-            return
-        if not added or not added.get("ok"):
-            error = (added or {}).get("error") or \
-                "Не удалось сохранить аккаунт."
-            self._set_login_status(error, error=True)
-            return
-        self._finish_account_add(added, "по логину и паролю")
-
     def _browser_login_done(self, result, added):
         self._login_busy = False
         self._login_cancel = None
         if self._login_window_alive():
             self._set_login_busy(False)
         if result.get("cancelled"):
-            self._set_login_status("Вход через браузер отменён.")
+            self._set_login_status("Вход через сайт отменён.")
             return
         if not result.get("ok"):
             self._set_login_status(result.get("error")
@@ -2078,7 +2244,7 @@ class App:
                 "Не удалось сохранить аккаунт."
             self._set_login_status(error, error=True)
             return
-        self._finish_account_add(added, "через браузер")
+        self._finish_account_add(added, "через сайт")
 
     # -- страница «Избранное» --------------------------------------------------------
 
@@ -3121,8 +3287,8 @@ class App:
         self._page_header(
             pad, "◐", "Свои темы",
             "Собери оформление из базовых цветов, оттенка и своей картинки. "
-            "Темы хранятся папками, как наборы курсоров: смена, ZIP-импорт "
-            "и экспорт.")
+            "Картинка становится фоном всего окна, а режим «только картинка» "
+            "убирает цвета темы и оставляет фото.")
 
         inner = self._card(
             pad, title="Мои темы", glyph="◐",
@@ -3227,6 +3393,14 @@ class App:
                  justify="left", wraplength=320).grid(
                      row=4, column=1, sticky="w", pady=(2, 0))
 
+        self.theme_image_only_var = tk.BooleanVar(value=False)
+        self.theme_image_only_check = self._checkbox(
+            opts, "Оставить только картинку — без цветов темы",
+            self.theme_image_only_var,
+            command=self._theme_toggle_image_only)
+        self.theme_image_only_check.grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
         actions = tk.Frame(right, bg=c["surface"])
         actions.pack(fill="x", pady=(12, 0))
         self.theme_apply_btn = self._button(
@@ -3241,9 +3415,10 @@ class App:
                  justify="left", wraplength=460).pack(fill="x", pady=(10, 0))
         self._hint(
             right,
-            "Картинка показывается баннером в верхней части окна; лучше "
-            "горизонтальная (например 1920×400). Тема не затрагивает "
-            "аккаунты и пароли. Импорт и экспорт — ZIP, как у курсоров.",
+            "Картинка становится фоном рабочей области и кадрируется по "
+            "размеру окна. Режим «только картинка» отключает цвета темы — "
+            "интерфейс становится нейтральным, а фото остаётся. Импорт и "
+            "экспорт — ZIP, как у курсоров.",
             wrap=470)
         self._refresh_theme_panel()
         self.root.after_idle(self._render_theme_preview)
@@ -3308,6 +3483,9 @@ class App:
         palette = load_theme_palette(name) if name else None
         if not info.get("ok") or palette is None:
             self._theme_image_path = None
+            self._theme_image_only = False
+            if getattr(self, "theme_image_only_var", None) is not None:
+                self.theme_image_only_var.set(False)
             self.theme_info_var.set("")
             self.theme_image_var.set("")
             self.theme_status_var.set(
@@ -3333,10 +3511,22 @@ class App:
         self._theme_tint = info.get("tint") or "#00c48c"
         self._theme_accent = info.get("accent") or "#00c48c"
         self._theme_image_path = info.get("image")
-        self.theme_info_var.set(
-            f"База: {'светлая' if self._theme_base == 'light' else 'тёмная'}"
-            f"  ·  оттенок {self._theme_tint}"
-            f"  ·  акцент {self._theme_accent}")
+        self._theme_image_only = bool(info.get("image_only"))
+        if getattr(self, "theme_image_only_var", None) is not None:
+            self.theme_image_only_var.set(self._theme_image_only)
+        if self._theme_image_only:
+            self.theme_info_var.set(
+                "Режим «только картинка»: цвета темы отключены, интерфейс "
+                "нейтральный. Сохранено для возврата — "
+                f"{'светлая' if self._theme_base == 'light' else 'тёмная'} "
+                f"база, оттенок {self._theme_tint}, "
+                f"акцент {self._theme_accent}.")
+        else:
+            self.theme_info_var.set(
+                f"База: "
+                f"{'светлая' if self._theme_base == 'light' else 'тёмная'}"
+                f"  ·  оттенок {self._theme_tint}"
+                f"  ·  акцент {self._theme_accent}")
         self._build_theme_options()
         if self._theme_image_path:
             width = info.get("width") or 0
@@ -3366,6 +3556,7 @@ class App:
         for holder in (self.theme_base_row, self.theme_tint_row,
                        self.theme_accent_row):
             self._clear_frame(holder)
+        frozen = bool(getattr(self, "_theme_image_only", False))
         for value, label in (("dark", "Тёмная"), ("light", "Светлая")):
             active = self._theme_base == value
             base, fg, hot = self._btn_colors(
@@ -3376,6 +3567,7 @@ class App:
                 padx=12, pady=4, cursor="hand2", bg=base, fg=fg,
                 activebackground=hot, activeforeground=fg,
                 highlightthickness=0, takefocus=False,
+                state="disabled" if frozen else "normal",
                 command=lambda v=value: self._theme_set_colors(base=v))
             btn.pack(side="left", padx=(0, 6))
         tints = list(THEME_TINTS)
@@ -3386,7 +3578,8 @@ class App:
             self._theme_swatch(
                 self.theme_tint_row, color,
                 color.lower() == str(self._theme_tint).lower(),
-                lambda c=color: self._theme_set_colors(tint=c))
+                lambda c=color: self._theme_set_colors(tint=c),
+                disabled=frozen)
         accents = list(ACCENT_PRESETS)
         if not any(color.lower() == str(self._theme_accent).lower()
                    for color, _label in accents):
@@ -3395,21 +3588,28 @@ class App:
             self._theme_swatch(
                 self.theme_accent_row, color,
                 color.lower() == str(self._theme_accent).lower(),
-                lambda c=color: self._theme_set_colors(accent=c))
+                lambda c=color: self._theme_set_colors(accent=c),
+                disabled=frozen)
 
-    def _theme_swatch(self, parent, color, selected, command):
+    def _theme_swatch(self, parent, color, selected, command,
+                      disabled=False):
         border = self.accent if selected else self.c["border"]
         holder = tk.Frame(parent, bg=border)
         holder.pack(side="left", padx=(0, 6), pady=1)
         btn = tk.Button(
             holder, bg=color, activebackground=shade(color, 1.15),
             width=2, height=1, bd=0, relief="flat", cursor="hand2",
-            highlightthickness=0, takefocus=False, command=command)
+            highlightthickness=0, takefocus=False, command=command,
+            state="disabled" if disabled else "normal")
         btn.pack(padx=2, pady=2)
 
     def _theme_set_colors(self, base=None, tint=None, accent=None):
         name = getattr(self, "_theme_active_set", None)
         if not name:
+            return
+        if getattr(self, "_theme_image_only", False):
+            self.theme_status_var.set(
+                "Сначала выключи «Только картинку», чтобы менять цвета.")
             return
         if base is not None:
             self._theme_base = base
@@ -3434,6 +3634,33 @@ class App:
         else:
             self.theme_status_var.set("Изменения сохранены.")
 
+    def _theme_toggle_image_only(self):
+        name = getattr(self, "_theme_active_set", None)
+        if not name:
+            return
+        wanted = bool(self.theme_image_only_var.get())
+        if wanted == getattr(self, "_theme_image_only", False):
+            return
+        result = update_theme_set(name, image_only=wanted)
+        if not result["ok"]:
+            self.theme_image_only_var.set(not wanted)
+            self.theme_status_var.set(result["error"]
+                                     or "Не удалось сохранить тему.")
+            return
+        applied = (self.theme_name == "custom"
+                   and self.custom_theme_name == name)
+        self._load_theme_editor(name)
+        if not self._theme_image_path:
+            self.theme_status_var.set(
+                "Режим включён, но картинки нет — интерфейс будет "
+                "нейтральным. Добавь картинку.")
+        elif applied:
+            self.theme_status_var.set(
+                "Сохранено — нажми «Применить тему», чтобы увидеть "
+                "изменения в лаунчере.")
+        else:
+            self.theme_status_var.set("Изменения сохранены.")
+
     def _theme_pick_image(self):
         name = getattr(self, "_theme_active_set", None)
         if not name:
@@ -3452,7 +3679,7 @@ class App:
         self._theme_preview_cache.clear()
         self._load_theme_editor(name)
         self.theme_status_var.set(
-            "Картинка добавлена — примени тему, чтобы увидеть баннер.")
+            "Картинка добавлена — примени тему, чтобы увидеть фон.")
         self.status_var.set("Картинка темы обновлена")
         self.log(f"Тема «{name}»: картинка {Path(path).name}")
 
@@ -3485,9 +3712,10 @@ class App:
         self.set_theme("custom", custom_name=name)
 
     def _theme_create_set(self):
-        base = "light" if self.c.get("base") == "light" else "dark"
-        tint = str(self.c.get("tint") or self.cfg.get("accent")
-                   or "#00c48c")
+        base = ("light" if (self.c.get("stored_base") or self.c.get("base"))
+                == "light" else "dark")
+        tint = str(self.c.get("stored_tint") or self.c.get("tint")
+                   or self.cfg.get("accent") or "#00c48c")
         result = create_theme_set(base=base, tint=tint, accent=tint)
         if not result["ok"]:
             messagebox.showerror(APP_NAME, result["error"],
@@ -3844,7 +4072,7 @@ class App:
         themes_row.pack(fill="x", pady=(8, 0))
         self._button(themes_row, "Свои темы и картинка",
                      lambda: self.show_page("themes"), side="left")
-        tk.Label(themes_row, text="цвета и баннер в разделе «Темы»",
+        tk.Label(themes_row, text="цвета и фон в разделе «Темы»",
                  bg=c["surface"], fg=c["muted"],
                  font=("Segoe UI", 8)).pack(side="left", padx=8)
 
@@ -4866,6 +5094,10 @@ class App:
 
     def set_accent(self, color):
         color = color.lower()
+        if self.theme_name == "custom" and self.c.get("image_only"):
+            self.status_var.set(
+                "В режиме «только картинка» цвета темы отключены.")
+            return
         self.accent = color
         self.cfg["accent"] = color
         if self.theme_name == "custom" and self.custom_theme_name:
@@ -4940,6 +5172,11 @@ class App:
         for w in self.accent_fgs:
             try:
                 w.configure(fg=color)
+            except tk.TclError:
+                pass
+        for canvas in list(self._header_canvases):
+            try:
+                self._schedule_header(canvas, delay=10)
             except tk.TclError:
                 pass
 
@@ -5307,6 +5544,42 @@ def run_selftest():
             if (load_theme_palette(name, sets_dir) or {}).get("image") is None:
                 failures.append("темы: палитра не отдала картинку")
 
+            frozen = update_theme_set(name, image_only=True,
+                                      sets_dir=sets_dir)
+            neutral = load_theme_palette(name, sets_dir) or {}
+            if not frozen["ok"] or not neutral.get("image_only"):
+                failures.append(f"темы: режим «только картинка» {frozen}")
+            if neutral.get("accent") != IMAGE_ONLY_ACCENT:
+                failures.append(
+                    f"темы: нейтральный акцент {neutral.get('accent')}")
+            if neutral.get("bg") != IMAGE_ONLY_PALETTE["bg"]:
+                failures.append(
+                    f"темы: нейтральный фон {neutral.get('bg')}")
+            if (neutral.get("stored_base") != "dark"
+                    or neutral.get("stored_tint") != "#00c48c"):
+                failures.append(
+                    "темы: сохранённые цвета потерялись "
+                    f"{neutral.get('stored_base')} {neutral.get('stored_tint')}")
+            if neutral.get("image") is None:
+                failures.append("темы: режим «только картинка» потерял фото")
+            update_theme_set(name, base="light", tint="#ff9f43",
+                             sets_dir=sets_dir)
+            neutral = load_theme_palette(name, sets_dir) or {}
+            if (neutral.get("stored_base") != "light"
+                    or neutral.get("stored_tint") != "#ff9f43"
+                    or neutral.get("accent") != IMAGE_ONLY_ACCENT):
+                failures.append(f"темы: цвета в режиме фото {neutral}")
+            restored = update_theme_set(name, image_only=False,
+                                        sets_dir=sets_dir)
+            palette = load_theme_palette(name, sets_dir) or {}
+            if not restored["ok"] or palette.get("image_only"):
+                failures.append(f"темы: выход из режима фото {restored}")
+            if (palette.get("base") != "light"
+                    or palette.get("tint") != "#ff9f43"):
+                failures.append(
+                    f"темы: цвета не вернулись {palette.get('base')} "
+                    f"{palette.get('tint')}")
+
             bad = root / "bad.txt"
             bad.write_text("not an image", encoding="utf-8")
             if set_theme_image(name, bad, sets_dir)["ok"]:
@@ -5601,6 +5874,88 @@ def run_selftest():
             failures.append("restore: окно осталось максимизированным")
         if f"{MIN_W}x{MIN_H}" not in root.geometry():
             failures.append(f"restore: геометрия {root.geometry()}")
+
+        # фото-фон, режим «только картинка» и вход через сайт
+        photo_theme = create_theme_set(
+            "Фото-тема", base="dark", tint="#00c48c", accent="#00c48c",
+            image=str(ICON_PNG) if ICON_PNG.exists() else None)
+        if not photo_theme["ok"]:
+            failures.append(f"UI: фото-тема не создана {photo_theme}")
+        else:
+            app.set_theme("custom", save=False,
+                          custom_name=photo_theme["name"])
+            app.show_page("themes")
+            app._refresh_backdrops()
+            root.update()
+            if app._backdrop_master is None:
+                failures.append("UI: фон-картинка не построена")
+            elif (app._backdrop_master.width(),
+                  app._backdrop_master.height()) != (
+                      root.winfo_width(), root.winfo_height()):
+                failures.append("UI: фон-картинка не на всё окно")
+            if len(app._header_canvases) != len(NAV_ITEMS):
+                failures.append(
+                    f"UI: шапок {len(app._header_canvases)}, "
+                    f"а разделов {len(NAV_ITEMS)}")
+            for canvas in app._header_canvases:
+                if "image" not in {canvas.type(item)
+                                   for item in canvas.find_all()}:
+                    failures.append("UI: шапка без фото-фона")
+            for key, _icon, _title in NAV_ITEMS:
+                data = app._page_views.get(key)
+                if data is None:
+                    failures.append(f"UI: нет вью для {key}")
+                    continue
+                if not data["pad"].itemcget(data["pad_photo"], "image"):
+                    failures.append(f"UI: фото не попало в {key}")
+            view = app._page_views["themes"]["view"]
+            before = view.coords(
+                app._page_views["themes"]["view_photo"])
+            view.yview_moveto(0.35)
+            root.update()
+            after = view.coords(app._page_views["themes"]["view_photo"])
+            if before == after:
+                failures.append("UI: фон не двигается за скроллом")
+
+            app._refresh_theme_panel(select=photo_theme["name"])
+            root.update()
+            app.theme_image_only_var.set(True)
+            app._theme_toggle_image_only()
+            root.update()
+            saved = theme_set_info(photo_theme["name"])
+            if not saved.get("image_only"):
+                failures.append("UI: «только картинка» не сохранилась")
+            app.set_theme("custom", save=False,
+                          custom_name=photo_theme["name"])
+            root.update()
+            if not app.c.get("image_only"):
+                failures.append("UI: «только картинка» не применилась")
+            if app.accent != IMAGE_ONLY_ACCENT:
+                failures.append(f"UI: акцент режима фото {app.accent}")
+
+            app._open_add_account_dialog()
+            root.update()
+            dialog = app._login_dialog
+            if dialog is None:
+                failures.append("UI: диалог входа не открылся")
+            else:
+                entries, buttons = [], []
+                stack = [dialog]
+                while stack:
+                    widget = stack.pop()
+                    stack.extend(widget.winfo_children())
+                    if widget.winfo_class() in ("TEntry", "Entry"):
+                        entries.append(widget)
+                    if widget.winfo_class() == "Button":
+                        buttons.append(str(widget.cget("text")))
+                if entries:
+                    failures.append("UI: в диалоге входа остались поля пароля")
+                if not any("сайт" in text.lower() for text in buttons):
+                    failures.append(f"UI: нет кнопки входа через сайт {buttons}")
+                app._close_login_dialog()
+            app.set_theme(original_theme, save=False)
+            root.update()
+            delete_theme_set(photo_theme["name"])
 
         root.withdraw()
         app._closing = True        # не пишем тестовую геометрию в конфиг
