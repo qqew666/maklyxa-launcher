@@ -3,16 +3,16 @@
 """
 MaklyxaLauncher — интерфейс лаунчера (Tkinter).
 
-UI v2 (полный реворк меню):
+UI v3 (полный редизайн):
   * своё окно без рамки: перетаскивание за шапку, ресайз за края,
     максимизация двойным кликом, кнопки свернуть/развернуть/закрыть;
-  * меню-вкладки сверху (вместо бокового сайдбара) с анимированной
-    акцентной полосой под активной вкладкой;
-  * заголовки страниц с бейджем-иконкой, карточки с разделителями;
-  * кнопки с плавной анимацией цвета при наведении;
-  * статусная строка в виде «пилюль», breadcrumb страницы в шапке,
-    быстрое переключение темы в правом верхнем углу;
-  * три темы оформления — тёмная, светлая, стекло.
+  * боковое меню с группами разделов, акцентной подсветкой активного
+    пункта и статусом Roblox внизу;
+  * новая нейтральная палитра трёх тем, верхняя панель с брендом,
+    версией и быстрым переключением темы;
+  * заголовки страниц-«героев», карточки с акцентной чертой,
+    кнопки с плавной анимацией цвета при наведении;
+  * компактная статусная строка и переработанный экран запуска игры.
 
 Ядро (логика) — в core.py.
 Запуск: python launcher.py [--page game|favorites|flags|cursors|settings|log]
@@ -60,11 +60,11 @@ from core import (
 
 ICON_PNG = BUNDLE_DIR / "icon.png"
 
-TITLEBAR_H = 42
-NAVBAR_H = 46
-MIN_W, MIN_H = 880, 600
+TITLEBAR_H = 48
+SIDEBAR_W = 216
+MIN_W, MIN_H = 960, 640
 BORDER_PX = 6
-DEFAULT_SIZE = (940, 660)
+DEFAULT_SIZE = (1080, 760)
 
 CURSORS = {
     "n": "sb_v_double_arrow", "s": "sb_v_double_arrow",
@@ -79,6 +79,12 @@ NAV_ITEMS = [
     ("cursors", "◈", "Курсоры"),
     ("settings", "⚙", "Настройки"),
     ("log", "≡", "Журнал"),
+]
+
+NAV_GROUPS = [
+    ("ЗАПУСК", ("game", "favorites")),
+    ("ТЮНИНГ", ("flags", "cursors")),
+    ("СИСТЕМА", ("settings", "log")),
 ]
 
 
@@ -267,6 +273,249 @@ class FramelessWindow:
                 pass
 
 
+class SidebarItem(tk.Frame):
+    """Пункт бокового меню: полоса, иконка, подпись и подсветка."""
+
+    def __init__(self, app, parent, key, icon, text):
+        self.app = app
+        self.key = key
+        self._active = False
+        self._hover = False
+        c = app.c
+        super().__init__(parent, bg=c["panel"], cursor="hand2")
+        self.bar = tk.Frame(self, width=3, bg=c["panel"])
+        self.bar.pack(side="left", fill="y")
+        self.icon = tk.Label(
+            self, text=icon, bg=c["panel"], fg=c["muted"], width=2,
+            font=("Segoe UI", 11), cursor="hand2", anchor="center")
+        self.icon.pack(side="left", padx=(11, 6), pady=10)
+        self.label = tk.Label(
+            self, text=text, bg=c["panel"], fg=c["muted"], anchor="w",
+            font=("Segoe UI", 10), cursor="hand2")
+        self.label.pack(side="left", fill="x", expand=True, pady=10)
+        for widget in (self, self.bar, self.icon, self.label):
+            widget.bind("<Button-1>", self._click)
+            widget.bind("<Enter>", self._enter)
+            widget.bind("<Leave>", self._leave)
+
+    def _click(self, _event=None):
+        self.app.show_page(self.key)
+
+    def _enter(self, _event=None):
+        if self.app._closing:
+            return
+        self._hover = True
+        self._paint()
+
+    def _leave(self, _event=None):
+        if self.app._closing:
+            return
+        self.after_idle(self._check_pointer)
+
+    def _check_pointer(self):
+        if self.app._closing:
+            return
+        try:
+            x, y = self.winfo_pointerxy()
+            widget = self.winfo_containing(x, y)
+        except tk.TclError:
+            widget = None
+        inside = False
+        while widget is not None:
+            if widget is self:
+                inside = True
+                break
+            widget = getattr(widget, "master", None)
+        self._hover = inside
+        self._paint()
+
+    def _paint(self):
+        c = self.app.c
+        if self._active:
+            bg = self.app._lerp_hex(c["panel"], self.app.accent, 0.16)
+            self.bar.configure(bg=self.app.accent)
+            self.icon.configure(bg=bg, fg=self.app.accent)
+            self.label.configure(bg=bg, fg=c["text"],
+                                 font=("Segoe UI", 10, "bold"))
+            self.configure(bg=bg)
+        else:
+            bg = c["hover"] if self._hover else c["panel"]
+            fg = c["text"] if self._hover else c["muted"]
+            self.bar.configure(bg=c["panel"])
+            self.icon.configure(bg=bg, fg=fg)
+            self.label.configure(bg=bg, fg=fg, font=("Segoe UI", 10))
+            self.configure(bg=bg)
+
+    def set_active(self, active):
+        self._active = bool(active)
+        self._hover = False
+        self._paint()
+
+    def apply_accent(self, _color):
+        if self._active:
+            self._paint()
+
+
+def _round_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
+    r = min(radius, (x2 - x1) / 2, (y2 - y1) / 2)
+    points = (
+        x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+        x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+        x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+    )
+    return canvas.create_polygon(points, smooth=True, splinesteps=10, **kwargs)
+
+
+class ThemedCheck(tk.Frame):
+    """Чекбокс в стиле лаунчера: скруглённый квадрат вместо ttk."""
+
+    def __init__(self, app, parent, text, variable, command=None, bg=None):
+        c = app.c
+        self.app = app
+        self.var = variable
+        self.command = command
+        self.bg = bg or c["surface"]
+        self._hover = False
+        super().__init__(parent, bg=self.bg, cursor="hand2")
+        self.box = tk.Canvas(self, width=19, height=19, bg=self.bg, bd=0,
+                             highlightthickness=0, cursor="hand2",
+                             takefocus=True)
+        self.box.pack(side="left", pady=1)
+        self.label = tk.Label(self, text=text, bg=self.bg, fg=c["text"],
+                              font=("Segoe UI", 10), anchor="w",
+                              cursor="hand2")
+        self.label.pack(side="left", padx=(9, 0))
+        for widget in (self, self.box, self.label):
+            widget.bind("<Button-1>", self._click)
+        self.box.bind("<Enter>", self._enter)
+        self.box.bind("<Leave>", self._leave)
+        self.box.bind("<space>", self._click)
+        self.box.bind("<Return>", self._click)
+        self.box.bind("<FocusIn>", lambda _e: self._draw())
+        self.box.bind("<FocusOut>", lambda _e: self._draw())
+        self.var.trace_add("write", lambda *_a: self._draw())
+        app._checks.append(self)
+        self._draw()
+
+    def _click(self, _event=None):
+        self.var.set(not bool(self.var.get()))
+        if self.command is not None:
+            self.command()
+        return "break"
+
+    def _enter(self, _event=None):
+        self._hover = True
+        self._draw()
+
+    def _leave(self, _event=None):
+        self._hover = False
+        self._draw()
+
+    def _draw(self):
+        app, c = self.app, self.app.c
+        checked = bool(self.var.get())
+        try:
+            self.box.delete("all")
+        except tk.TclError:
+            return
+        if checked:
+            fill = app.accent
+            border = app.accent if not self._hover else c["on_accent"]
+        else:
+            fill = c["surface2"] if self.bg == c["surface"] else self.bg
+            border = c["border"] if not self._hover else app.accent
+        _round_rect(self.box, 1.5, 1.5, 17.5, 17.5, 4,
+                    fill=fill, outline=border, width=1)
+        if checked:
+            self.box.create_line(5, 9.5, 8, 12.8, 14.5, 5.5,
+                                 fill=c["on_accent"], width=2,
+                                 capstyle="round", joinstyle="round")
+
+    def redraw(self):
+        self._draw()
+
+
+class ThinScrollbar(tk.Canvas):
+    """Тонкий скроллбар, полностью окрашенный под тему."""
+
+    def __init__(self, parent, command, trough, thumb, hover, width=8):
+        super().__init__(parent, width=width, height=1, bg=trough, bd=0,
+                         highlightthickness=0, cursor="arrow")
+        self._command = command
+        self._trough = trough
+        self._thumb = thumb
+        self._hover_color = hover
+        self._first, self._last = 0.0, 1.0
+        self._hover = False
+        self._drag_off = None
+        self.bind("<Configure>", lambda _e: self._draw())
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        self.bind("<Button-1>", self._press)
+        self.bind("<B1-Motion>", self._motion)
+        self.bind("<ButtonRelease-1>", self._release)
+
+    def set(self, first, last):
+        try:
+            self._first, self._last = float(first), float(last)
+        except (TypeError, ValueError):
+            return
+        self._draw()
+
+    def _enter(self, _event=None):
+        self._hover = True
+        self._draw()
+
+    def _leave(self, _event=None):
+        self._hover = False
+        self._draw()
+
+    def _draw(self):
+        try:
+            self.delete("all")
+            height = self.winfo_height()
+            width = self.winfo_width()
+        except tk.TclError:
+            return
+        if height <= 2 or self._last - self._first >= 0.999:
+            return
+        top = int(self._first * height)
+        bottom = int(self._last * height)
+        if bottom - top < 26:
+            middle = (top + bottom) // 2
+            top = max(2, min(middle - 13, height - 28))
+            bottom = top + 26
+        color = (self._hover_color if self._hover or self._drag_off is not None
+                 else self._thumb)
+        _round_rect(self, 1.5, top + 1.5, width - 1.5, bottom - 1.5, 3,
+                    fill=color, outline="")
+
+    def _press(self, event):
+        height = max(1, self.winfo_height())
+        top = self._first * height
+        bottom = self._last * height
+        if top <= event.y <= bottom:
+            self._drag_off = event.y - top
+        else:
+            half = max(4.0, (bottom - top) / 2)
+            self._drag_off = half
+            self._move_to((event.y - half) / height)
+        self._draw()
+
+    def _motion(self, event):
+        if self._drag_off is None:
+            return
+        self._move_to((event.y - self._drag_off) / max(1, self.winfo_height()))
+
+    def _move_to(self, fraction):
+        fraction = max(0.0, min(1.0, fraction))
+        self._command("moveto", str(fraction))
+
+    def _release(self, _event=None):
+        self._drag_off = None
+        self._draw()
+
+
 # ---- приложение ------------------------------------------------------------------
 
 
@@ -289,8 +538,7 @@ class App:
         self.primary_buttons = []
         self.accent_bgs = []          # виджеты с фоном акцентного цвета
         self.accent_fgs = []          # виджеты с текстом акцентного цвета
-        self._ind_pos = None          # позиция полосы навигации (x, w)
-        self._ind_anim_job = None
+        self._checks = []             # кастомные чекбоксы
         self._btn_anim_jobs = {}      # анимации наведения кнопок
         self.current_page = start_page or "game"
 
@@ -346,8 +594,7 @@ class App:
         self.primary_buttons.clear()
         self.accent_bgs.clear()
         self.accent_fgs.clear()
-        self._ind_pos = None
-        self._ind_anim_job = None
+        self._checks.clear()
         for job in self._btn_anim_jobs.values():
             try:
                 self.root.after_cancel(job)
@@ -421,26 +668,10 @@ class App:
                   bordercolor=[("focus", self.accent)],
                   lightcolor=[("focus", self.accent)],
                   darkcolor=[("focus", self.accent)])
-        style.configure("TCheckbutton", background=c["bg"],
-                        foreground=c["text"],
-                        indicatorbackground=c["surface2"], padding=(4, 4))
-        style.map("TCheckbutton",
-                  background=[("active", c["bg"])],
-                  foreground=[("active", c["text"])],
-                  indicatorbackground=[("selected", self.accent),
-                                       ("active", c["hover"])])
         style.configure("Card.TLabel", background=c["surface"],
                         foreground=c["text"])
         style.configure("CardMuted.TLabel", background=c["surface"],
                         foreground=c["muted"], font=("Segoe UI", 9))
-        style.configure("Card.TCheckbutton", background=c["surface"],
-                        foreground=c["text"],
-                        indicatorbackground=c["surface2"], padding=(3, 4))
-        style.map("Card.TCheckbutton",
-                  background=[("active", c["surface"])],
-                  foreground=[("active", c["text"])],
-                  indicatorbackground=[("selected", self.accent),
-                                       ("active", c["hover"])])
         style.configure("TButton", background=c["surface2"],
                         foreground=c["text"], borderwidth=1,
                         focusthickness=1, padding=(10, 6))
@@ -471,7 +702,7 @@ class App:
         # alpha сбрасывает exstyle — возвращаем пометку панели задач
         self.root.after_idle(self.frameless._on_map)
 
-        # шапка окна (та, за которую перетаскиваем)
+        # верхняя панель: бренд, версия, текущий раздел, тема и кнопки окна
         titlebar = tk.Frame(root, bg=c["titlebar"], height=TITLEBAR_H)
         titlebar.pack(fill="x")
         titlebar.pack_propagate(False)
@@ -482,17 +713,19 @@ class App:
                 img = img.subsample(12, 12)      # 256 → 21 px
                 self._title_icon = img
                 tk.Label(titlebar, image=img, bg=c["titlebar"],
-                         bd=0).pack(side="left", padx=(14, 8))
+                         bd=0).pack(side="left", padx=(16, 8))
             except tk.TclError:
                 pass
         tk.Label(titlebar, text=APP_NAME, bg=c["titlebar"], fg=c["text"],
                  font=("Segoe UI", 10, "bold")).pack(side="left")
+        tk.Label(titlebar, text=f"v{VERSION}", bg=c["surface2"],
+                 fg=c["muted"], font=("Segoe UI", 8, "bold"), padx=7,
+                 pady=2).pack(side="left", padx=(9, 0))
         self.title_crumb = tk.Label(
             titlebar, text="", bg=c["titlebar"], fg=c["muted"],
             font=("Segoe UI", 9))
-        self.title_crumb.pack(side="left", padx=(12, 0))
+        self.title_crumb.pack(side="left", padx=(14, 0))
 
-        # кнопки окна
         close_btn = self._window_button(
             titlebar, "✕", self.close, danger=True)
         max_btn = self._window_button(
@@ -500,159 +733,129 @@ class App:
         min_btn = self._window_button(
             titlebar, "─", self.frameless.minimize)
         self.max_button = max_btn
-        self.frameless.excluded = {min_btn, max_btn, close_btn}
         self.frameless.on_max_change = self._on_max_change
 
-        # панель вкладок вместо бокового сайдбара
-        navbar = tk.Frame(root, bg=c["panel"], height=NAVBAR_H)
-        navbar.pack(fill="x")
-        navbar.pack_propagate(False)
-        n_tabs = len(NAV_ITEMS)
-        navbar.grid_rowconfigure(0, weight=1)
-        navbar.grid_columnconfigure(n_tabs, weight=1)   # промежуток
-        for i, (key, icon, text) in enumerate(NAV_ITEMS):
-            btn = tk.Button(
-                navbar, text=f"{icon}   {text}", relief="flat", bd=0,
-                font=("Segoe UI", 11), cursor="hand2", takefocus=False,
-                bg=c["panel"], fg=c["muted"], activebackground=c["hover"],
-                activeforeground=c["text"], highlightthickness=0,
-                command=lambda k=key: self.show_page(k))
-            btn.grid(row=0, column=i, sticky="ns", padx=(4, 0))
-            btn.bind("<Enter>",
-                     lambda e, k=key, b=btn: self._nav_hover(b, k, True))
-            btn.bind("<Leave>",
-                     lambda e, k=key, b=btn: self._nav_hover(b, k, False))
-            self.nav_buttons[key] = btn
-
-        # правая часть панели: версия и смена темы
-        tk.Label(navbar, text=f"v{VERSION}", bg=c["panel"], fg=c["muted"],
-                 font=("Segoe UI", 9)).grid(
-            row=0, column=n_tabs + 1, padx=(0, 14))
         theme_lbl = THEMES[self.theme_name]["label"]
         self.theme_cycle_btn = tk.Button(
-            navbar, text=f"◐  {theme_lbl}", relief="flat", bd=0,
+            titlebar, text=f"◐  {theme_lbl}", relief="flat", bd=0,
             font=("Segoe UI", 9), cursor="hand2", takefocus=False,
             bg=c["surface2"], fg=c["text"], activebackground=c["hover"],
             activeforeground=c["text"], highlightthickness=0, padx=12,
             command=self._cycle_theme)
-        self.theme_cycle_btn.grid(row=0, column=n_tabs + 2,
-                                  sticky="ns", padx=(0, 12), pady=9)
+        self.theme_cycle_btn.pack(side="right", padx=(0, 12))
         self._bind_hover(self.theme_cycle_btn, "ghost")
         self.frameless.excluded = {min_btn, max_btn, close_btn,
                                    self.theme_cycle_btn}
 
-        # анимированная полоса активной вкладки
-        self.nav_indicator = tk.Frame(navbar, bg=self.accent, height=3)
-        self.nav_indicator.place(x=0, y=NAVBAR_H - 3, width=0, height=3)
-        self.accent_bgs.append(self.nav_indicator)
-        navbar.bind("<Configure>",
-                    lambda e: self._move_indicator(animate=False))
+        body = tk.Frame(root, bg=c["bg"])
+        body.pack(fill="both", expand=True)
 
-        # тонкий разделитель под панелью вкладок
-        tk.Frame(root, bg=c["border"], height=1).pack(fill="x")
+        sidebar = tk.Frame(body, bg=c["panel"], width=SIDEBAR_W)
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
+        tk.Frame(body, bg=c["border"], width=1).pack(side="left", fill="y")
 
-        # статусная строка (внизу): две «пилюли»
-        tk.Frame(root, bg=c["border"], height=1).pack(fill="x", side="bottom")
-        statusbar = tk.Frame(root, bg=c["bg"], height=34)
-        statusbar.pack(fill="x", side="bottom")
-        statusbar.pack_propagate(False)
+        main = tk.Frame(body, bg=c["bg"])
+        main.pack(side="left", fill="both", expand=True)
+
+        self._build_sidebar(sidebar)
 
         self.proto_var = tk.StringVar(value="Проверка Roblox…")
         self.status_var = tk.StringVar(value="Готово")
 
-        pill_l = tk.Frame(statusbar, bg=c["surface2"])
-        pill_l.pack(side="left", padx=(12, 0), pady=6)
-        self.status_dot = tk.Label(pill_l, text="●", bg=c["surface2"],
-                                   fg=self.accent, font=("Segoe UI", 8))
-        self.status_dot.pack(side="left", padx=(10, 0))
-        tk.Label(pill_l, textvariable=self.proto_var, bg=c["surface2"],
+        # нижняя статусная строка — внутри рабочей области
+        statusbar = tk.Frame(main, bg=c["panel"], height=34)
+        statusbar.pack(fill="x", side="bottom")
+        statusbar.pack_propagate(False)
+        self.status_dot = tk.Label(statusbar, text="●", bg=c["panel"],
+                                   fg=self.accent, font=("Segoe UI", 7))
+        self.status_dot.pack(side="left", padx=(18, 0))
+        tk.Label(statusbar, textvariable=self.proto_var, bg=c["panel"],
                  fg=c["muted"], font=("Segoe UI", 9)).pack(
-                     side="left", padx=(6, 10))
-
-        pill_r = tk.Frame(statusbar, bg=c["surface2"])
-        pill_r.pack(side="right", padx=(0, 12), pady=6)
-        tk.Label(pill_r, textvariable=self.status_var, bg=c["surface2"],
+                     side="left", padx=(7, 0))
+        tk.Label(statusbar, textvariable=self.status_var, bg=c["panel"],
                  fg=c["text"], font=("Segoe UI", 9)).pack(
-                     side="left", padx=(10, 10))
+                     side="right", padx=(0, 18))
+        tk.Frame(main, bg=c["border"], height=1).pack(
+            fill="x", side="bottom")
 
-        # тело: контент на всю ширину
-        content = tk.Frame(root, bg=c["bg"])
+        content = tk.Frame(main, bg=c["bg"])
         content.pack(fill="both", expand=True)
         content.grid_rowconfigure(0, weight=1)
         content.grid_columnconfigure(0, weight=1)
         self.content = content
 
-    def _nav_hover(self, btn, key, enter):
-        """Подсветка вкладки при наведении (активная не меняется)."""
-        if key == self.current_page:
-            return
+    def _build_sidebar(self, sidebar):
         c = self.c
-        try:
-            btn.configure(
-                bg=c["hover"] if enter else c["panel"],
-                fg=c["text"] if enter else c["muted"],
-                activeforeground=c["text"])
-        except tk.TclError:
-            pass
+        nav = tk.Frame(sidebar, bg=c["panel"])
+        nav.pack(fill="x", padx=12, pady=(18, 0))
+        items = {key: (icon, text) for key, icon, text in NAV_ITEMS}
+        for title, keys in NAV_GROUPS:
+            tk.Label(nav, text=title, bg=c["panel"], fg=c["muted"],
+                     font=("Segoe UI", 8, "bold"), anchor="w").pack(
+                         fill="x", padx=9, pady=(18 if title == "ЗАПУСК"
+                                               else 16, 6))
+            for key in keys:
+                icon, text = items[key]
+                item = SidebarItem(self, nav, key, icon, text)
+                item.pack(fill="x")
+                self.nav_buttons[key] = item
+
+        tk.Frame(sidebar, bg=c["panel"]).pack(fill="both", expand=True)
+
+        # статус Roblox внизу сайдбара
+        card = tk.Frame(sidebar, bg=c["border"])
+        card.pack(fill="x", padx=12, pady=(10, 0))
+        inner = tk.Frame(card, bg=c["surface"], padx=12, pady=10)
+        inner.pack(fill="x", padx=1, pady=1)
+        head = tk.Frame(inner, bg=c["surface"])
+        head.pack(fill="x")
+        self.sidebar_status_dot = tk.Label(
+            head, text="●", bg=c["surface"], fg=self.accent,
+            font=("Segoe UI", 7))
+        self.sidebar_status_dot.pack(side="left")
+        tk.Label(head, text="ROBLOX", bg=c["surface"], fg=c["muted"],
+                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=(6, 0))
+        self.sidebar_roblox_var = tk.StringVar()
+        tk.Label(inner, textvariable=self.sidebar_roblox_var,
+                 bg=c["surface"], fg=c["text"],
+                 font=("Segoe UI", 9, "bold"), anchor="w").pack(
+                     fill="x", pady=(4, 0))
+        self._refresh_sidebar_status()
+
+        tk.Label(sidebar, text=f"MaklyxaLauncher v{VERSION}",
+                 bg=c["panel"], fg=c["muted"], font=("Segoe UI", 8),
+                 anchor="w").pack(fill="x", padx=21, pady=(14, 2))
+        tk.Label(sidebar, text="официальный клиент Roblox",
+                 bg=c["panel"], fg=c["muted"], font=("Segoe UI", 8),
+                 anchor="w").pack(fill="x", padx=21, pady=(0, 16))
+
+    def _refresh_sidebar_status(self):
+        var = getattr(self, "sidebar_roblox_var", None)
+        if var is None:
+            return
+        kind = getattr(self, "roblox_kind", "missing")
+        text = {
+            "installed": "установлен",
+            "bootstrapper": "через бутстрапер",
+            "broken": "файл потерян",
+        }.get(kind, "не найден")
+        var.set(text)
+        dot = getattr(self, "sidebar_status_dot", None)
+        if dot is not None:
+            if kind in ("installed", "bootstrapper"):
+                color = self.accent
+            elif kind == "broken":
+                color = self._warn_fg()
+            else:
+                color = self.c["muted"]
+            dot.configure(fg=color)
 
     def _cycle_theme(self):
-        """Быстрая смена темы кнопкой в панели вкладок."""
+        """Быстрая смена темы в верхней панели."""
         idx = THEME_ORDER.index(self.theme_name) \
             if self.theme_name in THEME_ORDER else 0
         self.set_theme(THEME_ORDER[(idx + 1) % len(THEME_ORDER)])
-
-    def _move_indicator(self, animate=True):
-        """Полоса активной вкладки: плавный переезд или мгновенный."""
-        btn = self.nav_buttons.get(self.current_page)
-        ind = getattr(self, "nav_indicator", None)
-        if btn is None or ind is None:
-            return
-        try:
-            x, w = btn.winfo_x(), btn.winfo_width()
-        except tk.TclError:
-            return
-        if w <= 1:                      # вкладка ещё не отрисована
-            try:
-                self.root.after_idle(lambda: self._move_indicator(animate))
-            except (tk.TclError, RuntimeError):
-                pass
-            return
-        target = (x, w)
-        start = self._ind_pos
-        if not animate or start is None or start == target:
-            self._ind_pos = target
-            try:
-                ind.place(x=x, y=NAVBAR_H - 3, width=w, height=3)
-            except tk.TclError:
-                pass
-            return
-        if self._ind_anim_job is not None:
-            try:
-                self.root.after_cancel(self._ind_anim_job)
-            except tk.TclError:
-                pass
-        steps, delay = 7, 15
-
-        def tick(i=1):
-            try:
-                t = i / steps
-                ease = 1 - (1 - t) ** 2          # ease-out
-                cx = start[0] + (target[0] - start[0]) * ease
-                cw = start[1] + (target[1] - start[1]) * ease
-                if i >= steps:
-                    ind.place(x=target[0], y=NAVBAR_H - 3,
-                              width=target[1], height=3)
-                    self._ind_pos = target
-                    self._ind_anim_job = None
-                    return
-                ind.place(x=int(cx), y=NAVBAR_H - 3,
-                          width=max(2, int(cw)), height=3)
-                self._ind_anim_job = self.root.after(
-                    delay, lambda: tick(i + 1))
-            except (tk.TclError, RuntimeError):
-                self._ind_anim_job = None
-
-        self._ind_anim_job = self.root.after(delay, tick)
 
     def _window_button(self, parent, glyph, command, danger=False):
         c = self.c
@@ -689,7 +892,7 @@ class App:
 
     # -- страницы -----------------------------------------------------------------
 
-    def _scroll_page(self, key, padx=26, pady=20):
+    def _scroll_page(self, key, padx=28, pady=18):
         """Страница со скроллом; возвращает фрейм с учётом отступов."""
         c = self.c
         holder = tk.Frame(self.content, bg=c["bg"])
@@ -697,10 +900,7 @@ class App:
         self.pages[key] = holder
 
         canvas = tk.Canvas(holder, bg=c["bg"], highlightthickness=0, bd=0)
-        bar = tk.Scrollbar(holder, orient="vertical", command=canvas.yview,
-                           bg=c["surface2"], troughcolor=c["bg"],
-                           activebackground=c["hover"], highlightthickness=0,
-                           relief="flat", width=10, borderwidth=0)
+        bar = self._vscroll(holder, canvas.yview, c["bg"], width=8)
         canvas.configure(yscrollcommand=bar.set)
         canvas.pack(side="left", fill="both", expand=True)
         bar.pack(side="right", fill="y")
@@ -736,20 +936,8 @@ class App:
                 self.title_crumb.configure(text=f"›  {crumb}")
             except tk.TclError:
                 pass
-        # цвет и шрифт вкладок
-        for name, btn in self.nav_buttons.items():
-            if name == key:
-                btn.configure(fg=self.accent, font=("Segoe UI", 11, "bold"),
-                              activebackground=self.c["hover"],
-                              activeforeground=self.c["text"])
-            else:
-                btn.configure(fg=self.c["muted"],
-                              font=("Segoe UI", 11),
-                              activebackground=self.c["hover"],
-                              activeforeground=self.c["text"])
-        # полоса под активной вкладкой
-        if not self._closing:
-            self._move_indicator(animate=True)
+        for name, item in self.nav_buttons.items():
+            item.set_active(name == key)
 
     def _on_wheel(self, event):
         """Скролл страницы колесом; спискам и журналу даём скроллиться самим."""
@@ -771,69 +959,78 @@ class App:
 
     # -- хелперы виджетов -----------------------------------------------------------
 
-    def _glyph_badge(self, parent, glyph, size=22, font_size=11):
-        """Квадратный бейдж с иконкой-глифом (акцентный фон)."""
-        c = self.c
-        badge = tk.Frame(parent, width=size, height=size, bg=self.accent)
-        badge.pack_propagate(False)
-        lbl = tk.Label(badge, text=glyph, bg=self.accent,
-                       fg=c["on_accent"],
-                       font=("Segoe UI", font_size, "bold"))
-        lbl.pack(fill="both", expand=True)
-        badge.pack(side="left")
-        self.accent_bgs.append(badge)
-        return badge
-
     def _page_header(self, pad, glyph, title, subtitle=None):
-        """Заголовок страницы: бейдж-иконка + крупный текст + подпись."""
+        """Шапка страницы: бренд, крупный заголовок и иконка раздела."""
         c = self.c
         row = tk.Frame(pad, bg=c["bg"])
-        row.pack(fill="x", pady=(0, 16))
+        row.pack(fill="x", pady=(0, 14))
 
-        self._glyph_badge(row, glyph, size=40, font_size=17)
+        badge = tk.Frame(row, width=56, height=56, bg=c["surface2"],
+                         highlightthickness=1,
+                         highlightbackground=c["border"])
+        badge.pack(side="right", anchor="n")
+        badge.pack_propagate(False)
+        glyph_lbl = tk.Label(badge, text=glyph, bg=c["surface2"],
+                             fg=self.accent, font=("Segoe UI", 20, "bold"))
+        glyph_lbl.pack(fill="both", expand=True)
+        self.accent_fgs.append(glyph_lbl)
 
         col = tk.Frame(row, bg=c["bg"])
-        col.pack(side="left", fill="x", expand=True, padx=(14, 0))
+        col.pack(side="left", fill="x", expand=True, padx=(0, 18))
+        eyebrow = tk.Frame(col, bg=c["bg"])
+        eyebrow.pack(fill="x")
+        line = tk.Frame(eyebrow, bg=self.accent, width=18, height=2)
+        line.pack(side="left", pady=(5, 0))
+        self.accent_bgs.append(line)
+        eyebrow_lbl = tk.Label(
+            eyebrow, text="M A K L Y X A", bg=c["bg"], fg=self.accent,
+            font=("Segoe UI", 8, "bold"))
+        eyebrow_lbl.pack(side="left", padx=(8, 0))
+        self.accent_fgs.append(eyebrow_lbl)
         tk.Label(col, text=title, bg=c["bg"], fg=c["text"],
-                 font=("Segoe UI", 17, "bold"), anchor="w").pack(fill="x")
+                 font=("Segoe UI", 22, "bold"), anchor="w").pack(
+                     fill="x", pady=(6, 2))
         if subtitle:
             tk.Label(col, text=subtitle, bg=c["bg"], fg=c["muted"],
                      font=("Segoe UI", 10), anchor="w",
-                     justify="left", wraplength=720).pack(
-                         fill="x", pady=(2, 0))
+                     justify="left", wraplength=540).pack(fill="x")
         return row
 
     def _card(self, parent, title=None, subtitle=None, expand=False,
               glyph=None):
-        """Карточка: контейнер с фоном темы, бейджем заголовка и разделителем."""
+        """Карточка: акцентная черта заголовка, подпись и разделитель."""
         c = self.c
         outer = tk.Frame(parent, bg=c["border"])
         outer.pack(fill="both" if expand else "x", expand=expand,
-                   pady=(0, 14))
+                   pady=(0, 16))
         body = tk.Frame(outer, bg=c["surface"])
         body.pack(fill="both", expand=True, padx=1, pady=1)
-        inner = tk.Frame(body, bg=c["surface"], padx=16, pady=14)
+        inner = tk.Frame(body, bg=c["surface"], padx=20, pady=16)
         inner.pack(fill="both", expand=True)
         if title:
             head = tk.Frame(inner, bg=c["surface"])
             head.pack(fill="x")
+            bar = tk.Frame(head, bg=self.accent, width=3, height=16)
+            bar.pack(side="left", pady=2)
+            self.accent_bgs.append(bar)
+            offset = 10
             if glyph:
-                self._glyph_badge(head, glyph, size=24, font_size=11)
-                tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
-                         font=("Segoe UI", 11, "bold"),
-                         anchor="w").pack(side="left", padx=(10, 0))
-            else:
-                tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
-                         font=("Segoe UI", 11, "bold"),
-                         anchor="w").pack(side="left")
+                glyph_lbl = tk.Label(
+                    head, text=glyph, bg=c["surface"], fg=self.accent,
+                    font=("Segoe UI", 11, "bold"))
+                glyph_lbl.pack(side="left", padx=(10, 7))
+                self.accent_fgs.append(glyph_lbl)
+                offset = 0
+            tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
+                     font=("Segoe UI", 11, "bold"),
+                     anchor="w").pack(side="left", padx=(offset, 0))
             if subtitle:
                 tk.Label(inner, text=subtitle, bg=c["surface"],
                          fg=c["muted"], font=("Segoe UI", 9), anchor="w",
-                         justify="left", wraplength=640).pack(
-                             fill="x", pady=(4, 0))
-            # тонкий разделитель под шапкой карточки
+                         justify="left", wraplength=520).pack(
+                             fill="x", pady=(5, 0))
             tk.Frame(inner, bg=c["border"], height=1).pack(
-                fill="x", pady=(10, 0))
+                fill="x", pady=(12, 0))
         return inner
 
     def _btn_colors(self, kind):
@@ -846,7 +1043,8 @@ class App:
         else:
             base = self.c["surface2"]
             fg = self.c["text"]
-        return base, fg, shade(base, 1.14)
+        factor = 0.95 if self.theme_name == "light" else 1.14
+        return base, fg, shade(base, factor)
 
     def _bind_hover(self, btn, kind):
         """Плавный переход цвета кнопки при наведении (~100 мс)."""
@@ -919,28 +1117,43 @@ class App:
             self.primary_buttons.append(btn)
         return btn
 
-    def _hint(self, parent, text, bg=None):
+    def _hint(self, parent, text, bg=None, wrap=500):
         bg = bg or self.c["surface"]
         lbl = tk.Label(parent, text=text, bg=bg, fg=self.c["muted"],
                        font=("Segoe UI", 9), anchor="w", justify="left",
-                       wraplength=640)
+                       wraplength=wrap)
         lbl.pack(fill="x", pady=(6, 0))
         return lbl
+
+    def _checkbox(self, parent, text, variable, command=None):
+        return ThemedCheck(self, parent, text, variable, command=command)
+
+    def _warn_fg(self):
+        return "#b45309" if self.theme_name == "light" else "#ff9f43"
+
+    def _vscroll(self, parent, command, trough, width=8):
+        c = self.c
+        light = self.theme_name == "light"
+        thumb = self._lerp_hex(trough, c["text"], 0.13 if light else 0.20)
+        hover = self._lerp_hex(trough, c["text"], 0.24 if light else 0.36)
+        return ThinScrollbar(parent, command, trough, thumb, hover, width)
+
+    def _list_selection(self):
+        c = self.c
+        return (self._lerp_hex(c["list"], self.accent, 0.30), c["text"])
 
     def _make_listbox(self, parent, height=7):
         c = self.c
         holder = tk.Frame(parent, bg=c["surface"])
         holder.pack(fill="both", expand=True)
+        select_bg, select_fg = self._list_selection()
         box = tk.Listbox(
-            holder, bg=c["list"], fg=c["text"], selectbackground=self.accent,
-            selectforeground=c["on_accent"], activestyle="none", bd=0,
+            holder, bg=c["list"], fg=c["text"], selectbackground=select_bg,
+            selectforeground=select_fg, activestyle="none", bd=0,
             highlightthickness=1, highlightbackground=c["border"],
             highlightcolor=self.accent, font=("Segoe UI", 10),
             exportselection=False, height=height)
-        scroll = tk.Scrollbar(holder, orient="vertical", command=box.yview,
-                              bg=c["surface2"], troughcolor=c["list"],
-                              activebackground=c["hover"], relief="flat",
-                              highlightthickness=0, width=10, borderwidth=0)
+        scroll = self._vscroll(holder, box.yview, c["list"], width=7)
         box.configure(yscrollcommand=scroll.set)
         box.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
@@ -954,16 +1167,20 @@ class App:
 
         self._page_header(
             pad, "▶", "Запуск игры",
-            "Вставь ссылку на игру или введи Place ID — лаунчер откроет "
-            "официальный клиент Roblox")
+            "Вставь ссылку на игру или Place ID — лаунчер откроет "
+            "официальный клиент Roblox.")
 
-        # карточка выбранной игры
-        inner = self._card(pad, title="Куда запускать", glyph="⌖")
+        # большая карточка запуска
+        inner = self._card(pad)
+        tk.Label(inner, text="ВЫБРАННАЯ ИГРА", bg=c["surface"],
+                 fg=c["muted"], font=("Segoe UI", 8, "bold"),
+                 anchor="w").pack(fill="x")
+
         head = tk.Frame(inner, bg=c["surface"])
-        head.pack(fill="x")
+        head.pack(fill="x", pady=(9, 0))
 
         self.icon_box = tk.Frame(
-            head, bg=c["surface2"], width=86, height=86,
+            head, bg=c["surface2"], width=88, height=88,
             highlightthickness=1, highlightbackground=c["border"])
         self.icon_box.pack(side="left")
         self.icon_box.pack_propagate(False)
@@ -973,20 +1190,22 @@ class App:
         self.icon_img = None
 
         col = tk.Frame(head, bg=c["surface"])
-        col.pack(side="left", fill="both", expand=True, padx=(14, 0))
+        col.pack(side="left", fill="both", expand=True, padx=(16, 0))
         self.game_name_var = tk.StringVar(value="Игра не выбрана")
         self.info_var = tk.StringVar(
             value="Вставь ссылку на игру или введи Place ID")
         self.pid_var = tk.StringVar(value="")
         tk.Label(col, textvariable=self.game_name_var, bg=c["surface"],
-                 fg=c["text"], font=("Segoe UI", 13, "bold"),
-                 anchor="w").pack(fill="x")
+                 fg=c["text"], font=("Segoe UI", 16, "bold"), anchor="w",
+                 justify="left", wraplength=420).pack(fill="x")
         tk.Label(col, textvariable=self.info_var, bg=c["surface"],
-                 fg=c["muted"], font=("Segoe UI", 10), anchor="w",
-                 wraplength=520, justify="left").pack(fill="x", pady=(3, 4))
-        tk.Label(col, textvariable=self.pid_var, bg=c["surface"],
-                 fg=self.accent, font=("Segoe UI", 9),
-                 anchor="w").pack(fill="x")
+                 fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+                 wraplength=420, justify="left").pack(fill="x", pady=(4, 4))
+        pid_lbl = tk.Label(col, textvariable=self.pid_var, bg=c["surface"],
+                           fg=self.accent, font=("Segoe UI", 9, "bold"),
+                           anchor="w")
+        pid_lbl.pack(fill="x")
+        self.accent_fgs.append(pid_lbl)
 
         row = tk.Frame(inner, bg=c["surface"])
         row.pack(fill="x", pady=(14, 0))
@@ -998,12 +1217,11 @@ class App:
         self._button(row, "Вставить", self.paste_clipboard,
                      side="left", padx=(8, 0))
 
-        # PLAY
         self.btn_play = tk.Button(
-            pad, text="▶   P L A Y", relief="flat", bd=0, cursor="hand2",
-            font=("Segoe UI", 13, "bold"), pady=13, takefocus=True,
+            inner, text="▶   P L A Y", relief="flat", bd=0, cursor="hand2",
+            font=("Segoe UI", 13, "bold"), pady=12, takefocus=True,
             command=self.play, highlightthickness=0)
-        self.btn_play.pack(fill="x", pady=(4, 0))
+        self.btn_play.pack(fill="x", pady=(12, 0))
         self.primary_buttons.append(self.btn_play)
         base, fg, hot = self._btn_colors("primary")
         self.btn_play.configure(bg=base, fg=fg, activebackground=hot,
@@ -1011,37 +1229,36 @@ class App:
         self._bind_hover(self.btn_play, "primary")
 
         actions = tk.Frame(pad, bg=c["bg"])
-        actions.pack(fill="x", pady=(10, 4))
-        self._button(actions, "Страница в браузере", self.open_in_browser,
+        actions.pack(fill="x", pady=(8, 2))
+        self._button(actions, "Открыть в браузере", self.open_in_browser,
                      side="left")
         self._button(actions, "В избранное", self.add_favorite,
                      side="left", padx=8)
         self._button(actions, "Копировать ID", self.copy_id,
                      side="left")
 
-        # клиент Roblox
-        inner2 = self._card(pad, title="Клиент Roblox", glyph="◉")
-        row2 = tk.Frame(inner2, bg=c["surface"])
-        row2.pack(fill="x", pady=(12, 0))
-        self.btn_client = tk.Button(
-            row2, text="Запустить Roblox без игры", relief="flat", bd=0,
-            cursor="hand2", font=("Segoe UI", 10, "bold"), padx=16, pady=9,
-            takefocus=True, command=self.launch_client, highlightthickness=0)
-        self.btn_client.pack(side="left")
-        self.primary_buttons.append(self.btn_client)
-        base, fg, hot = self._btn_colors("primary")
-        self.btn_client.configure(bg=base, fg=fg, activebackground=hot,
-                                  activeforeground=fg)
-        self._bind_hover(self.btn_client, "primary")
-        tk.Label(row2, text="открывает сам клиент — дальше можно выбрать игру",
-                 bg=c["surface"], fg=c["muted"],
-                 font=("Segoe UI", 9)).pack(side="left", padx=12)
+        # клиент и недавние — в два столбца
+        bottom = tk.Frame(pad, bg=c["bg"])
+        bottom.pack(fill="x", pady=(2, 0))
 
-        # недавние
-        inner3 = self._card(pad, title="Недавние", glyph="◷")
-        self.recent_box, _ = self._make_listbox(inner3, height=6)
+        left = self._side_card(bottom, "Клиент Roblox", "left", glyph="◉")
+        tk.Label(left, text="Открыть клиент без игры — сервер и игру можно "
+                            "выбрать позже.",
+                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                 anchor="w", justify="left", wraplength=250).pack(
+                     fill="x", pady=(0, 10))
+        self.btn_client = self._button(
+            left, "Запустить Roblox без игры", self.launch_client,
+            kind="primary")
+        self.btn_client.pack_configure(fill="x")
+        self._hint(left, "Если клиент уже открыт, лаунчер выведет его "
+                         "окно на передний план.", wrap=270)
+
+        right = self._side_card(bottom, "Недавние", "right", glyph="◷")
+        self.recent_box, _ = self._make_listbox(right, height=4)
         self.recent_box.bind("<Double-Button-1>", self._recent_activate)
-        self._hint(inner3, "Enter — запустить, двойной клик по строке — тоже")
+        self._hint(right, "Enter или двойной клик — запустить игру.",
+                   wrap=270)
 
     # -- страница «Избранное» --------------------------------------------------------
 
@@ -1049,22 +1266,28 @@ class App:
         """Карточка в ряду карточек (side: left/right)."""
         c = self.c
         outer = tk.Frame(parent, bg=c["border"])
-        padx = (0, 7) if side == "left" else (7, 0)
+        padx = (0, 8) if side == "left" else (8, 0)
         outer.pack(side=side, fill="both", expand=True, padx=padx)
         body = tk.Frame(outer, bg=c["surface"])
         body.pack(fill="both", expand=True, padx=1, pady=1)
-        inner = tk.Frame(body, bg=c["surface"], padx=14, pady=12)
+        inner = tk.Frame(body, bg=c["surface"], padx=18, pady=14)
         inner.pack(fill="both", expand=True)
         head = tk.Frame(inner, bg=c["surface"])
-        head.pack(fill="x", pady=(0, 8))
+        head.pack(fill="x", pady=(0, 10))
+        bar = tk.Frame(head, bg=self.accent, width=3, height=14)
+        bar.pack(side="left", pady=2)
+        self.accent_bgs.append(bar)
+        offset = 10
         if glyph:
-            self._glyph_badge(head, glyph, size=22, font_size=10)
-            tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
-                     font=("Segoe UI", 11, "bold")).pack(
-                         side="left", padx=(9, 0))
-        else:
-            tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
-                     font=("Segoe UI", 11, "bold")).pack(side="left")
+            glyph_lbl = tk.Label(
+                head, text=glyph, bg=c["surface"], fg=self.accent,
+                font=("Segoe UI", 10, "bold"))
+            glyph_lbl.pack(side="left", padx=(10, 6))
+            self.accent_fgs.append(glyph_lbl)
+            offset = 0
+        tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
+                 font=("Segoe UI", 11, "bold")).pack(
+                     side="left", padx=(offset, 0))
         return inner
 
     def _build_page_favorites(self):
@@ -1138,7 +1361,7 @@ class App:
         _row(1, "Графический API", self.combo_api)
 
         self.api_hint = tk.Label(
-            gridf, text="", bg=c["surface"], fg="#ff9f43",
+            gridf, text="", bg=c["surface"], fg=self._warn_fg(),
             font=("Segoe UI", 9), anchor="w", justify="left",
             wraplength=480)
         self.api_hint.grid(row=2, column=0, columnspan=2, sticky="w",
@@ -1157,10 +1380,9 @@ class App:
 
         self.var_apply_flags = tk.BooleanVar(
             value=bool(self.cfg["apply_flags_on_launch"]))
-        ttk.Checkbutton(
-            gridf, text="Применять флаги перед каждым запуском",
-            style="Card.TCheckbutton", variable=self.var_apply_flags,
-            command=self._save_apply_flags_var).grid(
+        self._checkbox(
+            gridf, "Применять флаги перед каждым запуском",
+            self.var_apply_flags, command=self._save_apply_flags_var).grid(
             row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
         btn_row = tk.Frame(gridf, bg=c["surface"])
@@ -1187,7 +1409,7 @@ class App:
         self.boot_status = tk.StringVar(value="")
         tk.Label(inner2, textvariable=self.boot_status, bg=c["surface"],
                  fg=c["muted"], font=("Segoe UI", 9), anchor="w",
-                 wraplength=620, justify="left").pack(fill="x")
+                 wraplength=520, justify="left").pack(fill="x")
 
         self.boot_body = tk.Frame(inner2, bg=c["surface"])
 
@@ -1214,19 +1436,17 @@ class App:
         for key, label in BOOT_BOOLS_SHARED:
             var = tk.BooleanVar(value=False)
             self.boot_vars.append((key, var))
-            ttk.Checkbutton(col_left, text=label, style="Card.TCheckbutton",
-                            variable=var).pack(anchor="w", pady=1)
+            self._checkbox(col_left, label, var).pack(anchor="w", pady=2)
         for key, label in BOOT_BOOLS_FROST:
             var = tk.BooleanVar(value=False)
             self.boot_vars.append((key, var))
-            ttk.Checkbutton(self.col_right, text=label,
-                            style="Card.TCheckbutton",
-                            variable=var).pack(anchor="w", pady=1)
+            self._checkbox(self.col_right, label, var).pack(
+                anchor="w", pady=2)
         self.boot_cols.pack(fill="x", pady=(8, 0))
 
         self.boot_path = tk.Label(self.boot_body, text="", bg=c["surface"],
                                   fg=c["muted"], font=("Segoe UI", 9),
-                                  anchor="w", wraplength=620, justify="left")
+                                  anchor="w", wraplength=520, justify="left")
         self.boot_path.pack(fill="x", pady=(10, 0))
 
         btn_row2 = tk.Frame(self.boot_body, bg=c["surface"])
@@ -1239,7 +1459,7 @@ class App:
 
         self.boot_none = tk.Label(
             inner2, bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
-            justify="left", wraplength=620, anchor="w",
+            justify="left", wraplength=520, anchor="w",
             text=("Ни Froststrap, ни Bloxstrap не найдены — панель "
                   "недоступна. Быстрые флаги выше работают всегда."))
         self._load_boot_panel()
@@ -1402,16 +1622,23 @@ class App:
         body = tk.Frame(inner, bg=c["surface"])
         body.pack(fill="both", expand=True, pady=(12, 0))
 
-        left = tk.Frame(body, bg=c["surface"], width=186)
-        left.pack(side="left", fill="y", padx=(0, 14))
+        left = tk.Frame(body, bg=c["surface"], width=196)
+        left.pack(side="left", fill="y", padx=(0, 16))
         left.pack_propagate(False)
+        list_holder = tk.Frame(left, bg=c["surface"])
+        list_holder.pack(fill="both", expand=True)
+        select_bg, select_fg = self._list_selection()
         self.cursor_sets_box = tk.Listbox(
-            left, bg=c["list"], fg=c["text"],
-            selectbackground=self.accent, selectforeground=c["on_accent"],
+            list_holder, bg=c["list"], fg=c["text"],
+            selectbackground=select_bg, selectforeground=select_fg,
             activestyle="none", bd=0, highlightthickness=1,
             highlightbackground=c["border"], highlightcolor=self.accent,
-            font=("Segoe UI", 10), exportselection=False, height=9)
-        self.cursor_sets_box.pack(fill="both", expand=True)
+            font=("Segoe UI", 10), exportselection=False, height=10)
+        sets_scroll = self._vscroll(
+            list_holder, self.cursor_sets_box.yview, c["list"], width=7)
+        self.cursor_sets_box.configure(yscrollcommand=sets_scroll.set)
+        self.cursor_sets_box.pack(side="left", fill="both", expand=True)
+        sets_scroll.pack(side="right", fill="y")
         self.cursor_sets_box.bind("<<ListboxSelect>>",
                                   self._on_cursor_set_select)
         nav = tk.Frame(left, bg=c["surface"])
@@ -1435,16 +1662,8 @@ class App:
         self._button(rename_row, "Переименовать", self._cursor_rename_set,
                      side="left", padx=(8, 0))
 
-        slots = tk.Frame(right, bg=c["surface"])
-        slots.pack(fill="x", pady=(12, 0))
-        self.cursor_slot_widgets = {}
-        self._cursor_preview_images = {}
-        for index, slot in enumerate(CURSOR_SLOTS):
-            slots.columnconfigure(index, weight=1, uniform="cursor")
-            self._build_cursor_slot(slots, index, slot)
-
         actions = tk.Frame(right, bg=c["surface"])
-        actions.pack(fill="x", pady=(14, 0))
+        actions.pack(fill="x", pady=(10, 0))
         self._button(actions, "Применить набор", self.apply_cursors_now,
                      kind="primary", side="left")
         self._button(actions, "Вернуть исходные", self.restore_cursors_now,
@@ -1463,13 +1682,20 @@ class App:
         self._button(actions2, "Обновить", self.refresh_cursors,
                      side="left", padx=(8, 0))
 
+        slots = tk.Frame(right, bg=c["surface"])
+        slots.pack(fill="x", pady=(14, 0))
+        self.cursor_slot_widgets = {}
+        self._cursor_preview_images = {}
+        for index, slot in enumerate(CURSOR_SLOTS):
+            slots.columnconfigure(index % 2, weight=1, uniform="cursor")
+            self._build_cursor_slot(slots, index, slot)
+
         self.cursor_auto_var = tk.BooleanVar(
             value=bool(self.cfg.get("use_custom_cursors", True)))
-        ttk.Checkbutton(
-            right, text="Применять выбранный набор при запуске игры",
-            style="Card.TCheckbutton", variable=self.cursor_auto_var,
-            command=self._toggle_cursor_auto).pack(
-                anchor="w", pady=(12, 0))
+        self._checkbox(
+            right, "Применять выбранный набор при запуске игры",
+            self.cursor_auto_var, command=self._toggle_cursor_auto).pack(
+                anchor="w", pady=(8, 0))
 
         self.cursor_status_var = tk.StringVar(value="")
         tk.Label(right, textvariable=self.cursor_status_var,
@@ -1478,35 +1704,37 @@ class App:
                      fill="x", pady=(10, 2))
         self.cursor_warn_var = tk.StringVar(value="")
         tk.Label(right, textvariable=self.cursor_warn_var, bg=c["surface"],
-                 fg="#ff9f43", font=("Segoe UI", 9), anchor="w",
-                 justify="left", wraplength=560).pack(fill="x")
+                 fg=self._warn_fg(), font=("Segoe UI", 9), anchor="w",
+                 justify="left", wraplength=400).pack(fill="x")
 
         self._hint(
             right,
             "PNG с прозрачным фоном, лучше 64×64. Клик по превью заменяет "
             "файл слота. Импорт понимает ZIP-наборы Froststrap: "
             "MouseLockedCursor.png и папку Cursors\\KeyboardMouse. "
-            "Перед применением закрой Roblox.")
+            "Перед применением закрой Roblox.", wrap=420)
         self._refresh_cursor_panel(initial=True)
 
     def _build_cursor_slot(self, parent, index, slot):
         c = self.c
-        card = tk.Frame(parent, bg=c["surface2"], padx=7, pady=7)
-        card.grid(row=0, column=index, sticky="nsew",
-                  padx=(0 if index == 0 else 5, 0))
+        row, col = index // 2, index % 2
+        card = tk.Frame(parent, bg=c["surface2"], padx=8, pady=8)
+        card.grid(row=row, column=col, sticky="nsew",
+                  padx=(0, 5) if col == 0 else (5, 0),
+                  pady=(0, 10) if row == 0 else (0, 0))
 
         head = tk.Frame(card, bg=c["surface2"])
         head.pack(fill="x")
         tk.Label(head, text=slot["label"], bg=c["surface2"], fg=c["text"],
                  font=("Segoe UI", 9, "bold"), anchor="w",
-                 justify="left", wraplength=105).pack(
+                 justify="left", wraplength=150).pack(
                      side="left", fill="x", expand=True)
         remove = tk.Label(head, text="✕", bg=c["surface2"], fg=c["muted"],
                           font=("Segoe UI", 9, "bold"), cursor="hand2")
         remove.bind("<Button-1>",
                     lambda _e, k=slot["key"]: self._cursor_clear_slot(k))
 
-        preview = tk.Frame(card, bg=c["entry"], height=78, cursor="hand2")
+        preview = tk.Frame(card, bg=c["entry"], height=68, cursor="hand2")
         preview.pack(fill="x", pady=(6, 4))
         preview.pack_propagate(False)
         image_label = tk.Label(preview, bg=c["entry"], text="+",
@@ -2060,10 +2288,9 @@ class App:
             ("Открывать лаунчер с последней запущенной игрой",
              self.var_remember),
         ):
-            ttk.Checkbutton(inner, text=text, style="Card.TCheckbutton",
-                            variable=var,
-                            command=self._save_settings).pack(
-                anchor="w", pady=(3, 3))
+            self._checkbox(inner, text, var,
+                           command=self._save_settings).pack(
+                anchor="w", pady=(4, 4))
 
         # игра по умолчанию
         inner2 = self._card(pad, title="Игра по умолчанию",
@@ -2082,7 +2309,7 @@ class App:
         inner3 = self._card(pad, title="Roblox на этом ПК", glyph="◉")
         tk.Label(inner3, textvariable=self.proto_var, bg=c["surface"],
                  fg=c["text"], font=("Segoe UI", 11), anchor="w",
-                 wraplength=620, justify="left").pack(fill="x", pady=(6, 0))
+                 wraplength=520, justify="left").pack(fill="x", pady=(6, 0))
         row3 = tk.Frame(inner3, bg=c["surface"])
         row3.pack(fill="x", pady=(10, 0))
         self._button(row3, "Проверить снова", self.recheck, side="left")
@@ -2135,7 +2362,7 @@ class App:
         inner5 = self._card(pad, title="О программе", glyph="ⓘ")
         tk.Label(
             inner5, bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
-            justify="left", anchor="w", wraplength=640, text=(
+            justify="left", anchor="w", wraplength=540, text=(
                 "Лаунчер передаёт системе ссылку roblox:// — игру открывает "
                 "официальный клиент Roblox.\n"
                 "Код игры не изменяется: лаунчер только пишет конфиги и, "
@@ -2145,7 +2372,7 @@ class App:
             )).pack(fill="x")
         tk.Label(inner5, text=str(CONFIG_PATH), bg=c["surface"],
                  fg=c["muted"], font=("Segoe UI", 9), anchor="w",
-                 wraplength=640, justify="left").pack(fill="x", pady=(6, 0))
+                 wraplength=540, justify="left").pack(fill="x", pady=(6, 0))
         row4 = tk.Frame(inner5, bg=c["surface"])
         row4.pack(fill="x", pady=(10, 0))
         self._button(row4, "Открыть папку настроек", self.open_config_dir,
@@ -2177,13 +2404,9 @@ class App:
             holder, bg=c["list"], fg=c["text"], insertbackground=c["text"],
             bd=0, highlightthickness=1, highlightbackground=c["border"],
             highlightcolor=self.accent, font=("Consolas", 10),
-            state="disabled", wrap="word", height=22, spacing1=2, spacing3=2,
+            state="disabled", wrap="word", height=20, spacing1=2, spacing3=2,
             selectbackground=self.accent, selectforeground=c["on_accent"])
-        scroll = tk.Scrollbar(holder, orient="vertical",
-                              command=self.log_text.yview,
-                              bg=c["surface2"], troughcolor=c["list"],
-                              activebackground=c["hover"], relief="flat",
-                              highlightthickness=0, width=10, borderwidth=0)
+        scroll = self._vscroll(holder, self.log_text.yview, c["list"])
         self.log_text.configure(yscrollcommand=scroll.set)
         self.log_text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
@@ -2545,6 +2768,7 @@ class App:
         else:
             text = "Roblox: не найден"
         self.proto_var.set(text)
+        self._refresh_sidebar_status()
 
     def _startup_checks(self):
         if self._startup_started:
@@ -2955,7 +3179,6 @@ class App:
         self.log(f"Акцент интерфейса: {name} ({color})")
 
     def apply_accent(self, color):
-        old_accent = self.accent
         self.accent = color
         c = self.c
         style = self.style
@@ -2968,27 +3191,32 @@ class App:
                   lightcolor=[("focus", color)],
                   darkcolor=[("focus", color)])
         style.map("TCombobox", bordercolor=[("focus", color)])
-        style.map("TCheckbutton",
-                  indicatorbackground=[("selected", color),
-                                       ("active", c["hover"])])
-        style.map("Card.TCheckbutton",
-                  indicatorbackground=[("selected", color),
-                                       ("active", c["hover"])])
         style.configure("green.Horizontal.TProgressbar",
                         background=color, lightcolor=color, darkcolor=color)
 
+        select_bg, select_fg = self._list_selection()
         for box in (getattr(self, "recent_box", None),
                     getattr(self, "fav_box", None),
                     getattr(self, "hist_box", None),
-                    getattr(self, "log_text", None)):
+                    getattr(self, "cursor_sets_box", None)):
             if box is None:
                 continue
             try:
-                box.configure(selectbackground=color,
-                              selectforeground=c["on_accent"],
+                box.configure(selectbackground=select_bg,
+                              selectforeground=select_fg,
                               highlightcolor=color)
             except tk.TclError:
                 pass
+        log_text = getattr(self, "log_text", None)
+        if log_text is not None:
+            try:
+                log_text.configure(selectbackground=color,
+                                   selectforeground=c["on_accent"],
+                                   highlightcolor=color)
+            except tk.TclError:
+                pass
+        for check in getattr(self, "_checks", ()):
+            check.redraw()
 
         base, fg, hot = self._btn_colors("primary")
         for btn in self.primary_buttons:
@@ -2998,18 +3226,9 @@ class App:
             except tk.TclError:
                 pass
 
-        # вкладки: активная — акцентным цветом текста (фон не заливаем)
-        for name, btn in self.nav_buttons.items():
-            if name == self.current_page:
-                btn.configure(fg=color)
-            else:
-                try:
-                    if str(btn.cget("fg")) == old_accent:
-                        btn.configure(fg=c["muted"])
-                except tk.TclError:
-                    pass
+        for item in self.nav_buttons.values():
+            item.apply_accent(color)
 
-        # бейджи-иконки и полоса активной вкладки
         for w in self.accent_bgs:
             try:
                 w.configure(bg=color)
@@ -3027,6 +3246,7 @@ class App:
                 dot.configure(fg=color)
             except tk.TclError:
                 pass
+        self._refresh_sidebar_status()
         name_lbl = getattr(self, "accent_name_label", None)
         if name_lbl is not None:
             name = next((n for col, n in ACCENT_PRESETS if col == color),
@@ -3377,7 +3597,8 @@ def run_selftest():
             failures.append("set_theme(save=False) записал тему в конфиг")
 
         # безрамочное окно: панель задач и сворачивание
-        root.geometry("900x640+-32000+-32000")
+        test_geom = f"{MIN_W}x{MIN_H}+-32000+-32000"
+        root.geometry(test_geom)
         root.deiconify()
         root.update()
         hwnd = app.frameless._hwnd()
@@ -3399,12 +3620,12 @@ def run_selftest():
 
         # восстановление из «максимизированного»
         app.frameless.maximized = True
-        app.frameless._prev_geom = "900x640+-32000+-32000"
+        app.frameless._prev_geom = test_geom
         app.frameless.restore()
         root.update()
         if app.frameless.maximized:
             failures.append("restore: окно осталось максимизированным")
-        if "900x640" not in root.geometry():
+        if f"{MIN_W}x{MIN_H}" not in root.geometry():
             failures.append(f"restore: геометрия {root.geometry()}")
 
         root.withdraw()
