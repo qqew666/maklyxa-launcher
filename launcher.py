@@ -35,6 +35,7 @@ import webbrowser
 from pathlib import Path
 
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
 try:
@@ -45,7 +46,7 @@ except Exception:  # Pillow не обязателен для запуска
 
 from core import (
     ACCENT_PRESETS, APP_NAME, BOOT_BOOLS_FROST, BOOT_BOOLS_SHARED,
-    BUNDLE_DIR, CONFIG_DIR, CONFIG_PATH, CURSOR_SLOTS,
+    BUNDLE_DIR, CONFIG_DIR, CONFIG_PATH, CURSOR_SLOTS, CUSTOMIZE_DIR,
     DEFAULT_CONFIG, DEFAULT_THEME,
     DISCORD_PORTAL_URL, DISCOVER_URL, FPS_CHOICES, FLAG_API, FLAG_FPS, FLAG_QUALITY,
     GRAPHICS_MODES, HTTP_HEADERS, INSTALLER_URL,
@@ -64,20 +65,21 @@ from core import (
     export_cursor_set, export_theme_set, fetch_game_icon, fetch_game_info,
     fastflag_values, find_bootstrapper_settings, find_player_exe,
     focus_roblox_window, fmt_num, game_launch_url, hit_test, import_cursor_set,
-    import_launch_icon, import_launch_sound, import_theme_set, launch_game_as,
+    import_launch_icon, import_launch_sound, import_theme_set,
+    import_ui_font, inspect_ui_font, launch_game_as,
     launch_icon_state, launch_sound_path, list_cursor_sets, list_theme_sets,
-    load_config, load_theme_palette, mb, merge_flags_into,
+    load_config, load_private_font, load_theme_palette, mb, merge_flags_into,
     migrate_old_config, parse_place_id, png_info, player_pids,
     play_launch_sound, probe_protocol, protect_secret, read_json_dict,
     remove_account, remove_cursor_slot, remove_launch_icon,
-    remove_launch_sound, remove_theme_image, rename_cursor_set,
-    rename_theme_set, resize_geometry, restore_custom_cursors,
-    restore_launch_icon_shortcuts, roblox_status, save_config,
-    set_active_account, set_cursor_slot, set_theme_image, shade,
-    shortcut_backup_count, stop_launch_sound, theme_set_info, trunc,
-    unprotect_secret, update_theme_set, valid_cursor_set_name,
-    valid_discord_app_id, valid_geometry, valid_theme_set_name,
-    version_tuple, work_area,
+    remove_launch_sound, remove_theme_image, remove_ui_font,
+    rename_cursor_set, rename_theme_set, resize_geometry,
+    restore_custom_cursors, restore_launch_icon_shortcuts, roblox_status,
+    save_config, set_active_account, set_cursor_slot, set_theme_image,
+    shade, shortcut_backup_count, stop_launch_sound, theme_set_info, trunc,
+    ui_font_path, ui_font_state, unload_private_font, unprotect_secret,
+    update_theme_set, valid_cursor_set_name, valid_discord_app_id,
+    valid_geometry, valid_theme_set_name, version_tuple, work_area,
     write_json_dict, DiscordPresence, discord_activity, discord_frame,
 )
 
@@ -91,6 +93,42 @@ DEFAULT_SIZE = (1080, 760)
 HEADER_H = 126
 HEADER_H_COMPACT = 76
 THEME_PREVIEW_H = 148
+
+UI_FONT = "Segoe UI"
+
+
+def _resolve_tk_family(root, candidates):
+    """Найти в Tk первое из имён семейств (без учёта регистра)."""
+    try:
+        available = {str(name).casefold(): str(name)
+                     for name in tkfont.families(root)}
+    except tk.TclError:
+        return ""
+    for candidate in candidates:
+        name = str(candidate or "").strip().casefold()
+        if name and name in available:
+            return available[name]
+    return ""
+
+
+def _prepare_ui_font(root, cfg):
+    """Подключить сохранённый шрифт к процессу до сборки интерфейса."""
+    global UI_FONT
+    UI_FONT = "Segoe UI"
+    path = ui_font_path()
+    if path is None:
+        return None, ""
+    if not load_private_font(path):
+        return None, ""
+    state = ui_font_state()
+    family = _resolve_tk_family(
+        root, list(state["families"]) + [cfg.get("ui_font_family") or ""])
+    if not family:
+        unload_private_font(path)
+        return None, ""
+    UI_FONT = family
+    return path, family
+
 
 LAUNCH_STYLE_LABELS = {"off": "Выкл", "minimal": "Минимальный",
                        "card": "Карточка"}
@@ -113,7 +151,7 @@ NAV_ITEMS = [
     ("flags", "⚑", "Флаги"),
     ("cursors", "◈", "Курсоры"),
     ("themes", "◐", "Темы"),
-    ("launchstyle", "✦", "Стиль запуска"),
+    ("launchstyle", "✎", "Кастомизация"),
     ("settings", "⚙", "Настройки"),
     ("log", "≡", "Журнал"),
 ]
@@ -390,11 +428,11 @@ class SidebarItem(tk.Frame):
         self.bar.pack(side="left", fill="y")
         self.icon = tk.Label(
             self, text=icon, bg=c["panel"], fg=c["muted"], width=2,
-            font=("Segoe UI", 11), cursor="hand2", anchor="center")
+            font=(UI_FONT, 11), cursor="hand2", anchor="center")
         self.icon.pack(side="left", padx=(11, 6), pady=10)
         self.label = tk.Label(
             self, text=text, bg=c["panel"], fg=c["muted"], anchor="w",
-            font=("Segoe UI", 10), cursor="hand2")
+            font=(UI_FONT, 10), cursor="hand2")
         self.label.pack(side="left", fill="x", expand=True, pady=10)
         for widget in (self, self.bar, self.icon, self.label):
             widget.bind("<Button-1>", self._click)
@@ -439,14 +477,14 @@ class SidebarItem(tk.Frame):
             self.bar.configure(bg=self.app.accent)
             self.icon.configure(bg=bg, fg=self.app.accent)
             self.label.configure(bg=bg, fg=c["text"],
-                                 font=("Segoe UI", 10, "bold"))
+                                 font=(UI_FONT, 10, "bold"))
             self.configure(bg=bg)
         else:
             bg = c["hover"] if self._hover else c["panel"]
             fg = c["text"] if self._hover else c["muted"]
             self.bar.configure(bg=c["panel"])
             self.icon.configure(bg=bg, fg=fg)
-            self.label.configure(bg=bg, fg=fg, font=("Segoe UI", 10))
+            self.label.configure(bg=bg, fg=fg, font=(UI_FONT, 10))
             self.configure(bg=bg)
 
     def set_active(self, active):
@@ -485,7 +523,7 @@ class ThemedCheck(tk.Frame):
                              takefocus=True)
         self.box.pack(side="left", pady=1)
         self.label = tk.Label(self, text=text, bg=self.bg, fg=c["text"],
-                              font=("Segoe UI", 10), anchor="w",
+                              font=(UI_FONT, 10), anchor="w",
                               cursor="hand2")
         self.label.pack(side="left", padx=(9, 0))
         for widget in (self, self.box, self.label):
@@ -661,7 +699,7 @@ class LaunchSplash:
         icon_box.pack_propagate(False)
         icon_lbl = tk.Label(icon_box, text="▶", bg=c["surface2"],
                             fg=app.accent,
-                            font=("Segoe UI", 18 if card else 12, "bold"))
+                            font=(UI_FONT, 18 if card else 12, "bold"))
         icon_lbl.pack(fill="both", expand=True)
         photo = app._splash_icon_photo(size - 8)
         if photo is not None:
@@ -672,23 +710,23 @@ class LaunchSplash:
                   padx=(14 if card else 10, 0))
         brand = tk.Label(text, text="MAKLYXA LAUNCHER", bg=c["surface"],
                          fg=app.accent,
-                         font=("Segoe UI", 7, "bold"))
+                         font=(UI_FONT, 7, "bold"))
         if card:
             brand.pack(anchor="w")
         title_lbl = tk.Label(
             text, text=trunc(title or "Roblox", 52 if card else 40),
             bg=c["surface"], fg=c["text"],
-            font=("Segoe UI", 14 if card else 11, "bold"),
+            font=(UI_FONT, 14 if card else 11, "bold"),
             anchor="w", justify="left",
             wraplength=310 if card else 250)
         title_lbl.pack(anchor="w", pady=(2, 0))
         self.status_lbl = tk.Label(
             text, text=self.subtitle, bg=c["surface"], fg=c["muted"],
-            font=("Segoe UI", 9), anchor="w", justify="left",
+            font=(UI_FONT, 9), anchor="w", justify="left",
             wraplength=310 if card else 250)
         self.status_lbl.pack(anchor="w", pady=(4 if card else 1, 0))
         close_lbl = tk.Label(text, text="клик — скрыть", bg=c["surface"],
-                             fg=c["muted"], font=("Segoe UI", 7),
+                             fg=c["muted"], font=(UI_FONT, 7),
                              anchor="w")
         if card:
             close_lbl.pack(anchor="w", pady=(5, 0))
@@ -765,6 +803,10 @@ class App:
                 self.cfg["theme"] = DEFAULT_THEME
         self.accent = (self.c.get("accent") if self.theme_name == "custom"
                        else self.cfg["accent"])
+        self._loaded_font_path = None
+        self._ui_font_family = ""
+        self._loaded_font_path, self._ui_font_family = _prepare_ui_font(
+            self.root, self.cfg)
 
         self.q = queue.Queue()
         self.info_cache = {}
@@ -815,6 +857,8 @@ class App:
         self._login_busy = False
         self.launch_icon_status_var = tk.StringVar(value="")
         self.launch_sound_status_var = tk.StringVar(value="")
+        self.error_sound_status_var = tk.StringVar(value="")
+        self.ui_font_status_var = tk.StringVar(value="")
         self.launch_shortcut_status_var = tk.StringVar(value="")
         self.launch_style_note_var = tk.StringVar(value="")
         self._launch_icon_photo_ref = None
@@ -962,7 +1006,7 @@ class App:
         style.configure(".", background=c["bg"], foreground=c["text"],
                         fieldbackground=c["entry"], troughcolor=c["bg"],
                         bordercolor=c["border"], lightcolor=c["border"],
-                        darkcolor=c["border"], font=("Segoe UI", 10))
+                        darkcolor=c["border"], font=(UI_FONT, 10))
         style.configure("TFrame", background=c["bg"])
         style.configure("TLabel", background=c["bg"], foreground=c["text"])
         style.configure("TCombobox", fieldbackground=c["entry"],
@@ -983,7 +1027,7 @@ class App:
         style.configure("Card.TLabel", background=c["surface"],
                         foreground=c["text"])
         style.configure("CardMuted.TLabel", background=c["surface"],
-                        foreground=c["muted"], font=("Segoe UI", 9))
+                        foreground=c["muted"], font=(UI_FONT, 9))
         style.configure("TButton", background=c["surface2"],
                         foreground=c["text"], borderwidth=1,
                         focusthickness=1, padding=(10, 6))
@@ -994,7 +1038,7 @@ class App:
         style.configure("Primary.TButton", background=self.accent,
                         foreground=c["on_accent"], borderwidth=0,
                         focusthickness=0, padding=(16, 8),
-                        font=("Segoe UI", 10, "bold"))
+                        font=(UI_FONT, 10, "bold"))
         style.map("Primary.TButton",
                   background=[("active", shade(self.accent, 1.12)),
                               ("pressed", shade(self.accent, 0.85))])
@@ -1029,13 +1073,13 @@ class App:
             except tk.TclError:
                 pass
         tk.Label(titlebar, text=APP_NAME, bg=c["titlebar"], fg=c["text"],
-                 font=("Segoe UI", 10, "bold")).pack(side="left")
+                 font=(UI_FONT, 10, "bold")).pack(side="left")
         tk.Label(titlebar, text=f"v{VERSION}", bg=c["surface2"],
-                 fg=c["muted"], font=("Segoe UI", 8, "bold"), padx=7,
+                 fg=c["muted"], font=(UI_FONT, 8, "bold"), padx=7,
                  pady=2).pack(side="left", padx=(9, 0))
         self.title_crumb = tk.Label(
             titlebar, text="", bg=c["titlebar"], fg=c["muted"],
-            font=("Segoe UI", 9))
+            font=(UI_FONT, 9))
         self.title_crumb.pack(side="left", padx=(14, 0))
 
         close_btn = self._window_button(
@@ -1050,7 +1094,7 @@ class App:
         theme_lbl = self.c["label"]
         self.theme_cycle_btn = tk.Button(
             titlebar, text=f"◐  {theme_lbl}", relief="flat", bd=0,
-            font=("Segoe UI", 9), cursor="hand2", takefocus=False,
+            font=(UI_FONT, 9), cursor="hand2", takefocus=False,
             bg=c["surface2"], fg=c["text"], activebackground=c["hover"],
             activeforeground=c["text"], highlightthickness=0, padx=12,
             command=self._cycle_theme)
@@ -1059,13 +1103,13 @@ class App:
 
         self.account_switch_btn = tk.Menubutton(
             titlebar, text="◉  Войти", relief="flat", bd=0,
-            font=("Segoe UI", 9), cursor="hand2", takefocus=False,
+            font=(UI_FONT, 9), cursor="hand2", takefocus=False,
             bg=c["surface2"], fg=c["text"], activebackground=c["hover"],
             activeforeground=c["text"], highlightthickness=0, padx=12)
         self.account_menu = tk.Menu(
             self.account_switch_btn, tearoff=0, bg=c["surface"],
             fg=c["text"], activebackground=self.accent,
-            activeforeground=c["on_accent"], bd=0, font=("Segoe UI", 9))
+            activeforeground=c["on_accent"], bd=0, font=(UI_FONT, 9))
         self.account_switch_btn.configure(menu=self.account_menu)
         self.account_switch_btn.pack(side="right", padx=(0, 8))
         self.frameless.excluded = {min_btn, max_btn, close_btn,
@@ -1093,13 +1137,13 @@ class App:
         statusbar.pack(fill="x", side="bottom")
         statusbar.pack_propagate(False)
         self.status_dot = tk.Label(statusbar, text="●", bg=c["panel"],
-                                   fg=self.accent, font=("Segoe UI", 7))
+                                   fg=self.accent, font=(UI_FONT, 7))
         self.status_dot.pack(side="left", padx=(18, 0))
         tk.Label(statusbar, textvariable=self.proto_var, bg=c["panel"],
-                 fg=c["muted"], font=("Segoe UI", 9)).pack(
+                 fg=c["muted"], font=(UI_FONT, 9)).pack(
                      side="left", padx=(7, 0))
         tk.Label(statusbar, textvariable=self.status_var, bg=c["panel"],
-                 fg=c["text"], font=("Segoe UI", 9)).pack(
+                 fg=c["text"], font=(UI_FONT, 9)).pack(
                      side="right", padx=(0, 18))
         tk.Frame(main, bg=c["border"], height=1).pack(
             fill="x", side="bottom")
@@ -1120,7 +1164,7 @@ class App:
         items = {key: (icon, text) for key, icon, text in NAV_ITEMS}
         for title, keys in NAV_GROUPS:
             tk.Label(nav, text=title, bg=c["panel"], fg=c["muted"],
-                     font=("Segoe UI", 8, "bold"), anchor="w",
+                     font=(UI_FONT, 8, "bold"), anchor="w",
                      justify="left").pack(
                          fill="x", padx=9, pady=(18 if title == "ЗАПУСК"
                                                else 16, 6))
@@ -1141,21 +1185,21 @@ class App:
         acc_head = tk.Frame(acc_inner, bg=c["surface"], cursor="hand2")
         acc_head.pack(fill="x")
         acc_dot = tk.Label(acc_head, text="●", bg=c["surface"],
-                           fg=self.accent, font=("Segoe UI", 7),
+                           fg=self.accent, font=(UI_FONT, 7),
                            cursor="hand2")
         acc_dot.pack(side="left")
         tk.Label(acc_head, text="АККАУНТ", bg=c["surface"], fg=c["muted"],
-                 font=("Segoe UI", 8, "bold"), cursor="hand2").pack(
+                 font=(UI_FONT, 8, "bold"), cursor="hand2").pack(
                      side="left", padx=(6, 0))
         self.sidebar_account_dot = acc_dot
         acc_name = tk.Label(acc_inner, textvariable=self.account_name_var,
                             bg=c["surface"], fg=c["text"],
-                            font=("Segoe UI", 9, "bold"), anchor="w",
+                            font=(UI_FONT, 9, "bold"), anchor="w",
                             cursor="hand2")
         acc_name.pack(fill="x", pady=(4, 0))
         acc_user = tk.Label(acc_inner, textvariable=self.account_user_var,
                             bg=c["surface"], fg=c["muted"],
-                            font=("Segoe UI", 8), anchor="w",
+                            font=(UI_FONT, 8), anchor="w",
                             cursor="hand2")
         acc_user.pack(fill="x")
         for widget in (acc_card, acc_inner, acc_head, acc_dot, acc_name,
@@ -1172,22 +1216,22 @@ class App:
         head.pack(fill="x")
         self.sidebar_status_dot = tk.Label(
             head, text="●", bg=c["surface"], fg=self.accent,
-            font=("Segoe UI", 7))
+            font=(UI_FONT, 7))
         self.sidebar_status_dot.pack(side="left")
         tk.Label(head, text="ROBLOX", bg=c["surface"], fg=c["muted"],
-                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=(6, 0))
+                 font=(UI_FONT, 8, "bold")).pack(side="left", padx=(6, 0))
         self.sidebar_roblox_var = tk.StringVar()
         tk.Label(inner, textvariable=self.sidebar_roblox_var,
                  bg=c["surface"], fg=c["text"],
-                 font=("Segoe UI", 9, "bold"), anchor="w").pack(
+                 font=(UI_FONT, 9, "bold"), anchor="w").pack(
                      fill="x", pady=(4, 0))
         self._refresh_sidebar_status()
 
         tk.Label(sidebar, text=f"MaklyxaLauncher v{VERSION}",
-                 bg=c["panel"], fg=c["muted"], font=("Segoe UI", 8),
+                 bg=c["panel"], fg=c["muted"], font=(UI_FONT, 8),
                  anchor="w").pack(fill="x", padx=21, pady=(14, 2))
         tk.Label(sidebar, text="официальный клиент Roblox",
-                 bg=c["panel"], fg=c["muted"], font=("Segoe UI", 8),
+                 bg=c["panel"], fg=c["muted"], font=(UI_FONT, 8),
                  anchor="w").pack(fill="x", padx=21, pady=(0, 16))
 
     def _refresh_sidebar_status(self):
@@ -1503,21 +1547,21 @@ class App:
         if compact:
             canvas.create_rectangle(0, 10, 16, 12, fill=accent, outline="")
             canvas.create_text(24, 4, text="M A K L Y X A", anchor="nw",
-                               fill=accent, font=("Segoe UI", 8, "bold"))
+                               fill=accent, font=(UI_FONT, 8, "bold"))
             canvas.create_text(0, 24, text=title, anchor="nw", fill=c["text"],
-                               font=("Segoe UI", 19, "bold"))
+                               font=(UI_FONT, 19, "bold"))
             badge = 44
         else:
             canvas.create_rectangle(0, 18, 18, 20, fill=accent, outline="")
             canvas.create_text(26, 11, text="M A K L Y X A", anchor="nw",
-                               fill=accent, font=("Segoe UI", 8, "bold"))
+                               fill=accent, font=(UI_FONT, 8, "bold"))
             canvas.create_text(0, 30, text=title, anchor="nw", fill=c["text"],
-                               font=("Segoe UI", 22, "bold"))
+                               font=(UI_FONT, 22, "bold"))
             badge = 56
             if subtitle:
                 canvas.create_text(
                     0, 72, text=subtitle, anchor="nw", fill=c["muted"],
-                    font=("Segoe UI", 10), width=max(220, width - 130),
+                    font=(UI_FONT, 10), width=max(220, width - 130),
                     justify="left")
         by1 = 8
         bx2 = width - 8
@@ -1525,7 +1569,7 @@ class App:
                     fill=c["surface2"], outline=c["border"], width=1)
         canvas.create_text(bx2 - badge // 2, by1 + badge // 2, text=glyph,
                            fill=accent,
-                           font=("Segoe UI", 16 if compact else 20, "bold"))
+                           font=(UI_FONT, 16 if compact else 20, "bold"))
 
     def _window_button(self, parent, glyph, command, danger=False):
         c = self.c
@@ -1533,7 +1577,7 @@ class App:
         btn = tk.Button(
             parent, text=glyph, relief="flat", bd=0, takefocus=False,
             bg=base, fg=c["text"], activebackground=base,
-            activeforeground=c["text"], font=("Segoe UI", 11),
+            activeforeground=c["text"], font=(UI_FONT, 11),
             cursor="hand2", highlightthickness=0, width=6,
             command=command)
         btn.pack(side="right", fill="y")
@@ -1687,16 +1731,16 @@ class App:
             if glyph:
                 glyph_lbl = tk.Label(
                     head, text=glyph, bg=c["surface"], fg=self.accent,
-                    font=("Segoe UI", 11, "bold"))
+                    font=(UI_FONT, 11, "bold"))
                 glyph_lbl.pack(side="left", padx=(10, 7))
                 self.accent_fgs.append(glyph_lbl)
                 offset = 0
             tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
-                     font=("Segoe UI", 11, "bold"),
+                     font=(UI_FONT, 11, "bold"),
                      anchor="w").pack(side="left", padx=(offset, 0))
             if subtitle:
                 tk.Label(inner, text=subtitle, bg=c["surface"],
-                         fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+                         fg=c["muted"], font=(UI_FONT, 9), anchor="w",
                          justify="left", wraplength=520).pack(
                              fill="x", pady=(5, 0))
             tk.Frame(inner, bg=c["border"], height=1).pack(
@@ -1774,7 +1818,7 @@ class App:
         base, fg, hot = self._btn_colors(kind)
         btn = tk.Button(
             parent, text=text, command=command, relief="flat", bd=0,
-            font=("Segoe UI", 10, "bold" if kind == "primary" else "normal"),
+            font=(UI_FONT, 10, "bold" if kind == "primary" else "normal"),
             padx=14, pady=7, cursor="hand2", bg=base, fg=fg,
             activebackground=hot, activeforeground=fg, takefocus=True,
             highlightthickness=0, **kw)
@@ -1790,7 +1834,7 @@ class App:
     def _hint(self, parent, text, bg=None, wrap=500):
         bg = bg or self.c["surface"]
         lbl = tk.Label(parent, text=text, bg=bg, fg=self.c["muted"],
-                       font=("Segoe UI", 9), anchor="w", justify="left",
+                       font=(UI_FONT, 9), anchor="w", justify="left",
                        wraplength=wrap)
         lbl.pack(fill="x", pady=(6, 0))
         return lbl
@@ -1822,7 +1866,7 @@ class App:
             holder, bg=c["list"], fg=c["text"], selectbackground=select_bg,
             selectforeground=select_fg, activestyle="none", bd=0,
             highlightthickness=1, highlightbackground=c["border"],
-            highlightcolor=self.accent, font=("Segoe UI", 10),
+            highlightcolor=self.accent, font=(UI_FONT, 10),
             exportselection=False, height=height)
         scroll = self._vscroll(holder, box.yview, c["list"], width=7)
         box.configure(yscrollcommand=scroll.set)
@@ -1848,12 +1892,12 @@ class App:
         left = self._side_card(top, "Клиент Roblox", "left", glyph="◉")
         tk.Label(left, text="Открыть клиент без игры — игру можно выбрать "
                             "позже.",
-                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                 bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
                  anchor="w", justify="left", wraplength=320).pack(
                      fill="x", pady=(0, 10))
         self.btn_client = tk.Button(
             left, text="▶   ПРОСТО В ROBLOX", relief="flat", bd=0,
-            cursor="hand2", font=("Segoe UI", 12, "bold"), pady=12,
+            cursor="hand2", font=(UI_FONT, 12, "bold"), pady=12,
             takefocus=True, command=self.launch_client,
             highlightthickness=0)
         self.btn_client.pack(fill="x")
@@ -1874,7 +1918,7 @@ class App:
         # запуск игры по ссылке или Place ID
         inner = self._card(pad)
         tk.Label(inner, text="ВЫБРАННАЯ ИГРА", bg=c["surface"],
-                 fg=c["muted"], font=("Segoe UI", 8, "bold"),
+                 fg=c["muted"], font=(UI_FONT, 8, "bold"),
                  anchor="w").pack(fill="x")
 
         head = tk.Frame(inner, bg=c["surface"])
@@ -1886,7 +1930,7 @@ class App:
         self.icon_box.pack(side="left")
         self.icon_box.pack_propagate(False)
         self.icon_lbl = tk.Label(self.icon_box, text="▶", bg=c["surface2"],
-                                 fg=c["muted"], font=("Segoe UI", 24))
+                                 fg=c["muted"], font=(UI_FONT, 24))
         self.icon_lbl.pack(fill="both", expand=True)
         self.icon_img = None
 
@@ -1897,13 +1941,13 @@ class App:
             value="Вставь ссылку на игру или введи Place ID")
         self.pid_var = tk.StringVar(value="")
         tk.Label(col, textvariable=self.game_name_var, bg=c["surface"],
-                 fg=c["text"], font=("Segoe UI", 16, "bold"), anchor="w",
+                 fg=c["text"], font=(UI_FONT, 16, "bold"), anchor="w",
                  justify="left", wraplength=420).pack(fill="x")
         tk.Label(col, textvariable=self.info_var, bg=c["surface"],
-                 fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+                 fg=c["muted"], font=(UI_FONT, 9), anchor="w",
                  wraplength=420, justify="left").pack(fill="x", pady=(4, 4))
         pid_lbl = tk.Label(col, textvariable=self.pid_var, bg=c["surface"],
-                           fg=self.accent, font=("Segoe UI", 9, "bold"),
+                           fg=self.accent, font=(UI_FONT, 9, "bold"),
                            anchor="w")
         pid_lbl.pack(fill="x")
         self.accent_fgs.append(pid_lbl)
@@ -1921,23 +1965,23 @@ class App:
         acc_strip = tk.Frame(inner, bg=c["surface2"], padx=11, pady=8)
         acc_strip.pack(fill="x", pady=(12, 0))
         acc_glyph = tk.Label(acc_strip, text="◉", bg=c["surface2"],
-                             fg=self.accent, font=("Segoe UI", 12, "bold"))
+                             fg=self.accent, font=(UI_FONT, 12, "bold"))
         acc_glyph.pack(side="left")
         self.accent_fgs.append(acc_glyph)
         acc_text = tk.Frame(acc_strip, bg=c["surface2"])
         acc_text.pack(side="left", fill="x", expand=True, padx=(10, 8))
         tk.Label(acc_text, text="АККАУНТ ДЛЯ ЗАПУСКА", bg=c["surface2"],
-                 fg=c["muted"], font=("Segoe UI", 8, "bold"),
+                 fg=c["muted"], font=(UI_FONT, 8, "bold"),
                  anchor="w").pack(fill="x")
         tk.Label(acc_text, textvariable=self.game_account_var,
-                 bg=c["surface2"], fg=c["text"], font=("Segoe UI", 9),
+                 bg=c["surface2"], fg=c["text"], font=(UI_FONT, 9),
                  anchor="w", justify="left", wraplength=420).pack(fill="x")
         self._button(acc_strip, "Сменить",
                      lambda: self.show_page("accounts"), side="right")
 
         self.btn_play = tk.Button(
             inner, text="▶   ИГРАТЬ ПО ID", relief="flat", bd=0,
-            cursor="hand2", font=("Segoe UI", 13, "bold"), pady=12,
+            cursor="hand2", font=(UI_FONT, 13, "bold"), pady=12,
             takefocus=True, command=self.play, highlightthickness=0)
         self.btn_play.pack(fill="x", pady=(12, 0))
         self.primary_buttons.append(self.btn_play)
@@ -1994,20 +2038,20 @@ class App:
         avatar.pack_propagate(False)
         self.account_avatar_label = tk.Label(
             avatar, text="◉", bg=c["surface2"], fg=self.accent,
-            font=("Segoe UI", 26, "bold"))
+            font=(UI_FONT, 26, "bold"))
         self.account_avatar_label.pack(fill="both", expand=True)
         self.accent_fgs.append(self.account_avatar_label)
 
         col = tk.Frame(head, bg=c["surface"])
         col.pack(side="left", fill="both", expand=True, padx=(16, 0))
         tk.Label(col, textvariable=self.active_display_var, bg=c["surface"],
-                 fg=c["text"], font=("Segoe UI", 16, "bold"), anchor="w",
+                 fg=c["text"], font=(UI_FONT, 16, "bold"), anchor="w",
                  justify="left", wraplength=280).pack(fill="x")
         tk.Label(col, textvariable=self.active_login_var, bg=c["surface"],
-                 fg=self.accent, font=("Segoe UI", 10, "bold"),
+                 fg=self.accent, font=(UI_FONT, 10, "bold"),
                  anchor="w").pack(fill="x", pady=(3, 3))
         tk.Label(col, textvariable=self.active_meta_var, bg=c["surface"],
-                 fg=c["muted"], font=("Segoe UI", 8), anchor="w",
+                 fg=c["muted"], font=(UI_FONT, 8), anchor="w",
                  justify="left", wraplength=280).pack(fill="x")
 
         actions = tk.Frame(right, bg=c["surface"])
@@ -2020,7 +2064,7 @@ class App:
 
         self.account_status_var = tk.StringVar(value="")
         tk.Label(right, textvariable=self.account_status_var,
-                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                 bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
                  anchor="w", justify="left", wraplength=330).pack(
                      fill="x", pady=(12, 0))
 
@@ -2038,7 +2082,7 @@ class App:
             "Windows (DPAPI).",
         ):
             tk.Label(info, text="•  " + text, bg=c["surface"],
-                     fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+                     fg=c["muted"], font=(UI_FONT, 9), anchor="w",
                      justify="left", wraplength=560).pack(
                          fill="x", pady=(3, 0))
 
@@ -2328,11 +2372,11 @@ class App:
         body = tk.Frame(win, bg=c["bg"], padx=22, pady=18)
         body.pack(fill="both", expand=True)
         tk.Label(body, text="Добавить аккаунт", bg=c["bg"], fg=c["text"],
-                 font=("Segoe UI", 16, "bold"), anchor="w").pack(fill="x")
+                 font=(UI_FONT, 16, "bold"), anchor="w").pack(fill="x")
         tk.Label(body, text="Вход только через сайт Roblox в браузере. "
                             "Пароль лаунчер не запрашивает и не сохраняет — "
                             "только зашифрованную сессию для запуска игр.",
-                 bg=c["bg"], fg=c["muted"], font=("Segoe UI", 9),
+                 bg=c["bg"], fg=c["muted"], font=(UI_FONT, 9),
                  anchor="w", justify="left", wraplength=430).pack(
                      fill="x", pady=(4, 14))
 
@@ -2341,13 +2385,13 @@ class App:
         br = tk.Frame(outer, bg=c["surface"], padx=14, pady=12)
         br.pack(fill="x", padx=1, pady=1)
         tk.Label(br, text="ВХОД ЧЕРЕЗ САЙТ", bg=c["surface"],
-                 fg=c["muted"], font=("Segoe UI", 8, "bold"),
+                 fg=c["muted"], font=(UI_FONT, 8, "bold"),
                  anchor="w").pack(fill="x")
         tk.Label(br, text="Откроется отдельное окно Edge или Chrome с "
                           "временным профилем. Войди на сайте Roblox — "
                           "лаунчер заберёт сессию и закроет окно. Капча "
                           "и 2FA вводятся прямо на сайте.",
-                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                 bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
                  anchor="w", justify="left", wraplength=430).pack(
                      fill="x", pady=(8, 10))
         self._login_browser_btn = self._button(
@@ -2356,14 +2400,14 @@ class App:
         self._login_browser_btn.pack_configure(fill="x")
         tk.Label(br, text="Основной браузер не затрагивается: профиль "
                           "создаётся во временной папке и удаляется.",
-                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 8),
+                 bg=c["surface"], fg=c["muted"], font=(UI_FONT, 8),
                  anchor="w", justify="left", wraplength=430).pack(
                      fill="x", pady=(8, 0))
 
         self._login_status_var = tk.StringVar(value="")
         self._login_status_lbl = tk.Label(
             body, textvariable=self._login_status_var, bg=c["bg"],
-            fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+            fg=c["muted"], font=(UI_FONT, 9), anchor="w",
             justify="left", wraplength=430)
         self._login_status_lbl.pack(fill="x", pady=(2, 10))
 
@@ -2488,12 +2532,12 @@ class App:
         if glyph:
             glyph_lbl = tk.Label(
                 head, text=glyph, bg=c["surface"], fg=self.accent,
-                font=("Segoe UI", 10, "bold"))
+                font=(UI_FONT, 10, "bold"))
             glyph_lbl.pack(side="left", padx=(10, 6))
             self.accent_fgs.append(glyph_lbl)
             offset = 0
         tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
-                 font=("Segoe UI", 11, "bold")).pack(
+                 font=(UI_FONT, 11, "bold")).pack(
                      side="left", padx=(offset, 0))
         return inner
 
@@ -2545,7 +2589,7 @@ class App:
 
         def _row(row, label, widget):
             tk.Label(gridf, text=label, bg=c["surface"], fg=c["text"],
-                     font=("Segoe UI", 10)).grid(
+                     font=(UI_FONT, 10)).grid(
                 row=row, column=0, sticky="w", pady=4, padx=(0, 14))
             widget.grid(row=row, column=1, sticky="ew", pady=4)
 
@@ -2571,7 +2615,7 @@ class App:
 
         self.api_hint = tk.Label(
             gridf, text="", bg=c["surface"], fg=self._warn_fg(),
-            font=("Segoe UI", 9), anchor="w", justify="left",
+            font=(UI_FONT, 9), anchor="w", justify="left",
             wraplength=480)
         self.api_hint.grid(row=2, column=0, columnspan=2, sticky="w",
                            pady=(0, 4))
@@ -2589,7 +2633,7 @@ class App:
 
         tk.Label(gridf, text="FPS можно ввести вручную: число от 1 до 1000. "
                             "«Как в игре» или пустое поле — без ограничения.",
-                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 8),
+                 bg=c["surface"], fg=c["muted"], font=(UI_FONT, 8),
                  anchor="w", justify="left", wraplength=520).grid(
                      row=5, column=0, columnspan=2, sticky="w",
                      pady=(8, 0))
@@ -2608,7 +2652,7 @@ class App:
                      side="left")
         self.flags_status = tk.StringVar(value="")
         tk.Label(btn_row, textvariable=self.flags_status, bg=c["surface"],
-                 fg=c["muted"], font=("Segoe UI", 9)).pack(
+                 fg=c["muted"], font=(UI_FONT, 9)).pack(
                      side="left", padx=12)
 
         # -- панель бутстрапера
@@ -2619,12 +2663,12 @@ class App:
                             glyph="⚙")
         self.boot_title = tk.Label(inner2, text="", bg=c["surface"],
                                    fg=c["text"],
-                                   font=("Segoe UI", 11, "bold"),
+                                   font=(UI_FONT, 11, "bold"),
                                    anchor="w")
         self.boot_title.pack(fill="x", pady=(6, 0))
         self.boot_status = tk.StringVar(value="")
         tk.Label(inner2, textvariable=self.boot_status, bg=c["surface"],
-                 fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+                 fg=c["muted"], font=(UI_FONT, 9), anchor="w",
                  wraplength=520, justify="left").pack(fill="x")
 
         self.boot_body = tk.Frame(inner2, bg=c["surface"])
@@ -2632,7 +2676,7 @@ class App:
         # регион (только Froststrap)
         self.region_row = tk.Frame(self.boot_body, bg=c["surface"])
         tk.Label(self.region_row, text="Регион сервера", bg=c["surface"],
-                 fg=c["text"], font=("Segoe UI", 10)).pack(
+                 fg=c["text"], font=(UI_FONT, 10)).pack(
                      side="left", padx=(0, 12))
         self.combo_region = ttk.Combobox(
             self.region_row, values=datacenter_regions(), state="readonly",
@@ -2661,7 +2705,7 @@ class App:
         self.boot_cols.pack(fill="x", pady=(8, 0))
 
         self.boot_path = tk.Label(self.boot_body, text="", bg=c["surface"],
-                                  fg=c["muted"], font=("Segoe UI", 9),
+                                  fg=c["muted"], font=(UI_FONT, 9),
                                   anchor="w", wraplength=520, justify="left")
         self.boot_path.pack(fill="x", pady=(10, 0))
 
@@ -2674,7 +2718,7 @@ class App:
         self.boot_body.pack(fill="x")
 
         self.boot_none = tk.Label(
-            inner2, bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+            inner2, bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
             justify="left", wraplength=520, anchor="w",
             text=("Ни Froststrap, ни Bloxstrap не найдены — панель "
                   "недоступна. Быстрые флаги выше работают всегда."))
@@ -2866,7 +2910,7 @@ class App:
             selectbackground=select_bg, selectforeground=select_fg,
             activestyle="none", bd=0, highlightthickness=1,
             highlightbackground=c["border"], highlightcolor=self.accent,
-            font=("Segoe UI", 10), exportselection=False, height=10)
+            font=(UI_FONT, 10), exportselection=False, height=10)
         sets_scroll = self._vscroll(
             list_holder, self.cursor_sets_box.yview, c["list"], width=7)
         self.cursor_sets_box.configure(yscrollcommand=sets_scroll.set)
@@ -2933,11 +2977,11 @@ class App:
         self.cursor_status_var = tk.StringVar(value="")
         tk.Label(right, textvariable=self.cursor_status_var,
                  bg=c["surface"], fg=c["text"],
-                 font=("Segoe UI", 10, "bold"), anchor="w").pack(
+                 font=(UI_FONT, 10, "bold"), anchor="w").pack(
                      fill="x", pady=(10, 2))
         self.cursor_warn_var = tk.StringVar(value="")
         tk.Label(right, textvariable=self.cursor_warn_var, bg=c["surface"],
-                 fg=self._warn_fg(), font=("Segoe UI", 9), anchor="w",
+                 fg=self._warn_fg(), font=(UI_FONT, 9), anchor="w",
                  justify="left", wraplength=400).pack(fill="x")
 
         self._hint(
@@ -2959,11 +3003,11 @@ class App:
         head = tk.Frame(card, bg=c["surface2"])
         head.pack(fill="x")
         tk.Label(head, text=slot["label"], bg=c["surface2"], fg=c["text"],
-                 font=("Segoe UI", 9, "bold"), anchor="w",
+                 font=(UI_FONT, 9, "bold"), anchor="w",
                  justify="left", wraplength=150).pack(
                      side="left", fill="x", expand=True)
         remove = tk.Label(head, text="✕", bg=c["surface2"], fg=c["muted"],
-                          font=("Segoe UI", 9, "bold"), cursor="hand2")
+                          font=(UI_FONT, 9, "bold"), cursor="hand2")
         remove.bind("<Button-1>",
                     lambda _e, k=slot["key"]: self._cursor_clear_slot(k))
 
@@ -2971,7 +3015,7 @@ class App:
         preview.pack(fill="x", pady=(6, 4))
         preview.pack_propagate(False)
         image_label = tk.Label(preview, bg=c["entry"], text="+",
-                               fg=c["muted"], font=("Segoe UI", 16),
+                               fg=c["muted"], font=(UI_FONT, 16),
                                cursor="hand2")
         image_label.place(relx=0.5, rely=0.5, anchor="center")
         for widget in (preview, image_label):
@@ -2979,7 +3023,7 @@ class App:
                         lambda _e, k=slot["key"]: self._cursor_pick(k))
 
         meta = tk.Label(card, text="не задан", bg=c["surface2"],
-                        fg=c["muted"], font=("Segoe UI", 8), anchor="w")
+                        fg=c["muted"], font=(UI_FONT, 8), anchor="w")
         meta.pack(fill="x")
 
         view = self._button(
@@ -3037,7 +3081,7 @@ class App:
             if path is None:
                 self._cursor_preview_images.pop(slot["key"], None)
                 widgets["image"].configure(image="", text="+",
-                                           font=("Segoe UI", 16))
+                                           font=(UI_FONT, 16))
                 widgets["meta"].configure(text="не задан")
                 widgets["view"].configure(text="Выбрать PNG")
                 widgets["remove"].pack_forget()
@@ -3054,7 +3098,7 @@ class App:
             else:
                 self._cursor_preview_images.pop(slot["key"], None)
                 widgets["image"].configure(image="", text="PNG",
-                                           font=("Segoe UI", 10, "bold"))
+                                           font=(UI_FONT, 10, "bold"))
             widgets["meta"].configure(text=meta)
             widgets["view"].configure(text="Просмотр")
             widgets["remove"].pack(side="right")
@@ -3530,7 +3574,7 @@ class App:
             selectbackground=select_bg, selectforeground=select_fg,
             activestyle="none", bd=0, highlightthickness=1,
             highlightbackground=c["border"], highlightcolor=self.accent,
-            font=("Segoe UI", 10), exportselection=False, height=10)
+            font=(UI_FONT, 10), exportselection=False, height=10)
         scroll = self._vscroll(list_holder, self.theme_sets_box.yview,
                                c["list"], width=7)
         self.theme_sets_box.configure(yscrollcommand=scroll.set)
@@ -3580,7 +3624,7 @@ class App:
         self.theme_info_var = tk.StringVar(value="")
         self.theme_image_var = tk.StringVar(value="")
         tk.Label(right, textvariable=self.theme_info_var, bg=c["surface"],
-                 fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+                 fg=c["muted"], font=(UI_FONT, 9), anchor="w",
                  justify="left", wraplength=460).pack(fill="x", pady=(7, 0))
 
         opts = tk.Frame(right, bg=c["surface"])
@@ -3589,7 +3633,7 @@ class App:
 
         def opt_row(row, label):
             tk.Label(opts, text=label, bg=c["surface"], fg=c["muted"],
-                     font=("Segoe UI", 9), anchor="w").grid(
+                     font=(UI_FONT, 9), anchor="w").grid(
                          row=row, column=0, sticky="w", pady=4,
                          padx=(0, 12))
             holder = tk.Frame(opts, bg=c["surface"])
@@ -3600,7 +3644,7 @@ class App:
         self.theme_tint_row = opt_row(1, "Оттенок")
         self.theme_accent_row = opt_row(2, "Акцент")
         tk.Label(opts, text="Картинка", bg=c["surface"], fg=c["muted"],
-                 font=("Segoe UI", 9), anchor="w").grid(
+                 font=(UI_FONT, 9), anchor="w").grid(
                      row=3, column=0, sticky="w", pady=4, padx=(0, 12))
         image_row = tk.Frame(opts, bg=c["surface"])
         image_row.grid(row=3, column=1, sticky="w", pady=4)
@@ -3610,7 +3654,7 @@ class App:
             image_row, "Убрать", self._theme_remove_image, side="left",
             padx=(6, 0))
         tk.Label(opts, textvariable=self.theme_image_var, bg=c["surface"],
-                 fg=c["muted"], font=("Segoe UI", 8), anchor="w",
+                 fg=c["muted"], font=(UI_FONT, 8), anchor="w",
                  justify="left", wraplength=320).grid(
                      row=4, column=1, sticky="w", pady=(2, 0))
 
@@ -3632,7 +3676,7 @@ class App:
 
         self.theme_status_var = tk.StringVar(value="")
         tk.Label(right, textvariable=self.theme_status_var, bg=c["surface"],
-                 fg=c["text"], font=("Segoe UI", 9), anchor="w",
+                 fg=c["text"], font=(UI_FONT, 9), anchor="w",
                  justify="left", wraplength=460).pack(fill="x", pady=(10, 0))
         self._hint(
             right,
@@ -3784,7 +3828,7 @@ class App:
                 "primary" if active else "ghost")
             btn = tk.Button(
                 self.theme_base_row, text=label, relief="flat", bd=0,
-                font=("Segoe UI", 9, "bold" if active else "normal"),
+                font=(UI_FONT, 9, "bold" if active else "normal"),
                 padx=12, pady=4, cursor="hand2", bg=base, fg=fg,
                 activebackground=hot, activeforeground=fg,
                 highlightthickness=0, takefocus=False,
@@ -4171,20 +4215,46 @@ class App:
                 canvas.create_text(
                     width // 2, height // 2,
                     text="Выбери тему или создай новую",
-                    fill=palette["muted"], font=("Segoe UI", 10))
+                    fill=palette["muted"], font=(UI_FONT, 10))
         except tk.TclError:
             pass
 
-    # -- страница «Стиль запуска» --------------------------------------------------------
+    # -- страница «Кастомизация» ---------------------------------------------------------
 
     def _build_page_launchstyle(self):
         c = self.c
         pad = self._scroll_page("launchstyle")
 
         self._page_header(
-            pad, "✦", "Стиль запуска",
-            "Своя иконка, звук и экран при запуске. Файлы Roblox "
-            "не изменяются — только ярлыки, и их можно вернуть.")
+            pad, "✎", "Кастомизация",
+            "Свой шрифт интерфейса, сигналы лаунчера, иконка, звук "
+            "и экран запуска. Файлы Roblox не изменяются.")
+
+        inner_font = self._card(
+            pad, title="Шрифт лаунчера",
+            subtitle="TTF или OTF вместо стандартного Segoe UI",
+            glyph="A")
+        tk.Label(inner_font, textvariable=self.ui_font_status_var,
+                 bg=c["surface"], fg=c["text"],
+                 font=(UI_FONT, 11, "bold"), anchor="w",
+                 justify="left", wraplength=560).pack(fill="x")
+        tk.Label(
+            inner_font,
+            text="Пример: MaklyxaLauncher — быстрый запуск Roblox",
+            bg=c["surface2"], fg=c["text"], font=(UI_FONT, 12),
+            anchor="w", padx=12, pady=10).pack(fill="x", pady=(10, 0))
+        row_font = tk.Frame(inner_font, bg=c["surface"])
+        row_font.pack(fill="x", pady=(10, 0))
+        self._button(row_font, "Выбрать шрифт", self.choose_ui_font,
+                     kind="primary", side="left")
+        self.btn_ui_font_reset = self._button(
+            row_font, "Сбросить", self.reset_ui_font,
+            side="left", padx=8)
+        self._hint(
+            inner_font,
+            "TTF или OTF до 20 МБ. Шрифт подключается только к окну "
+            "лаунчера и не устанавливается в Windows; клиент Roblox "
+            "и его шрифты остаются нетронутыми.", wrap=560)
 
         inner = self._card(
             pad, title="Иконка",
@@ -4199,13 +4269,13 @@ class App:
         self.launch_icon_box.pack_propagate(False)
         self.launch_icon_label = tk.Label(
             self.launch_icon_box, text="✦", bg=c["surface2"],
-            fg=c["muted"], font=("Segoe UI", 26, "bold"))
+            fg=c["muted"], font=(UI_FONT, 26, "bold"))
         self.launch_icon_label.pack(fill="both", expand=True)
         info = tk.Frame(row, bg=c["surface"])
         info.pack(side="left", fill="both", expand=True, padx=(16, 0))
         tk.Label(info, textvariable=self.launch_icon_status_var,
                  bg=c["surface"], fg=c["text"],
-                 font=("Segoe UI", 11, "bold"), anchor="w",
+                 font=(UI_FONT, 11, "bold"), anchor="w",
                  justify="left", wraplength=520).pack(fill="x")
         self._hint(
             info, "PNG, JPG, WEBP, BMP или ICO. Лаунчер сам сделает "
@@ -4226,7 +4296,7 @@ class App:
             row_short, "Вернуть ярлыки", self.restore_launch_shortcuts,
             side="left", padx=8)
         tk.Label(inner, textvariable=self.launch_shortcut_status_var,
-                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                 bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
                  anchor="w", wraplength=560, justify="left").pack(
                      fill="x", pady=(9, 0))
         self._hint(
@@ -4248,7 +4318,7 @@ class App:
                 anchor="w", pady=(6, 8))
         tk.Label(inner2, textvariable=self.launch_sound_status_var,
                  bg=c["surface"], fg=c["text"],
-                 font=("Segoe UI", 10, "bold"), anchor="w",
+                 font=(UI_FONT, 10, "bold"), anchor="w",
                  wraplength=560).pack(fill="x")
         row_sound = tk.Frame(inner2, bg=c["surface"])
         row_sound.pack(fill="x", pady=(9, 0))
@@ -4264,6 +4334,36 @@ class App:
             inner2, "WAV или MP3 до 12 МБ. Звук проигрывает лаунчер "
                     "через Windows; звуки и файлы Roblox не заменяются.",
             wrap=560)
+
+        inner_err = self._card(
+            pad, title="Звук ошибки",
+            subtitle="Сигнал, если запуск не удался — например, «Oof»",
+            glyph="!")
+        self.var_error_sound = tk.BooleanVar(
+            value=bool(self.cfg.get("error_sound", True)))
+        self._checkbox(
+            inner_err, "Играть звук при ошибке запуска",
+            self.var_error_sound,
+            command=self._save_error_sound_flag).pack(
+                anchor="w", pady=(6, 8))
+        tk.Label(inner_err, textvariable=self.error_sound_status_var,
+                 bg=c["surface"], fg=c["text"],
+                 font=(UI_FONT, 10, "bold"), anchor="w",
+                 wraplength=560).pack(fill="x")
+        row_err = tk.Frame(inner_err, bg=c["surface"])
+        row_err.pack(fill="x", pady=(9, 0))
+        self._button(row_err, "Выбрать звук", self.choose_error_sound,
+                     kind="primary", side="left")
+        self._button(row_err, "Послушать",
+                     self.play_error_sound_preview, side="left", padx=8)
+        self._button(row_err, "Стоп", self.stop_error_sound_preview,
+                     side="left")
+        self._button(row_err, "Убрать", self.remove_error_sound_ui,
+                     side="left", padx=8)
+        self._hint(
+            inner_err, "WAV или MP3 до 12 МБ. Лаунчер проигрывает его "
+                       "только при своей ошибке запуска; звуки Roblox "
+                       "не подменяются.", wrap=560)
 
         inner3 = self._card(
             pad, title="Экран запуска",
@@ -4282,7 +4382,7 @@ class App:
                      self.preview_launch_splash, kind="primary",
                      side="left", padx=(10, 0))
         tk.Label(inner3, textvariable=self.launch_style_note_var,
-                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                 bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
                  anchor="w", justify="left", wraplength=560).pack(
                      fill="x", pady=(9, 0))
         self._hint(
@@ -4291,21 +4391,40 @@ class App:
                     "не патчится.", wrap=560)
 
         inner4 = self._card(pad, title="Файлы", glyph="ⓘ")
+        tk.Label(inner4, text=str(CUSTOMIZE_DIR), bg=c["surface"],
+                 fg=c["muted"], font=(UI_FONT, 9), anchor="w",
+                 wraplength=560, justify="left").pack(fill="x")
         tk.Label(inner4, text=str(LAUNCH_DIR), bg=c["surface"],
-                 fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+                 fg=c["muted"], font=(UI_FONT, 9), anchor="w",
                  wraplength=560, justify="left").pack(fill="x")
         row_files = tk.Frame(inner4, bg=c["surface"])
         row_files.pack(fill="x", pady=(10, 0))
+        self._button(row_files, "Открыть папку кастомизации",
+                     self.open_customize_dir, side="left")
         self._button(row_files, "Открыть папку стиля",
-                     self.open_launch_dir, side="left")
-        self._hint(inner4, "Иконка, звук и резервные копии ярлыков "
-                           "хранятся локально.", wrap=560)
+                     self.open_launch_dir, side="left", padx=8)
+        self._hint(inner4, "Шрифт лаунчера, звуки и резервные копии "
+                           "ярлыков хранятся локально.", wrap=560)
+
+        inner5 = self._card(
+            pad, title="Почему файлы Roblox не меняются", glyph="ⓘ")
+        tk.Label(
+            inner5,
+            text="Шрифты и звуки внутри клиента Roblox — часть его "
+                 "файлов. Их замена считается вмешательством в клиент "
+                 "и может привести к блокировке аккаунта. Поэтому "
+                 "лаунчер меняет только собственное окно и добавляет "
+                 "свои сигналы, не трогая установленный Roblox.",
+            bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
+            anchor="w", justify="left", wraplength=560).pack(fill="x")
 
         self._refresh_launch_style_ui()
 
     def _refresh_launch_style_ui(self):
         self._refresh_launch_icon()
         self._refresh_launch_sound()
+        self._refresh_error_sound()
+        self._refresh_ui_font()
         self._refresh_launch_style_buttons()
 
     def _refresh_launch_style_buttons(self):
@@ -4396,6 +4515,40 @@ class App:
             size = "?"
         name = str(self.cfg.get("launch_sound_name") or path.name)
         self.launch_sound_status_var.set(f"Звук: {name} · {size} МБ")
+
+    def _refresh_error_sound(self):
+        path = launch_sound_path(role="error")
+        if hasattr(self, "var_error_sound"):
+            try:
+                self.var_error_sound.set(
+                    bool(self.cfg.get("error_sound", True)))
+            except tk.TclError:
+                pass
+        if path is None:
+            self.error_sound_status_var.set("Свой звук ошибки не выбран")
+            return
+        try:
+            size = mb(path.stat().st_size)
+        except OSError:
+            size = "?"
+        name = str(self.cfg.get("error_sound_name") or path.name)
+        self.error_sound_status_var.set(
+            f"Звук ошибки: {name} · {size} МБ")
+
+    def _refresh_ui_font(self):
+        state = ui_font_state()
+        if state["custom"] and self._loaded_font_path is not None:
+            name = str(self.cfg.get("ui_font_name")
+                       or Path(state["path"]).name)
+            self.ui_font_status_var.set(
+                f"Свой шрифт: {name} · {UI_FONT}")
+        elif state["custom"]:
+            self.ui_font_status_var.set(
+                "Шрифт сохранён, но Windows не смог его подключить — "
+                "выбери другой файл")
+        else:
+            self.ui_font_status_var.set(
+                "Стандартный шрифт Windows (Segoe UI)")
 
     def _launch_action_error(self, message):
         self.status_var.set(message)
@@ -4504,6 +4657,160 @@ class App:
         stop_launch_sound()
         self._refresh_launch_sound()
         self.status_var.set("Звук остановлен")
+
+    def choose_ui_font(self):
+        path = filedialog.askopenfilename(
+            parent=self.root, title="Шрифт лаунчера",
+            filetypes=[("Шрифты TTF и OTF", "*.ttf *.otf"),
+                       ("Все файлы", "*.*")])
+        if path:
+            self.apply_ui_font_file(path)
+
+    def apply_ui_font_file(self, source):
+        global UI_FONT
+        info = inspect_ui_font(source)
+        if not info["ok"]:
+            self._launch_action_error(
+                f"Не удалось добавить шрифт: {info['error']}")
+            return False
+        source = Path(info["path"])
+        if not load_private_font(source):
+            self._launch_action_error(
+                "Windows не смог подключить шрифт — файл повреждён "
+                "или это не TTF/OTF")
+            return False
+        family = _resolve_tk_family(self.root, info["families"])
+        if not family:
+            unload_private_font(source)
+            self._launch_action_error(
+                "Tk не увидел шрифт — попробуй другой TTF или OTF")
+            return False
+        old_path = self._loaded_font_path
+        result = import_ui_font(source)
+        unload_private_font(source)
+        if not result["ok"]:
+            self._launch_action_error(
+                f"Не удалось сохранить шрифт: {result['error']}")
+            return False
+        dest = Path(result["path"])
+        if old_path is not None:
+            unload_private_font(old_path)
+        if not load_private_font(dest):
+            if (old_path is not None and Path(old_path) != dest
+                    and Path(old_path).is_file()):
+                load_private_font(old_path)
+            self._launch_action_error(
+                "Windows не смог подключить шрифт из папки лаунчера")
+            return False
+        UI_FONT = family
+        self._loaded_font_path = dest
+        self._ui_font_family = family
+        self.cfg["ui_font_name"] = info["name"]
+        self.cfg["ui_font_family"] = family
+        save_config(self.cfg)
+        self._rebuild()
+        self._refresh_ui_font()
+        self.status_var.set(f"Шрифт интерфейса: {family}")
+        self.log(f"Шрифт лаунчера: {info['name']} ({family})")
+        return True
+
+    def reset_ui_font(self):
+        global UI_FONT
+        old_path = self._loaded_font_path
+        if old_path is not None:
+            unload_private_font(old_path)
+        result = remove_ui_font()
+        UI_FONT = "Segoe UI"
+        self._loaded_font_path = None
+        self._ui_font_family = ""
+        self.cfg["ui_font_name"] = ""
+        self.cfg["ui_font_family"] = ""
+        save_config(self.cfg)
+        self._rebuild()
+        self._refresh_ui_font()
+        if not result["ok"]:
+            self._launch_action_error(
+                f"Шрифт сброшен, но файл не удалился: {result['error']}")
+            return
+        self.status_var.set("Шрифт интерфейса сброшен")
+        self.log("Шрифт лаунчера: стандартный Segoe UI")
+
+    def choose_error_sound(self):
+        path = filedialog.askopenfilename(
+            parent=self.root, title="Звук ошибки",
+            filetypes=[("Звуки WAV и MP3", "*.wav *.mp3"),
+                       ("Все файлы", "*.*")])
+        if not path:
+            return
+        result = import_launch_sound(path, role="error")
+        if not result["ok"]:
+            self._launch_action_error(
+                f"Не удалось добавить звук ошибки: {result['error']}")
+            return
+        self.cfg["error_sound_name"] = Path(path).name[:80]
+        self.cfg["error_sound"] = True
+        save_config(self.cfg)
+        self._refresh_error_sound()
+        self.status_var.set("Звук ошибки сохранён")
+        self.log(f"Звук ошибки: {Path(path).name}")
+
+    def remove_error_sound_ui(self):
+        result = remove_launch_sound(role="error")
+        self.cfg["error_sound_name"] = ""
+        save_config(self.cfg)
+        self._refresh_error_sound()
+        if result["ok"]:
+            self.status_var.set("Звук ошибки убран")
+            self.log("Звук ошибки удалён")
+        else:
+            self._launch_action_error(
+                f"Звук не удалился: {result['error']}")
+
+    def _save_error_sound_flag(self):
+        self.cfg["error_sound"] = bool(self.var_error_sound.get())
+        save_config(self.cfg)
+        if self.cfg["error_sound"]:
+            self.status_var.set("Звук ошибки включён")
+            self.log("Звук при ошибке запуска включён")
+        else:
+            stop_launch_sound()
+            self.status_var.set("Звук ошибки выключен")
+            self.log("Звук при ошибке запуска выключен")
+
+    def play_error_sound_preview(self):
+        path = launch_sound_path(role="error")
+        if path is None:
+            self.error_sound_status_var.set(
+                "Сначала выбери WAV или MP3")
+            return
+        if not play_launch_sound(path):
+            self.error_sound_status_var.set(
+                "Не удалось проиграть — проверь формат файла")
+            return
+        self.status_var.set("Проигрываю звук ошибки")
+        self.root.after(3500, self._refresh_error_sound)
+
+    def stop_error_sound_preview(self):
+        stop_launch_sound()
+        self._refresh_error_sound()
+        self.status_var.set("Звук остановлен")
+
+    def _play_error_sound(self):
+        if not self.interactive or self._closing:
+            return
+        if not self.cfg.get("error_sound", True):
+            return
+        path = launch_sound_path(role="error")
+        if path is not None:
+            play_launch_sound(path)
+
+    def open_customize_dir(self):
+        try:
+            CUSTOMIZE_DIR.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(CUSTOMIZE_DIR))
+        except OSError as exc:
+            self._launch_action_error(
+                f"Не удалось открыть папку: {exc}")
 
     def set_launch_splash(self, style):
         if style not in LAUNCH_STYLE_LABELS:
@@ -4712,7 +5019,7 @@ class App:
             self.var_discord_rpc, command=self.apply_discord_settings).pack(
                 anchor="w", pady=(4, 8))
         tk.Label(inner_d, text="Application ID", bg=c["surface"],
-                 fg=c["text"], font=("Segoe UI", 10)).pack(anchor="w")
+                 fg=c["text"], font=(UI_FONT, 10)).pack(anchor="w")
         row_d = tk.Frame(inner_d, bg=c["surface"])
         row_d.pack(fill="x", pady=(4, 0))
         ttk.Entry(row_d, textvariable=self.var_discord_id).pack(
@@ -4724,7 +5031,7 @@ class App:
         self._button(row_d2, "Создать приложение",
                      self.open_discord_portal, side="left")
         tk.Label(inner_d, textvariable=self.discord_status_var,
-                 bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+                 bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
                  anchor="w").pack(fill="x", pady=(8, 0))
         self._hint(
             inner_d,
@@ -4735,7 +5042,7 @@ class App:
         # Roblox на этом ПК
         inner3 = self._card(pad, title="Roblox на этом ПК", glyph="◉")
         tk.Label(inner3, textvariable=self.proto_var, bg=c["surface"],
-                 fg=c["text"], font=("Segoe UI", 11), anchor="w",
+                 fg=c["text"], font=(UI_FONT, 11), anchor="w",
                  wraplength=520, justify="left").pack(fill="x", pady=(6, 0))
         row3 = tk.Frame(inner3, bg=c["surface"])
         row3.pack(fill="x", pady=(10, 0))
@@ -4747,7 +5054,7 @@ class App:
         self.dl_bar = ttk.Progressbar(inner3, maximum=100,
                                        style="green.Horizontal.TProgressbar")
         self.dl_label = tk.Label(inner3, text="", bg=c["surface"],
-                                 fg=c["muted"], font=("Segoe UI", 9),
+                                 fg=c["muted"], font=(UI_FONT, 9),
                                  anchor="w")
         self.btn_dl_cancel.pack_forget()
         self.dl_bar.pack_forget()
@@ -4779,10 +5086,10 @@ class App:
                      lambda: self.show_page("themes"), side="left")
         tk.Label(themes_row, text="цвета и фон в разделе «Темы»",
                  bg=c["surface"], fg=c["muted"],
-                 font=("Segoe UI", 8)).pack(side="left", padx=8)
+                 font=(UI_FONT, 8)).pack(side="left", padx=8)
 
         tk.Label(inner4, text="Акцентный цвет", bg=c["surface"],
-                 fg=c["text"], font=("Segoe UI", 10)).pack(
+                 fg=c["text"], font=(UI_FONT, 10)).pack(
                      anchor="w", pady=(14, 4))
         color_row = tk.Frame(inner4, bg=c["surface"])
         color_row.pack(fill="x")
@@ -4796,7 +5103,7 @@ class App:
             swatch.pack(side="left", padx=(0, 6), pady=2)
         self.accent_name_label = tk.Label(color_row, text="", bg=c["surface"],
                                           fg=c["muted"],
-                                          font=("Segoe UI", 9))
+                                          font=(UI_FONT, 9))
         self.accent_name_label.pack(side="left", padx=8)
 
         # обновления
@@ -4808,7 +5115,7 @@ class App:
         upd_row.pack(fill="x", pady=(8, 0))
         tk.Label(upd_row, text=f"Установлена версия {VERSION}",
                  bg=c["surface"], fg=c["text"],
-                 font=("Segoe UI", 10, "bold")).pack(side="left")
+                 font=(UI_FONT, 10, "bold")).pack(side="left")
         upd_btns = tk.Frame(upd_row, bg=c["surface"])
         upd_btns.pack(side="right")
         self.btn_update = self._button(
@@ -4820,7 +5127,7 @@ class App:
         self.btn_update_get.pack_forget()
         tk.Label(inner_upd, textvariable=self.update_status_var,
                  bg=c["surface"], fg=c["muted"],
-                 font=("Segoe UI", 9), anchor="w").pack(
+                 font=(UI_FONT, 9), anchor="w").pack(
                      fill="x", pady=(9, 0))
         self._hint(
             inner_upd,
@@ -4831,7 +5138,7 @@ class App:
         # о программе
         inner5 = self._card(pad, title="О программе", glyph="ⓘ")
         tk.Label(
-            inner5, bg=c["surface"], fg=c["muted"], font=("Segoe UI", 9),
+            inner5, bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
             justify="left", anchor="w", wraplength=540, text=(
                 "Лаунчер передаёт системе ссылку roblox:// — игру открывает "
                 "официальный клиент Roblox.\n"
@@ -4841,7 +5148,7 @@ class App:
                 "Название, версия, тема и списки хранятся локально."
             )).pack(fill="x")
         tk.Label(inner5, text=str(CONFIG_PATH), bg=c["surface"],
-                 fg=c["muted"], font=("Segoe UI", 9), anchor="w",
+                 fg=c["muted"], font=(UI_FONT, 9), anchor="w",
                  wraplength=540, justify="left").pack(fill="x", pady=(6, 0))
         row4 = tk.Frame(inner5, bg=c["surface"])
         row4.pack(fill="x", pady=(10, 0))
@@ -4865,7 +5172,7 @@ class App:
         head = tk.Frame(inner, bg=c["surface"])
         head.pack(fill="x")
         tk.Label(head, text="События", bg=c["surface"], fg=c["text"],
-                 font=("Segoe UI", 11, "bold")).pack(side="left")
+                 font=(UI_FONT, 11, "bold")).pack(side="left")
         self._button(head, "Очистить", self.clear_log, side="right")
 
         holder = tk.Frame(inner, bg=c["surface"])
@@ -4897,6 +5204,8 @@ class App:
         self.var_discord_id.set(self.cfg.get("discord_app_id") or "")
         if hasattr(self, "var_launch_sound"):
             self.var_launch_sound.set(bool(self.cfg.get("launch_sound", True)))
+        if hasattr(self, "var_error_sound"):
+            self.var_error_sound.set(bool(self.cfg.get("error_sound", True)))
 
         start = ""
         if self.cfg["remember_last"] and self.cfg["last_place_id"]:
@@ -5115,6 +5424,8 @@ class App:
         self._stop_presence()
         self._hide_launch_splash()
         stop_launch_sound()
+        if self._loaded_font_path is not None:
+            unload_private_font(self._loaded_font_path)
         try:
             self.cfg["window_geometry"] = self.root.geometry()
         except tk.TclError:
@@ -5692,6 +6003,7 @@ class App:
             self.status_var.set("Не удалось — открыл Roblox в браузере")
             self.log("Прямой запуск не сработал, открыт сайт Roblox")
             webbrowser.open(DISCOVER_URL)
+            self._play_error_sound()
         self._end_launch_effect(
             "Roblox уже запущен" if outcome == "already"
             else "Roblox запущен" if outcome in ("exe", "protocol")
@@ -5706,6 +6018,7 @@ class App:
         self._rpc_set("В меню", "Roblox не установлен")
         self.log("Клиент не найден — предлагаю скачать")
         self._end_launch_effect("Roblox не установлен")
+        self._play_error_sound()
         if self.interactive and messagebox.askyesno(
                 APP_NAME, "Roblox не установлен.\n"
                 "Скачать официальный установщик?",
@@ -5794,6 +6107,7 @@ class App:
             self.status_var.set("Ошибка запуска")
             self._rpc_set("В меню", "Ошибка запуска")
             self._end_launch_effect("Ошибка запуска")
+            self._play_error_sound()
             if self.interactive:
                 messagebox.showerror(
                     APP_NAME,
@@ -5859,6 +6173,7 @@ class App:
         self.status_var.set("Не удалось войти под аккаунтом")
         self._rpc_set("В меню", "Ошибка аккаунта")
         self._end_launch_effect("Не удалось войти")
+        self._play_error_sound()
         if self.interactive and messagebox.askyesno(
                 APP_NAME,
                 f"{error}\n\nЗапустить игру без аккаунта, как обычно?",
@@ -6660,6 +6975,18 @@ def run_selftest():
             if not removed_sound["ok"] or removed_sound["removed"] < 1:
                 failures.append(f"стиль: звук не удалился {removed_sound}")
 
+            error_sound = import_launch_sound(wav, sound_dir, role="error")
+            if (not error_sound["ok"]
+                    or launch_sound_path(sound_dir, role="error") is None):
+                failures.append(
+                    f"стиль: звук ошибки не импортирован {error_sound}")
+            elif launch_sound_path(sound_dir) is not None:
+                failures.append("стиль: звук ошибки попал в роль запуска")
+            removed_error = remove_launch_sound(sound_dir, role="error")
+            if not removed_error["ok"] or removed_error["removed"] < 1:
+                failures.append(
+                    f"стиль: звук ошибки не удалился {removed_error}")
+
             if os.name == "nt":
                 lnk = root / "Roblox Test.lnk"
                 made = core_module._run_powershell(
@@ -6714,6 +7041,59 @@ def run_selftest():
     except Exception as exc:  # noqa: BLE001
         failures.append(f"launch style test: {exc}")
 
+    # 6f) свой шрифт лаунчера: разбор TTF, импорт, подключение, откат
+    try:
+        import core as core_module
+
+        fonts_root = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        test_font = next(
+            (fonts_root / name for name in
+             ("arial.ttf", "segoeui.ttf", "calibri.ttf", "comic.ttf")
+             if (fonts_root / name).is_file()), None)
+        if test_font is None:
+            print("  note: системный TTF не найден — тест шрифта пропущен")
+        else:
+            with tempfile.TemporaryDirectory() as td:
+                base = Path(td) / "Fonts"
+                info = inspect_ui_font(test_font)
+                if not info["ok"] or not info["families"]:
+                    failures.append(f"шрифт: не разобран {info}")
+                else:
+                    if not info["family"]:
+                        failures.append("шрифт: пустое имя семейства")
+                    imported = import_ui_font(test_font, base)
+                    path = imported.get("path")
+                    if (not imported["ok"] or path is None
+                            or not Path(path).is_file()):
+                        failures.append(f"шрифт: не импортирован {imported}")
+                    else:
+                        state = ui_font_state(base)
+                        if not state["custom"] or state["path"] != Path(path):
+                            failures.append(f"шрифт: состояние {state}")
+                        if os.name == "nt":
+                            if not load_private_font(path):
+                                failures.append(
+                                    "шрифт: Windows не подключил TTF")
+                            else:
+                                unload_private_font(path)
+                        removed = remove_ui_font(base)
+                        if not removed["ok"] or removed["removed"] != 1:
+                            failures.append(f"шрифт: не удалился {removed}")
+                        if ui_font_state(base)["custom"]:
+                            failures.append(
+                                "шрифт: файл остался после удаления")
+                bad_font = Path(td) / "bad.ttf"
+                bad_font.write_text("not a font", encoding="utf-8")
+                if inspect_ui_font(bad_font)["ok"]:
+                    failures.append("шрифт: мусор принят за TTF")
+                huge = Path(td) / "huge.ttf"
+                with huge.open("wb") as fh:
+                    fh.truncate(21 * 1024 * 1024)
+                if inspect_ui_font(huge)["ok"]:
+                    failures.append("шрифт: файл больше 20 МБ принят")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"ui font test: {exc}")
+
     # 7) пути записи флагов (регрессия на неверный путь Roblox/…)
     try:
         for path in client_settings_paths():
@@ -6757,6 +7137,7 @@ def run_selftest():
         core_module.ACCOUNTS_PATH = ui_data / "accounts.json"
         core_module.AVATARS_DIR = ui_data / "avatars"
         core_module.CONFIG_PATH = ui_data / "config.json"
+        core_module.UI_FONT_DIR = ui_data / "Customize" / "Fonts"
         ui_launch = ui_data / "Launch"
         core_module.LAUNCH_DIR = ui_launch
         core_module.LAUNCH_ICON_PATH = ui_launch / "icon.ico"
@@ -6789,10 +7170,54 @@ def run_selftest():
             failures.append("UI: нет настройки звука запуска")
         if not hasattr(app, "launch_style_buttons"):
             failures.append("UI: нет выбора экрана запуска")
+        if not hasattr(app, "ui_font_status_var"):
+            failures.append("UI: нет статуса своего шрифта")
+        if (not hasattr(app, "error_sound_status_var")
+                or not hasattr(app, "var_error_sound")):
+            failures.append("UI: нет настройки звука ошибки")
         if app._rpc is not None:
             failures.append("UI: presence запустился без интерактива")
         if app.discord_status_var.get() == "":
             failures.append("UI: пустой статус Discord")
+
+        fonts_root = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        ui_font_source = next(
+            (fonts_root / name for name in
+             ("arial.ttf", "calibri.ttf", "comic.ttf", "segoeui.ttf")
+             if (fonts_root / name).is_file()), None)
+        if ui_font_source is None:
+            print("  note: системный TTF не найден — UI-тест шрифта пропущен")
+        elif not app.apply_ui_font_file(ui_font_source):
+            failures.append("UI: свой шрифт не применился")
+        else:
+            root.update()
+            if UI_FONT == "Segoe UI":
+                print("  note: выбранный шрифт совпал с Segoe UI — "
+                      "смена семейства не проверена")
+            if "Свой шрифт" not in app.ui_font_status_var.get():
+                failures.append(
+                    f"UI: статус шрифта {app.ui_font_status_var.get()!r}")
+            if ui_font_path() is None:
+                failures.append("UI: файл шрифта не сохранился")
+            if len(app.pages) != len(NAV_ITEMS):
+                failures.append("UI: после смены шрифта страницы неполные")
+            app.reset_ui_font()
+            root.update()
+            if UI_FONT != "Segoe UI":
+                failures.append(f"UI: шрифт не сброшен ({UI_FONT})")
+            if ui_font_path() is not None:
+                failures.append("UI: файл шрифта остался после сброса")
+            if "Стандартный" not in app.ui_font_status_var.get():
+                failures.append(
+                    f"UI: статус сброса {app.ui_font_status_var.get()!r}")
+        app.var_error_sound.set(False)
+        app._save_error_sound_flag()
+        if app.cfg.get("error_sound"):
+            failures.append("UI: выключение звука ошибки не сохранилось")
+        app.var_error_sound.set(True)
+        app._save_error_sound_flag()
+        if not app.cfg.get("error_sound"):
+            failures.append("UI: включение звука ошибки не сохранилось")
 
         original_theme = app.theme_name
         for name in THEME_ORDER:
@@ -7028,7 +7453,8 @@ def run_selftest():
             print("  -", item)
         return 1
     print("SELFTEST OK: core, themes, accounts, frameless window, flags, "
-          "cursors, launch style, updates, UI rebuild — all good")
+          "cursors, launch style, custom font, error sound, updates, "
+          "UI rebuild — all good")
     return 0
 
 

@@ -45,7 +45,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.7.1"
+VERSION = "1.8.0"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -75,6 +75,10 @@ LAUNCH_ICON_PREVIEW = LAUNCH_DIR / "icon_preview.png"
 LAUNCH_SHORTCUT_BACKUP_DIR = LAUNCH_DIR / "shortcuts_backup"
 LAUNCH_SHORTCUT_BACKUP_PATH = LAUNCH_DIR / "shortcuts.json"
 LAUNCH_SOUND_MAX = 12 * 1024 * 1024
+CUSTOMIZE_DIR = CONFIG_DIR / "Customize"
+UI_FONT_DIR = CUSTOMIZE_DIR / "Fonts"
+UI_FONT_MAX = 20 * 1024 * 1024
+UI_FONT_EXTS = (".ttf", ".otf")
 CURSOR_SLOTS = (
     {"key": "shiftlock", "file": "MouseLockedCursor.png",
      "label": "ShiftLock",
@@ -202,6 +206,10 @@ DEFAULT_CONFIG = {
     "launch_sound": True,
     "launch_sound_name": "",
     "launch_splash": "card",
+    "error_sound": True,
+    "error_sound_name": "",
+    "ui_font_name": "",
+    "ui_font_family": "",
 }
 
 # ---- FastFlags и бутстраперы -----------------------------------------------
@@ -326,10 +334,13 @@ def load_config(path=None):
 
     for flag in ("auto_close", "save_history", "remember_last",
                  "apply_flags_on_launch", "use_custom_cursors",
-                 "discord_rpc", "launch_sound"):
+                 "discord_rpc", "launch_sound", "error_sound"):
         cfg[flag] = bool(cfg.get(flag))
     cfg["discord_app_id"] = valid_discord_app_id(cfg.get("discord_app_id"))
     cfg["launch_sound_name"] = str(cfg.get("launch_sound_name") or "").strip()[:80]
+    cfg["error_sound_name"] = str(cfg.get("error_sound_name") or "").strip()[:80]
+    cfg["ui_font_name"] = str(cfg.get("ui_font_name") or "").strip()[:80]
+    cfg["ui_font_family"] = str(cfg.get("ui_font_family") or "").strip()[:80]
     splash = str(cfg.get("launch_splash") or "").lower()
     cfg["launch_splash"] = splash if splash in SPLASH_STYLES else "card"
     try:
@@ -1937,6 +1948,7 @@ LAUNCH_ICON_MAX = 8 * 1024 * 1024
 LAUNCH_ICON_SIZES = ((256, 256), (128, 128), (64, 64),
                      (48, 48), (32, 32), (16, 16))
 LAUNCH_SOUND_EXTS = (".wav", ".mp3")
+LAUNCH_SOUND_ROLES = {"launch": "sound", "error": "error"}
 MCI_ALIAS = "maklyxa_launch_sound"
 _mci_lock = threading.Lock()
 
@@ -2026,18 +2038,24 @@ def _sound_signature_ok(path, ext):
     return False
 
 
-def launch_sound_path(sound_dir=None):
+def _sound_stem(role):
+    return LAUNCH_SOUND_ROLES.get(str(role or "launch"), "sound")
+
+
+def launch_sound_path(sound_dir=None, role="launch"):
     base = Path(sound_dir or LAUNCH_DIR)
-    for name in ("sound.wav", "sound.mp3"):
-        path = base / name
+    stem = _sound_stem(role)
+    for ext in LAUNCH_SOUND_EXTS:
+        path = base / f"{stem}{ext}"
         if path.is_file():
             return path
     return None
 
 
-def import_launch_sound(source, sound_dir=None):
+def import_launch_sound(source, sound_dir=None, role="launch"):
     source = Path(source)
     base = Path(sound_dir or LAUNCH_DIR)
+    stem = _sound_stem(role)
     ext = source.suffix.lower()
     if not source.is_file():
         return _launch_error("файл не найден")
@@ -2050,7 +2068,7 @@ def import_launch_sound(source, sound_dir=None):
         return _launch_error(exc)
     if not _sound_signature_ok(source, ext):
         return _launch_error("файл не похож на WAV или MP3")
-    dest = base / f"sound{ext}"
+    dest = base / f"{stem}{ext}"
     try:
         base.mkdir(parents=True, exist_ok=True)
         stop_launch_sound()
@@ -2059,7 +2077,7 @@ def import_launch_sound(source, sound_dir=None):
     except OSError as exc:
         return _launch_error(exc)
     for other in LAUNCH_SOUND_EXTS:
-        old = base / f"sound{other}"
+        old = base / f"{stem}{other}"
         if old != dest:
             try:
                 old.unlink()
@@ -2068,13 +2086,14 @@ def import_launch_sound(source, sound_dir=None):
     return {"ok": True, "error": "", "path": dest, "name": source.name}
 
 
-def remove_launch_sound(sound_dir=None):
+def remove_launch_sound(sound_dir=None, role="launch"):
     stop_launch_sound()
     base = Path(sound_dir or LAUNCH_DIR)
+    stem = _sound_stem(role)
     removed = 0
     errors = []
     for ext in LAUNCH_SOUND_EXTS:
-        path = base / f"sound{ext}"
+        path = base / f"{stem}{ext}"
         try:
             if path.exists():
                 path.unlink()
@@ -2123,6 +2142,211 @@ def play_launch_sound(path=None):
 def stop_launch_sound():
     with _mci_lock:
         _mci_close()
+
+
+# ---- кастомизация лаунчера: свой шрифт интерфейса ------------------------------
+
+UI_FONT_PRIVATE = 0x10
+
+
+def _ui_font_error(message):
+    return {"ok": False, "error": str(message), "path": None,
+            "name": "", "family": "", "families": []}
+
+
+def _font_name_table(data):
+    """Имена семейства из таблицы name (SFNT/TTF/OTF)."""
+    if len(data) < 6:
+        return []
+    try:
+        fmt, count, string_offset = struct.unpack(">HHH", data[:6])
+    except struct.error:
+        return []
+    if fmt not in (0, 1):
+        return []
+    ranked = {}
+    pos = 6
+    for _ in range(min(count, 512)):
+        if pos + 12 > len(data):
+            break
+        try:
+            (platform, _encoding, language, name_id, length,
+             offset) = struct.unpack(">HHHHHH", data[pos:pos + 12])
+        except struct.error:
+            break
+        pos += 12
+        if name_id not in (1, 16):
+            continue
+        start = string_offset + offset
+        raw = data[start:start + length]
+        if not raw:
+            continue
+        if platform in (0, 3):
+            try:
+                text = raw.decode("utf-16-be")
+            except UnicodeDecodeError:
+                continue
+        elif platform == 1:
+            text = raw.decode("mac_roman", "ignore")
+        else:
+            continue
+        text = text.replace("\x00", "").strip()
+        if not text:
+            continue
+        rank = (
+            0 if platform == 3 and language in (0, 0x409)
+            else 1 if platform == 3
+            else 2 if platform == 1 else 3,
+            0 if name_id == 1 else 1,
+        )
+        known = {name.casefold() for name in ranked}
+        if text.casefold() not in known:
+            ranked[text] = rank
+    return [name for name, _rank in sorted(ranked.items(),
+                                           key=lambda item: item[1])]
+
+
+def read_font_families(path):
+    """Семейства шрифта (сначала основное), [] если файл не TTF/OTF."""
+    path = Path(path)
+    try:
+        if path.stat().st_size > UI_FONT_MAX:
+            return []
+        with path.open("rb") as fh:
+            head = fh.read(12)
+            if (len(head) < 12 or head[:4] == b"ttcf"
+                    or head[:4] not in (b"\x00\x01\x00\x00", b"OTTO",
+                                        b"true", b"typ1")):
+                return []
+            num_tables = struct.unpack(">H", head[4:6])[0]
+            if not (1 <= num_tables <= 100):
+                return []
+            name_tables = []
+            for _ in range(num_tables):
+                record = fh.read(16)
+                if len(record) < 16:
+                    break
+                tag, _checksum, offset, length = struct.unpack(
+                    ">4sIII", record)
+                if tag == b"name":
+                    name_tables.append((offset, length))
+            for offset, length in name_tables:
+                fh.seek(offset)
+                data = fh.read(min(length, 1000000))
+                names = _font_name_table(data)
+                if names:
+                    return names
+    except (OSError, struct.error):
+        return []
+    return []
+
+
+def inspect_ui_font(source):
+    source = Path(source)
+    ext = source.suffix.lower()
+    if not source.is_file():
+        return _ui_font_error("файл не найден")
+    if ext not in UI_FONT_EXTS:
+        return _ui_font_error("нужен шрифт TTF или OTF")
+    try:
+        size = source.stat().st_size
+    except OSError as exc:
+        return _ui_font_error(exc)
+    if size <= 0:
+        return _ui_font_error("файл пустой")
+    if size > UI_FONT_MAX:
+        return _ui_font_error("шрифт больше 20 МБ")
+    families = read_font_families(source)
+    if not families:
+        return _ui_font_error("не удалось прочитать TTF/OTF")
+    return {"ok": True, "error": "", "path": source,
+            "name": source.name[:80], "family": families[0],
+            "families": families}
+
+
+def ui_font_path(font_dir=None):
+    base = Path(font_dir or UI_FONT_DIR)
+    for ext in UI_FONT_EXTS:
+        path = base / f"font{ext}"
+        if path.is_file():
+            return path
+    return None
+
+
+def ui_font_state(font_dir=None):
+    path = ui_font_path(font_dir)
+    families = read_font_families(path) if path is not None else []
+    return {"custom": path is not None, "path": path,
+            "family": families[0] if families else "",
+            "families": families}
+
+
+def import_ui_font(source, font_dir=None):
+    """Скопировать TTF/OTF в папку лаунчера (атомарно, с заменой)."""
+    info = inspect_ui_font(source)
+    if not info["ok"]:
+        return info
+    source = Path(source)
+    base = Path(font_dir or UI_FONT_DIR)
+    ext = source.suffix.lower()
+    dest = base / f"font{ext}"
+    temp = base / f"font{ext}.tmp"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, temp)
+        os.replace(temp, dest)
+    except OSError as exc:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+        return _ui_font_error(exc)
+    for other in UI_FONT_EXTS:
+        old = base / f"font{other}"
+        if old != dest:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    info["path"] = dest
+    return info
+
+
+def remove_ui_font(font_dir=None):
+    base = Path(font_dir or UI_FONT_DIR)
+    removed = 0
+    errors = []
+    for ext in UI_FONT_EXTS:
+        path = base / f"font{ext}"
+        try:
+            if path.exists():
+                path.unlink()
+                removed += 1
+        except OSError as exc:
+            errors.append(str(exc))
+    return {"ok": not errors, "removed": removed,
+            "error": errors[0] if errors else ""}
+
+
+def load_private_font(path):
+    """Подключить шрифт только к текущему процессу, без установки."""
+    if os.name != "nt":
+        return False
+    try:
+        return bool(ctypes.windll.gdi32.AddFontResourceExW(
+            str(Path(path)), UI_FONT_PRIVATE, 0))
+    except (AttributeError, OSError):
+        return False
+
+
+def unload_private_font(path):
+    if os.name != "nt":
+        return False
+    try:
+        return bool(ctypes.windll.gdi32.RemoveFontResourceExW(
+            str(Path(path)), UI_FONT_PRIVATE, 0))
+    except (AttributeError, OSError):
+        return False
 
 
 def refresh_shell_icons():
