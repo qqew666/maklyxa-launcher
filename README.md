@@ -1,7 +1,20 @@
-# MaklyxaLauncher v1.6.2
+# MaklyxaLauncher v1.6.3
 
-Настольный лаунчер (`.exe`) для **официального** клиента Roblox.
-Своё окно без рамки, три темы оформления, боковое меню с группами разделов.
+Настольный лаунчер для **официального** клиента Roblox: установщик `.msi`
+с выбором папки или портативный `.exe`. Своё окно без рамки, три темы
+оформления, боковое меню с группами разделов.
+
+## Что нового в v1.6.3
+
+- **MSI-установщик** — лаунчер ставится как обычная программа Windows:
+  в установщике можно выбрать папку установки (по умолчанию
+  `C:\Program Files\MaklyxaLauncher`)
+- **Ярлыки** в меню «Пуск» и на рабочем столе; удаление через
+  «Параметры → Приложения» или «Программы и компоненты»
+- Настройки пользователя в `%APPDATA%\MaklyxaLauncher` при удалении
+  сохраняются
+- Портативный `.exe` по-прежнему прикладывается к релизу — установка
+  для него не нужна
 
 ## Что нового в v1.6.2
 
@@ -82,6 +95,18 @@
 - **Переименован в MaklyxaLauncher** — старый конфиг мигрируется автоматически
 - Код разбит на `core.py` (логика) и `launcher.py` (интерфейс)
 
+## Установка
+
+Скачайте `MaklyxaLauncher-1.6.3-x64.msi` со страницы
+[релизов](https://github.com/qqew666/maklyxa-launcher/releases/latest)
+и запустите. Установщик позволяет выбрать папку (по умолчанию
+`C:\Program Files\MaklyxaLauncher`), создаёт ярлыки в меню «Пуск» и на
+рабочем столе. Удаление — через «Параметры → Приложения» или
+«Программы и компоненты»; настройки в `%APPDATA%\MaklyxaLauncher`
+сохраняются.
+
+Портативная версия `MaklyxaLauncher.exe` работает без установки.
+
 ## Возможности
 
 ### Игра
@@ -156,14 +181,21 @@ Froststrap/Bloxstrap Modifications, рядом с exe): чужие ключи н
 бутстрапера пишутся в его `Settings.json` — только известные ключи, остальное
 сохраняется как было.
 
-## Сборка .exe
+## Сборка
 
 ```bat
 pip install pyinstaller
+dotnet tool install --global wix --version 5.0.2
+wix extension add -g WixToolset.UI.wixext/5.0.2
 build.bat
+build_msi.bat
 ```
 
-Готовый файл: `dist\MaklyxaLauncher.exe` (одиночный файл, Python не нужен).
+`build.bat` собирает `dist\MaklyxaLauncher.exe` (одиночный файл, Python не
+нужен). `build_msi.bat` упаковывает его в установщик
+`dist\MaklyxaLauncher-1.6.3-x64.msi` с выбором папки установки. Для MSI нужен
+[WiX Toolset 5](https://wixtoolset.org/): он ставится как .NET-инструмент
+и не требует прав администратора.
 
 ## Запуск из исходников
 
@@ -183,7 +215,11 @@ python launcher.py --theme glass     # тема без сохранения (dar
 | `launcher.py` | интерфейс приложения |
 | `make_icon.py` | генератор иконки (`icon.png`, `icon.ico`) |
 | `build.bat` | сборка exe через PyInstaller |
-| `dist\MaklyxaLauncher.exe` | готовое приложение |
+| `build_msi.bat` | сборка MSI-установщика через WiX |
+| `installer\MaklyxaLauncher.wxs` | описание MSI: файлы, ярлыки, выбор папки |
+| `installer\license.rtf` | текст лицензии в установщике |
+| `dist\MaklyxaLauncher.exe` | готовое приложение (портативное) |
+| `dist\MaklyxaLauncher-1.6.3-x64.msi` | готовый установщик |
 
 Настройки и списки: `%APPDATA%\MaklyxaLauncher\config.json`
 (старый `%APPDATA%\RobloxLauncher\config.json` мигрируется автоматически)
@@ -205,4 +241,4 @@ python launcher.py --theme glass     # тема без сохранения (dar
 
 - Windows 10/11
 - Для запуска игр — установленный клиент Roblox (если его нет, лаунчер предложит скачать)
-- Для сборки: Python 3.10+ и PyInstaller
+- Для сборки: Python 3.10+, PyInstaller и WiX Toolset 5 (только для MSI)

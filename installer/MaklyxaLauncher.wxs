@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="MaklyxaLauncher"
+           Manufacturer="Maklyxa"
+           Version="$(var.Version)"
+           UpgradeCode="0B487EBE-A725-441D-A430-99BB26F8ABBD"
+           Language="1049"
+           Codepage="65001"
+           Scope="perMachine"
+           InstallerVersion="500">
+
+    <SummaryInformation Description="MaklyxaLauncher installer"
+                        Manufacturer="Maklyxa" />
+
+    <MajorUpgrade DowngradeErrorMessage="Установлена более новая версия MaklyxaLauncher."
+                  AllowSameVersionUpgrades="yes" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/qqew666/maklyxa-launcher" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/qqew666/maklyxa-launcher" />
+
+    <Launch Condition="VersionNT64" Message="Требуется 64-битная Windows." />
+    <Launch Condition="VersionNT &gt;= 1000" Message="Требуется Windows 10 или Windows 11." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="MaklyxaLauncher" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="MaklyxaLauncher" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder" />
+
+    <Component Id="ApplicationFiles" Directory="INSTALLFOLDER"
+               Guid="60AF83DB-04D4-47E6-82B2-E6069D23568F">
+      <File Id="MaklyxaLauncherExe"
+            Source="dist\MaklyxaLauncher.exe"
+            KeyPath="yes" />
+    </Component>
+
+    <Component Id="StartMenuShortcut" Directory="ApplicationProgramsFolder"
+               Guid="66F289FD-64A2-4DF9-9A57-D178AD447401">
+      <Shortcut Id="StartMenuShortcutLink"
+                Name="MaklyxaLauncher"
+                Description="Лаунчер Roblox"
+                Target="[INSTALLFOLDER]MaklyxaLauncher.exe"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="AppIcon"
+                Advertise="no" />
+      <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\MaklyxaLauncher"
+                     Name="StartMenuShortcut" Type="integer" Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+    <Component Id="DesktopShortcut" Directory="DesktopFolder"
+               Guid="39AA9503-CD6A-40AD-94FB-C0FFE7D5D1E7">
+      <Shortcut Id="DesktopShortcutLink"
+                Name="MaklyxaLauncher"
+                Description="Лаунчер Roblox"
+                Target="[INSTALLFOLDER]MaklyxaLauncher.exe"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="AppIcon"
+                Advertise="no" />
+      <RegistryValue Root="HKCU" Key="Software\MaklyxaLauncher"
+                     Name="DesktopShortcut" Type="integer" Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+    <Feature Id="MainFeature" Title="MaklyxaLauncher" Level="1">
+      <ComponentRef Id="ApplicationFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="installer\license.rtf" />
+
+  </Package>
+</Wix>
