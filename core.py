@@ -45,11 +45,16 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.6.5"
+VERSION = "1.7.0"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
 CREATE_NO_WINDOW = 0x08000000
+
+GITHUB_REPO = "qqew666/maklyxa-launcher"
+RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
+RELEASES_API = (f"https://api.github.com/repos/{GITHUB_REPO}"
+                "/releases?per_page=15")
 
 CONFIG_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / APP_NAME
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -563,6 +568,45 @@ def _get_json(url, timeout=8):
     req = urllib.request.Request(url, headers=HTTP_HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def version_tuple(text):
+    """'v1.7.0' → (1, 7, 0); None, если цифр в строке нет."""
+    nums = re.findall(r"\d+", str(text or ""))
+    return tuple(int(n) for n in nums[:4]) or None
+
+
+def check_launcher_update(timeout=8):
+    """Последний релиз на GitHub и признак, что он новее этой сборки."""
+    try:
+        releases = _get_json(RELEASES_API, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 — сеть, лимит API, битый ответ
+        return {"error": str(exc) or type(exc).__name__}
+    if not isinstance(releases, list):
+        return {"error": "GitHub вернул неожиданный ответ"}
+    release = next(
+        (r for r in releases
+         if isinstance(r, dict) and not r.get("draft")), None)
+    if release is None:
+        return {"error": "На GitHub нет опубликованных релизов"}
+    tag = str(release.get("tag_name") or "")
+    latest = version_tuple(tag)
+    current = version_tuple(VERSION) or ()
+    page = str(release.get("html_url") or RELEASES_URL)
+    msi = next(
+        (str(a.get("browser_download_url") or "")
+         for a in release.get("assets") or []
+         if str(a.get("name") or "").lower().endswith(".msi")), "")
+    return {
+        "current": VERSION,
+        "tag": tag,
+        "latest": ".".join(str(n) for n in latest) if latest else tag,
+        "name": str(release.get("name") or tag),
+        "url": page,
+        "download": msi or page,
+        "prerelease": bool(release.get("prerelease")),
+        "is_newer": bool(latest and latest > current),
+    }
 
 
 def fetch_game_info(place_id):

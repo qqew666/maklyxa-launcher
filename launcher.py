@@ -48,12 +48,13 @@ from core import (
     DEFAULT_CONFIG, DEFAULT_THEME,
     DISCORD_PORTAL_URL, DISCOVER_URL, FPS_CHOICES, FLAG_API, FLAG_FPS, FLAG_QUALITY,
     GRAPHICS_MODES, HTTP_HEADERS, INSTALLER_URL,
-    IMAGE_ONLY_ACCENT, IMAGE_ONLY_PALETTE,
+    IMAGE_ONLY_ACCENT, IMAGE_ONLY_PALETTE, RELEASES_URL,
     THEMES, THEME_ORDER, VERSION, WINDOW_TITLE,
     THEME_SETS_DIR, THEME_TINTS,
     account_avatar_path, account_session, accounts_state, add_account,
     acquire_single_instance, apply_cursor_set, apply_fastflags,
     bootstrapper_running, browser_login, build_theme_palette,
+    check_launcher_update,
     client_settings_paths, close_roblox_players, copy_current_cursor_set,
     create_cursor_set, create_theme_set, cursor_install_roots,
     cursor_set_files, cursor_set_warnings, cursor_slot_path,
@@ -71,7 +72,8 @@ from core import (
     roblox_status, save_config, set_active_account, set_cursor_slot,
     set_theme_image, shade, theme_set_info, trunc, unprotect_secret,
     update_theme_set, valid_cursor_set_name,
-    valid_discord_app_id, valid_geometry, valid_theme_set_name, work_area,
+    valid_discord_app_id, valid_geometry, valid_theme_set_name,
+    version_tuple, work_area,
     write_json_dict, DiscordPresence, discord_activity, discord_frame,
 )
 
@@ -124,12 +126,15 @@ class FramelessWindow:
         self.maximized = False
         self.excluded = set()          # виджеты, где drag/resize не работает
         self.on_max_change = None      # колбэк смены состояния максимизации
+        self.on_alt_tab = None         # колбэк ухода в другое окно через Alt+Tab
         self._mode = None              # 'move' | 'resize'
         self._zone = ""
         self._start = None
         self._prev_geom = None
         self._cursor = ""
         self._styled = False
+        self._alt_seen = 0.0
+        self._was_foreground = True
 
         root.overrideredirect(True)
         root.bind("<Map>", self._on_map, add="+")
@@ -138,6 +143,68 @@ class FramelessWindow:
         root.bind("<ButtonRelease-1>", self._on_release, add="+")
         root.bind("<Motion>", self._on_hover, add="+")
         root.bind("<Double-Button-1>", self._on_double, add="+")
+        self._init_switch_watch()
+        root.after(70, self._watch_switch)
+
+    # -- уход в другое окно через Alt+Tab -----------------------------------
+
+    def _init_switch_watch(self):
+        if os.name != "nt":
+            return
+        try:
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+            user32.GetAsyncKeyState.restype = ctypes.c_short
+            user32.GetForegroundWindow.restype = wintypes.HWND
+            user32.GetWindowThreadProcessId.argtypes = [
+                wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        except (AttributeError, OSError):
+            pass
+
+    def _foreground_elsewhere(self):
+        if os.name != "nt":
+            return False
+        try:
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return False
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            return pid.value != os.getpid()
+        except (AttributeError, OSError):
+            return False
+
+    def _watch_switch(self):
+        """Закрывает лаунчер, если он потерял фокус из-за Alt+Tab."""
+        if self.root is None:
+            return
+        try:
+            self.root.after(70, self._watch_switch)
+        except tk.TclError:
+            return
+        now = time.monotonic()
+        try:
+            if ctypes.windll.user32.GetAsyncKeyState(0x12) & 0x8000:
+                self._alt_seen = now
+        except (AttributeError, OSError):
+            return
+        if not self._foreground_elsewhere():
+            self._was_foreground = True
+            return
+        if not self._was_foreground:
+            return
+        self._was_foreground = False
+        if now - self._alt_seen > 1.2:
+            return
+        if callable(self.on_alt_tab):
+            try:
+                self.on_alt_tab()
+            except tk.TclError:
+                pass
 
     # -- окно в панели задач -------------------------------------------------
 
@@ -577,6 +644,10 @@ class App:
         self._rpc = None
         self._rpc_start_ts = time.time()
         self.discord_status_var = tk.StringVar(value="")
+        self.update_status_var = tk.StringVar(
+            value="Проверка ещё не выполнялась")
+        self._update_busy = False
+        self._update_url = ""
         self.account_name_var = tk.StringVar(value="Не выбран")
         self.account_user_var = tk.StringVar(value="Войти в аккаунт")
         self.game_account_var = tk.StringVar(value="Аккаунт не выбран")
@@ -619,6 +690,7 @@ class App:
         self.boot_config_path = None
 
         self.frameless = FramelessWindow(root, (MIN_W, MIN_H))
+        self.frameless.on_alt_tab = self._close_on_alt_tab
         self._configure_window()
         self._build(keep_page=self.current_page)
 
@@ -4094,6 +4166,35 @@ class App:
                                           font=("Segoe UI", 9))
         self.accent_name_label.pack(side="left", padx=8)
 
+        # обновления
+        inner_upd = self._card(
+            pad, title="Обновления",
+            subtitle="Проверка последнего релиза MaklyxaLauncher на GitHub",
+            glyph="⟳")
+        upd_row = tk.Frame(inner_upd, bg=c["surface"])
+        upd_row.pack(fill="x", pady=(8, 0))
+        tk.Label(upd_row, text=f"Установлена версия {VERSION}",
+                 bg=c["surface"], fg=c["text"],
+                 font=("Segoe UI", 10, "bold")).pack(side="left")
+        upd_btns = tk.Frame(upd_row, bg=c["surface"])
+        upd_btns.pack(side="right")
+        self.btn_update = self._button(
+            upd_btns, "Проверить обновления", self.check_updates,
+            side="left")
+        self.btn_update_get = self._button(
+            upd_btns, "Скачать обновление", self.open_update,
+            kind="primary", side="left", padx=(8, 0))
+        self.btn_update_get.pack_forget()
+        tk.Label(inner_upd, textvariable=self.update_status_var,
+                 bg=c["surface"], fg=c["muted"],
+                 font=("Segoe UI", 9), anchor="w").pack(
+                     fill="x", pady=(9, 0))
+        self._hint(
+            inner_upd,
+            "Сеть используется только по нажатию кнопки. Лаунчер сравнивает "
+            "версии и открывает страницу загрузки — ничего не скачивается "
+            "и не устанавливается само.", wrap=540)
+
         # о программе
         inner5 = self._card(pad, title="О программе", glyph="ⓘ")
         tk.Label(
@@ -4298,6 +4399,78 @@ class App:
             messagebox.showerror(
                 APP_NAME, f"Не удалось открыть папку:\n{exc}",
                 parent=self.root)
+
+    # -- проверка обновлений ---------------------------------------------------------
+
+    def check_updates(self):
+        if self._update_busy:
+            return
+        self._update_busy = True
+        self.update_status_var.set("Спрашиваю GitHub о последнем релизе…")
+        self._btn_state(self.btn_update, "ghost", False, text="Проверяю…")
+        self.status_var.set("Проверяю обновления…")
+
+        def worker():
+            result = check_launcher_update()
+            self.q.put(lambda: self._on_update_checked(result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_widgets_alive(self):
+        try:
+            return bool(self.btn_update.winfo_exists()
+                        and self.btn_update_get.winfo_exists())
+        except (AttributeError, tk.TclError):
+            return False
+
+    def _on_update_checked(self, result):
+        self._update_busy = False
+        if self._closing or not self._update_widgets_alive():
+            return
+        self._btn_state(self.btn_update, "ghost", True,
+                        text="Проверить обновления")
+        error = result.get("error")
+        if error:
+            self.update_status_var.set(
+                "Не удалось связаться с GitHub — проверь подключение")
+            self.btn_update_get.pack_forget()
+            self.log(f"Проверка обновлений: {error}")
+            self.status_var.set("Не удалось проверить обновления")
+            return
+        latest = result.get("latest") or "?"
+        if result.get("is_newer"):
+            label = f"Доступна версия {latest}"
+            if result.get("prerelease"):
+                label += " (бета)"
+            self.update_status_var.set(label)
+            self._update_url = (result.get("download")
+                                or result.get("url") or RELEASES_URL)
+            if not self.btn_update_get.winfo_manager():
+                self.btn_update_get.pack(side="left", padx=(8, 0))
+            self.log(f"Проверка обновлений: доступна версия {latest}")
+            self.status_var.set(f"Доступна версия {latest}")
+            return
+        self.update_status_var.set(
+            f"Установлена последняя версия — {VERSION}")
+        self.btn_update_get.pack_forget()
+        self.log(f"Проверка обновлений: установлена последняя версия "
+                 f"{VERSION}")
+        self.status_var.set("Обновлений нет")
+
+    def open_update(self):
+        url = self._update_url or RELEASES_URL
+        self.log("Открываю страницу загрузки обновления")
+        webbrowser.open(url)
+
+    def _close_on_alt_tab(self):
+        """Alt+Tab в другое окно закрывает лаунчер, а не оставляет его висеть."""
+        if self._closing or not self.interactive:
+            return
+        if self._login_busy or self._login_window_alive():
+            return
+        if self._client_busy or self._play_busy or self._dl_active:
+            return
+        self.close()
 
     def close(self):
         """Закрытие: запоминаем геометрию окна и выходим."""
@@ -5353,6 +5526,49 @@ def run_selftest():
     except Exception as exc:  # noqa: BLE001
         failures.append(f"discord test: {exc}")
 
+    # 4c) проверка обновлений: версии и ответ GitHub (без сети)
+    try:
+        if version_tuple("v1.7.0") != (1, 7, 0):
+            failures.append("version_tuple: не разобрал v1.7.0")
+        if version_tuple("1.10.2") != (1, 10, 2):
+            failures.append("version_tuple: не разобрал 1.10.2")
+        if version_tuple("") is not None:
+            failures.append("version_tuple: пустая строка не None")
+
+        import core as core_module
+
+        original_get = core_module._get_json
+        try:
+            core_module._get_json = lambda url, timeout=8: [{
+                "tag_name": "v99.0.0", "name": "Тест", "html_url": "u",
+                "prerelease": False, "draft": False,
+                "assets": [{"name": "MaklyxaLauncher-99.0.0-x64.msi",
+                            "browser_download_url": "https://x/app.msi"}]}]
+            upd = check_launcher_update()
+            if upd.get("error") or not upd.get("is_newer"):
+                failures.append(f"check_launcher_update: {upd}")
+            if upd.get("download") != "https://x/app.msi":
+                failures.append(
+                    f"check_launcher_update: ассет {upd.get('download')!r}")
+
+            core_module._get_json = lambda url, timeout=8: [{
+                "tag_name": f"v{VERSION}", "html_url": "u", "assets": []}]
+            if check_launcher_update().get("is_newer"):
+                failures.append("check_launcher_update: текущая версия "
+                                "считается новее себя")
+
+            def offline(url, timeout=8):
+                raise OSError("offline")
+
+            core_module._get_json = offline
+            if not check_launcher_update().get("error"):
+                failures.append(
+                    "check_launcher_update: ошибка сети не поймана")
+        finally:
+            core_module._get_json = original_get
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"update check test: {exc}")
+
     # 5) обнаружение Roblox
     try:
         exe = find_player_exe()
@@ -5779,6 +5995,7 @@ def run_selftest():
         core_module.THEME_SETS_DIR = ui_data / "ThemeSets"
         core_module.ACCOUNTS_PATH = ui_data / "accounts.json"
         core_module.AVATARS_DIR = ui_data / "avatars"
+        core_module.CONFIG_PATH = ui_data / "config.json"
 
         root = tk.Tk()
         root.withdraw()
@@ -5875,6 +6092,52 @@ def run_selftest():
         if f"{MIN_W}x{MIN_H}" not in root.geometry():
             failures.append(f"restore: геометрия {root.geometry()}")
 
+        # Alt+Tab: уход из окна распознаётся, в автотесте не закрывает
+        if not callable(app.frameless.on_alt_tab):
+            failures.append("Alt+Tab: обработчик закрытия не подключён")
+        original_foreground = app.frameless._foreground_elsewhere
+        original_tab = app.frameless.on_alt_tab
+        hits = []
+        app.frameless._foreground_elsewhere = lambda: True
+        app.frameless.on_alt_tab = lambda: hits.append(1)
+        app.frameless._was_foreground = True
+        app.frameless._alt_seen = time.monotonic()
+        app.frameless._watch_switch()
+        app.frameless._foreground_elsewhere = original_foreground
+        app.frameless.on_alt_tab = original_tab
+        root.update()
+        if app.frameless._was_foreground:
+            failures.append("Alt+Tab: уход из окна не распознан")
+        if len(hits) != 1:
+            failures.append("Alt+Tab: закрытие не сработало")
+        app._close_on_alt_tab()
+        root.update()
+        if app._closing:
+            failures.append("Alt+Tab: автотест закрыл лаунчер")
+
+        # проверка обновлений: состояния карточки без сети
+        if not hasattr(app, "btn_update"):
+            failures.append("UI: нет кнопки проверки обновлений")
+        else:
+            app._on_update_checked({
+                "current": VERSION, "latest": "99.0.0", "tag": "v99.0.0",
+                "url": RELEASES_URL, "download": RELEASES_URL,
+                "prerelease": False, "is_newer": True})
+            root.update()
+            if "99.0.0" not in app.update_status_var.get():
+                failures.append("UI: доступное обновление не показано")
+            if not app.btn_update_get.winfo_manager():
+                failures.append("UI: кнопка загрузки скрыта при обновлении")
+            if app._update_url != RELEASES_URL:
+                failures.append("UI: ссылка на обновление не сохранена")
+            app._on_update_checked({"current": VERSION, "latest": VERSION,
+                                    "is_newer": False})
+            root.update()
+            if app.btn_update_get.winfo_manager():
+                failures.append("UI: кнопка загрузки осталась без обновления")
+            if "последняя" not in app.update_status_var.get():
+                failures.append("UI: нет статуса последней версии")
+
         # фото-фон, режим «только картинка» и вход через сайт
         photo_theme = create_theme_set(
             "Фото-тема", base="dark", tint="#00c48c", accent="#00c48c",
@@ -5970,7 +6233,7 @@ def run_selftest():
             print("  -", item)
         return 1
     print("SELFTEST OK: core, themes, accounts, frameless window, flags, "
-          "cursors, UI rebuild — all good")
+          "cursors, updates, UI rebuild — all good")
     return 0
 
 
