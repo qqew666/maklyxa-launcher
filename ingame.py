@@ -641,7 +641,9 @@ class HotkeyThread:
         self.error = ""
         self._thread = None
         self._ready = threading.Event()
+        self._stop = threading.Event()
         self._tid = 0
+        self._registered = False
 
     def start(self):
         if not IS_WINDOWS:
@@ -652,20 +654,28 @@ class HotkeyThread:
         self._ready.wait(1.2)
         return self.ok
 
-    def _run(self):
-        self._tid = int(kernel32.GetCurrentThreadId())
+    def _register(self):
         try:
-            self.ok = bool(user32.RegisterHotKey(
+            return bool(user32.RegisterHotKey(
                 None, HOTKEY_ID, MOD_SHIFT | MOD_NOREPEAT, VK_F1))
         except (OSError, AttributeError):
-            self.ok = False
-        if not self.ok:
+            return False
+
+    def _run(self):
+        self._tid = int(kernel32.GetCurrentThreadId())
+        while not self._stop.is_set() and not self._register():
             self.error = "Shift+F1 занят другой программой"
             self._ready.set()
+            self._stop.wait(3.0)
+        if self._registered or self._stop.is_set():
+            self._ready.set()
             return
+        self._registered = True
+        self.ok = True
+        self.error = ""
         self._ready.set()
         msg = wintypes.MSG()
-        while True:
+        while not self._stop.is_set():
             result = int(user32.GetMessageW(ctypes.byref(msg), None, 0, 0))
             if result <= 0:
                 break
@@ -677,15 +687,17 @@ class HotkeyThread:
             user32.UnregisterHotKey(None, HOTKEY_ID)
         except (OSError, AttributeError):
             pass
+        self._registered = False
 
     def stop(self):
         if not IS_WINDOWS or self._thread is None:
             return
+        self._stop.set()
         try:
             user32.PostThreadMessageW(self._tid, WM_QUIT, 0, 0)
         except (OSError, AttributeError):
             pass
-        self._thread.join(timeout=0.6)
+        self._thread.join(timeout=3.6)
 
 
 class Overlay:
@@ -936,7 +948,7 @@ class InGameHelper:
         self.events = queue.Queue()
         self.hotkey = HotkeyThread(self.events)
         self._desired = bool(self.cfg.get("ingame_overlay_start"))
-        self._started = time.monotonic()
+        self._hotkey_seen = False
         self._last_seen = 0.0
         self._seen = False
         self._win = None
@@ -955,6 +967,7 @@ class InGameHelper:
 
     def start(self):
         hotkey_ok = self.hotkey.start()
+        self._hotkey_seen = hotkey_ok
         self.overlay.set_hotkey_ok(hotkey_ok)
         if not hotkey_ok:
             helper_log(f"hotkey: {self.hotkey.error}")
@@ -1001,6 +1014,8 @@ class InGameHelper:
             if kernel32.WaitForSingleObject(self.stop_handle, 0) == 0:
                 self.shutdown()
                 return
+            if kernel32.WaitForSingleObject(self.toggle_handle, 0) == 0:
+                self._toggle()
             while True:
                 try:
                     event = self.events.get_nowait()
@@ -1008,19 +1023,20 @@ class InGameHelper:
                     break
                 if event == "toggle":
                     self._toggle()
+            if self.hotkey.ok != self._hotkey_seen:
+                self._hotkey_seen = bool(self.hotkey.ok)
+                self.overlay.set_hotkey_ok(self._hotkey_seen)
+                helper_log("hotkey: Shift+F1 свободен" if self._hotkey_seen
+                           else f"hotkey: {self.hotkey.error}")
             now = time.monotonic()
             if now >= self._next_poll:
                 self._next_poll = now + 0.5
                 self._win = find_roblox_window()
-                if self._win:
+                if self._win or roblox_pids():
                     self._seen = True
                     self._last_seen = now
                 elif self._seen and now - self._last_seen > 90:
                     helper_log("Roblox закрыт — выход")
-                    self.shutdown()
-                    return
-                elif not self._seen and now - self._started > 240:
-                    helper_log("Roblox не появился — выход")
                     self.shutdown()
                     return
                 self._apply_overlay()

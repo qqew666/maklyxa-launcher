@@ -907,6 +907,8 @@ class App:
         self._ingame_busy = False
         self._ingame_last = None
         self._ingame_poll_job = None
+        self._ingame_user_stopped = False
+        self._ingame_next_auto = 0.0
 
         self._debounce = None
         self._dl_active = False
@@ -5985,7 +5987,8 @@ class App:
             glyph="◳")
         self._checkbox(
             inner, "Показывать оверлей поверх Roblox (Shift+F1)",
-            self.var_ingame_overlay, command=self._save_ingame_cfg).pack(
+            self.var_ingame_overlay,
+            command=self._ingame_feature_toggle).pack(
                 anchor="w", pady=(6, 0))
         self._checkbox(
             inner, "Показывать сразу при входе в игру",
@@ -6066,9 +6069,10 @@ class App:
             kind="primary", side="left")
         self._hint(
             inner,
-            "Оверлей виден только когда окно Roblox активно. Shift+F1 "
-            "переключает его глобально; если комбинацию занял другой "
-            "программой — пользуйся кнопкой.", wrap=560)
+            "Оверлей виден только когда окно Roblox активно. Помощник "
+            "запускается автоматически, как только Roblox открывается; "
+            "Shift+F1 переключает оверлей глобально. Если комбинацию занял "
+            "другой программой — пользуйся кнопкой.", wrap=560)
 
         # -- AFK
         afk = self._card(
@@ -6078,7 +6082,8 @@ class App:
             glyph="◷")
         self._checkbox(
             afk, "Не давать серверу кикнуть за бездействие",
-            self.var_ingame_afk, command=self._save_ingame_cfg).pack(
+            self.var_ingame_afk,
+            command=self._ingame_feature_toggle).pack(
                 anchor="w", pady=(6, 8))
         grid = tk.Frame(afk, bg=c["surface"])
         grid.pack(fill="x")
@@ -6135,7 +6140,7 @@ class App:
                      "лаунчера",
             glyph="⚙")
         self._checkbox(
-            box, "Запускать помощник вместе с игрой",
+            box, "Запускать помощник автоматически",
             self.var_ingame_auto, command=self._save_ingame_cfg).pack(
                 anchor="w", pady=(6, 0))
 
@@ -6179,9 +6184,9 @@ class App:
         self._hint(
             box,
             "Помощник завершится сам примерно через 90 секунд после "
-            "закрытия Roblox и через 4 минуты, если игра так и не "
-            "появилась. Закрытие лаунчера его не останавливает — "
-            "используй кнопку «Остановить».", wrap=560)
+            "закрытия Roblox. Свёрнутая игра его не останавливает, а "
+            "закрытие лаунчера — тоже; остановить можно кнопкой "
+            "«Остановить».", wrap=560)
 
         # -- безопасность
         safe = self._card(pad, title="Безопасность", glyph="⛨")
@@ -6235,6 +6240,28 @@ class App:
         self.status_var.set("Настройки «В игре» сохранены")
         self._ingame_update_controls()
         self.log("In-game: настройки обновлены")
+
+    def _ingame_feature_toggle(self):
+        self._save_ingame_cfg()
+        if self.var_ingame_overlay.get() or self.var_ingame_afk.get():
+            self._maybe_start_ingame_helper(force=True)
+
+    def _maybe_start_ingame_helper(self, force=False):
+        if not self.interactive or self._closing or self._ingame_busy:
+            return
+        if not (self.cfg.get("ingame_overlay")
+                or self.cfg.get("ingame_afk")):
+            return
+        if ingame_mod.helper_running():
+            return
+        if not force:
+            if not self.cfg.get("ingame_auto"):
+                return
+            if self._ingame_user_stopped:
+                return
+            if time.monotonic() < self._ingame_next_auto:
+                return
+        self._ingame_start(show=False)
 
     def _ingame_update_controls(self):
         if not hasattr(self, "combo_ingame_corner"):
@@ -6296,7 +6323,7 @@ class App:
                 self.ingame_overlay_state_var.set(
                     "Оверлей: выключен" if not self.cfg.get("ingame_overlay")
                     else "Оверлей: помощник не запущен")
-                self.ingame_hotkey_var.set("Shift+F1: проверится при запуске")
+                self.ingame_hotkey_var.set("Shift+F1: помощник не запущен")
                 self.ingame_afk_state_var.set(
                     "AFK: выключен" if not self.cfg.get("ingame_afk")
                     else "AFK: помощник не запущен")
@@ -6338,6 +6365,14 @@ class App:
         if self._closing:
             return
         self._refresh_ingame_status()
+        if (self.interactive and not self._ingame_busy
+                and not self._ingame_user_stopped
+                and (self.cfg.get("ingame_overlay")
+                     or self.cfg.get("ingame_afk"))
+                and self.cfg.get("ingame_auto")
+                and not ingame_mod.helper_running()
+                and ingame_mod.roblox_pids()):
+            self._maybe_start_ingame_helper()
         self._ingame_poll_job = self.root.after(1200,
                                                 self._poll_ingame_status)
 
@@ -6349,6 +6384,7 @@ class App:
             self.ingame_message_var.set(
                 "Сначала включи оверлей или AFK-режим")
             return
+        self._ingame_user_stopped = False
         if ingame_mod.helper_running():
             if show and self.cfg.get("ingame_overlay"):
                 status = ingame_mod.read_status(max_age=10)
@@ -6389,9 +6425,11 @@ class App:
         if self._closing:
             return
         if ok:
+            self._ingame_next_auto = 0.0
             self.ingame_message_var.set("Помощник запущен")
             self.log("In-game: помощник запущен")
         else:
+            self._ingame_next_auto = time.monotonic() + 30
             self.ingame_message_var.set(
                 f"Не удалось запустить: {message}")
             self.log(f"In-game: {message}")
@@ -6401,6 +6439,7 @@ class App:
     def _ingame_stop(self):
         if self._ingame_busy:
             return
+        self._ingame_user_stopped = True
         if ingame_mod.stop_helper():
             self.ingame_message_var.set("Останавливаю помощник…")
             self.root.after(900, self._ingame_stopped)
@@ -6463,33 +6502,7 @@ class App:
             self.ingame_message_var.set(f"Не удалось открыть журнал: {exc}")
 
     def _start_ingame_helper_after_launch(self):
-        if self._closing:
-            return
-        if not self.cfg.get("ingame_auto"):
-            return
-        if not (self.cfg.get("ingame_overlay")
-                or self.cfg.get("ingame_afk")):
-            return
-        if ingame_mod.helper_running():
-            return
-
-        def worker():
-            ok, message = ingame_mod.start_helper(wait=4.0)
-            self.q.put(lambda: self._ingame_auto_done(ok, message))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _ingame_auto_done(self, ok, message):
-        if self._closing:
-            return
-        if ok:
-            self.ingame_message_var.set("Помощник запущен вместе с игрой")
-            self.log("In-game: помощник запущен вместе с игрой")
-        else:
-            self.ingame_message_var.set(
-                f"Помощник не запустился: {message}")
-            self.log(f"In-game: {message}")
-        self._refresh_ingame_status()
+        self._maybe_start_ingame_helper()
 
     # -- страница «Настройки» ----------------------------------------------------------
 
@@ -7568,6 +7581,8 @@ class App:
             self.log("Прямой запуск не сработал, открыт сайт Roblox")
             webbrowser.open(DISCOVER_URL)
             self._play_error_sound()
+        if outcome in ("already", "exe", "protocol"):
+            self._maybe_start_ingame_helper()
         self._end_launch_effect(
             "Roblox уже запущен" if outcome == "already"
             else "Roblox запущен" if outcome in ("exe", "protocol")
@@ -9251,6 +9266,49 @@ def run_selftest():
                 "UI «В игре»: клавиша AFK активна в режиме мыши")
         app.var_ingame_mode.set("Клавиша")
         app._ingame_update_controls()
+        start_calls = []
+        original_ingame_start = app._ingame_start
+        original_interactive = app.interactive
+        original_helper_running = ingame_mod.helper_running
+        original_read_status = ingame_mod.read_status
+        original_user_stopped = app._ingame_user_stopped
+        original_next_auto = app._ingame_next_auto
+        try:
+            app.interactive = True
+            ingame_mod.helper_running = lambda: False
+            ingame_mod.read_status = lambda *a, **k: None
+            app._ingame_start = lambda show=False: start_calls.append(show)
+            app._ingame_user_stopped = True
+            app._maybe_start_ingame_helper()
+            if start_calls:
+                failures.append(
+                    "UI: помощник стартовал после ручной остановки")
+            app._ingame_user_stopped = False
+            app._maybe_start_ingame_helper()
+            if start_calls != [False]:
+                failures.append(
+                    f"UI: автозапуск помощника {start_calls}")
+            start_calls.clear()
+            app.cfg["ingame_auto"] = False
+            app._maybe_start_ingame_helper()
+            if start_calls:
+                failures.append(
+                    "UI: помощник стартовал при выключенном автозапуске")
+            app.cfg["ingame_auto"] = True
+            app._maybe_start_ingame_helper(force=True)
+            if start_calls != [False]:
+                failures.append("UI: принудительный запуск помощника")
+            app._refresh_ingame_status()
+            if "помощник не запущен" not in app.ingame_hotkey_var.get():
+                failures.append(
+                    f"UI: статус Shift+F1 {app.ingame_hotkey_var.get()!r}")
+        finally:
+            app._ingame_start = original_ingame_start
+            app.interactive = original_interactive
+            ingame_mod.helper_running = original_helper_running
+            ingame_mod.read_status = original_read_status
+            app._ingame_user_stopped = original_user_stopped
+            app._ingame_next_auto = original_next_auto
         if app._rpc is not None:
             failures.append("UI: presence запустился без интерактива")
         if app.discord_status_var.get() == "":
