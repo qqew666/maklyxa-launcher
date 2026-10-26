@@ -47,7 +47,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.8.5"
+VERSION = "1.8.6"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -3283,7 +3283,7 @@ def roblox_auth_ticket(cookie, timeout=20):
 
 
 def game_launch_url(place_id, ticket):
-    """Ссылка roblox-player с тикетом аккаунта."""
+    """Ссылка roblox-player с тикетом аккаунта (старый клиент)."""
     tracker = random.randint(1000000000, 9999999999)
     launcher = ("https://assetgame.roblox.com/game/PlaceLauncher.ashx"
                 f"?request=RequestGame&browserTrackerId={tracker}"
@@ -3294,6 +3294,127 @@ def game_launch_url(place_id, ticket):
             + "+browsertrackerid:" + str(tracker)
             + "+robloxLocale:ru_ru+gameLocale:ru_ru"
             + "+channel:+LaunchExp:InApp")
+
+
+def roblox_deep_link(place_id):
+    """Ссылка, которую понимает и новый клиент Roblox (Unified/WebView2)."""
+    return f"roblox://experiences/start?placeId={place_id}"
+
+
+def roblox_cookie_store_path():
+    """Файл сессии, из которого новый клиент берёт .ROBLOSECURITY."""
+    local = os.getenv("LOCALAPPDATA")
+    if not local:
+        return None
+    return Path(local) / "Roblox" / "LocalStorage" / "RobloxCookies.dat"
+
+
+def _cookie_entry_name(entry):
+    fields = entry.split("\t")
+    if len(fields) >= 7:
+        return fields[5].strip()
+    if "=" in entry and "\t" not in entry:
+        return entry.split("=", 1)[0].strip()
+    return ""
+
+
+def _cookie_entry_value(entry):
+    fields = entry.split("\t")
+    if len(fields) >= 7:
+        return fields[6].strip()
+    if "=" in entry and "\t" not in entry:
+        return entry.split("=", 1)[1].strip()
+    return ""
+
+
+def read_roblox_cookie_store(path=None):
+    """Разобрать хранилище сессии клиента. None — файла нет или он битый."""
+    target = path if path is not None else roblox_cookie_store_path()
+    if target is None:
+        return None
+    target = Path(target)
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    encoded = raw.get("CookiesData")
+    if not isinstance(encoded, str) or not encoded:
+        return None
+    try:
+        blob = base64.b64decode(encoded)
+    except ValueError:
+        return None
+    plain = _dpapi_call(blob, False)
+    if not plain:
+        return None
+    try:
+        text = plain.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    entries = [part for part in text.split("; ") if part.strip()]
+    if not entries:
+        return None
+    cookie = ""
+    for entry in entries:
+        if _cookie_entry_name(entry) == ROBLOX_COOKIE_NAME:
+            cookie = _cookie_entry_value(entry)
+            break
+    return {"path": target, "entries": entries, "cookie": cookie, "raw": raw}
+
+
+def set_roblox_session(cookie, path=None):
+    """Записать сессию аккаунта в хранилище нового клиента Roblox.
+
+    Клиент 0.744+ при запуске читает RobloxCookies.dat, поэтому подмена
+    .ROBLOSECURITY + обычная ссылка roblox:// запускают игру под нужным
+    аккаунтом без устаревшего roblox-player с PlaceLauncher.
+    """
+    cookie = str(cookie or "").strip()
+    if not cookie:
+        return {"ok": False, "changed": 0, "error": "пустая сессия"}
+    store = read_roblox_cookie_store(path)
+    if store is None:
+        return {"ok": False, "changed": 0,
+                "error": "хранилище сессии Roblox не найдено"}
+    target = store["path"]
+    if store["cookie"] == cookie:
+        return {"ok": True, "changed": 0, "error": ""}
+    entries = []
+    replaced = False
+    for entry in store["entries"]:
+        if _cookie_entry_name(entry) == ROBLOX_COOKIE_NAME:
+            fields = entry.split("\t")
+            if len(fields) >= 7:
+                fields[6] = cookie
+                entry = "\t".join(fields)
+            else:
+                entry = f"{ROBLOX_COOKIE_NAME}={cookie}"
+            replaced = True
+        entries.append(entry)
+    if not replaced:
+        entries.insert(0, "#HttpOnly_.roblox.com\tTRUE\t/\tTRUE\t0\t"
+                          f"{ROBLOX_COOKIE_NAME}\t{cookie}")
+    blob = _dpapi_call("; ".join(entries).encode("utf-8"), True)
+    if not blob:
+        return {"ok": False, "changed": 0,
+                "error": "Windows не зашифровал сессию"}
+    data = dict(store["raw"])
+    data["CookiesData"] = base64.b64encode(blob).decode("ascii")
+    data.setdefault("CookiesVersion", "1")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        backup = target.with_name(target.name + ".maklyxa.bak")
+        if not backup.exists():
+            shutil.copy2(target, backup)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, separators=(",", ":")),
+                       encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError as exc:
+        return {"ok": False, "changed": 0, "error": str(exc)}
+    return {"ok": True, "changed": 1, "error": ""}
 
 
 def fetch_roblox_avatar(user_id, timeout=12):
@@ -3567,7 +3688,13 @@ def _touch_account(account_id, path=None):
 
 
 def launch_game_as(place_id, account_id=None, accounts_path=None):
-    """Запустить игру под выбранным аккаунтом через roblox-player."""
+    """Запустить игру под выбранным аккаунтом.
+
+    Новый клиент Roblox (0.744+, WebView2) сам выполняет вход в игру и не
+    принимает старую ссылку roblox-player с PlaceLauncher. Для него сессия
+    аккаунта кладётся в RobloxCookies.dat, после чего открывается обычная
+    ссылка roblox://. Старый клиент запускается прежним способом.
+    """
     data = load_accounts(accounts_path)
     account = None
     if account_id:
@@ -3584,18 +3711,29 @@ def launch_game_as(place_id, account_id=None, accounts_path=None):
     if not cookie:
         return {"ok": False, "account": _account_meta(account),
                 "error": "Сессия аккаунта повреждена — войди заново."}
-    ticket = roblox_auth_ticket(cookie)
-    if not ticket["ok"]:
+    check = verify_roblox_cookie(cookie)
+    if not check["ok"]:
         return {"ok": False, "account": _account_meta(account),
-                "error": ticket["error"]}
-    url = game_launch_url(place_id, ticket["ticket"])
+                "error": check["error"]}
+    session = set_roblox_session(cookie)
+    if session["ok"]:
+        url = roblox_deep_link(place_id)
+        mode = "app"
+    else:
+        ticket = roblox_auth_ticket(cookie)
+        if not ticket["ok"]:
+            return {"ok": False, "account": _account_meta(account),
+                    "error": ticket["error"]}
+        url = game_launch_url(place_id, ticket["ticket"])
+        mode = "legacy"
     try:
         os.startfile(url)
     except OSError as exc:
         return {"ok": False, "account": _account_meta(account),
-                "error": f"Не удалось открыть roblox-player: {exc}"}
+                "error": f"Не удалось открыть ссылку Roblox: {exc}"}
     _touch_account(account["id"], accounts_path)
-    return {"ok": True, "error": "", "account": _account_meta(account)}
+    return {"ok": True, "error": "", "mode": mode,
+            "account": _account_meta(account)}
 
 
 def close_roblox_players():

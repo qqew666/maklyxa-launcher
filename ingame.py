@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from ctypes import wintypes
 from pathlib import Path
 
@@ -39,7 +40,14 @@ TH32CS_SNAPPROCESS = 0x00000002
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 ROBLOX_EXE = "robloxplayerbeta.exe"
-FPS_NOTE = "Roblox: Shift+F5"
+FPS_NOTE = "кадры игры"
+FPS_MAX = 2000
+FPS_INTERVAL = 0.5
+FPS_WINDOW = 0.9
+WDDM_SOURCE_LIMIT = 8
+PROCESS_QUERY_ACCESS = 0x0400 | 0x1000
+D3DKMT_QUERYSTATISTICS_ADAPTER = 0
+D3DKMT_QUERYSTATISTICS_PROCESS_VIDPNSOURCE = 8
 
 CORNER_LABELS = {
     "tl": "Слева сверху",
@@ -145,6 +153,13 @@ if IS_WINDOWS:
     user32.PostThreadMessageW.argtypes = [
         wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     user32.PostThreadMessageW.restype = wintypes.BOOL
+    user32.GetDC.argtypes = [wintypes.HWND]
+    user32.GetDC.restype = wintypes.HDC
+    user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+    user32.ReleaseDC.restype = ctypes.c_int
+    kernel32.OpenProcess.argtypes = [
+        wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
 
 
 def _data_dir():
@@ -402,6 +417,230 @@ _NVML = Nvml()
 
 def gpu_snapshot():
     return _NVML.read()
+
+
+class _Luid(ctypes.Structure):
+    _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+
+class _OpenAdapterFromHdc(ctypes.Structure):
+    _fields_ = [
+        ("hDc", wintypes.HDC),
+        ("hAdapter", wintypes.UINT),
+        ("AdapterLuid", _Luid),
+        ("VidPnSourceId", wintypes.UINT),
+    ]
+
+
+class _CloseAdapter(ctypes.Structure):
+    _fields_ = [("hAdapter", wintypes.UINT)]
+
+
+class _D3dkmtQueryStatistics(ctypes.Structure):
+    _fields_ = [
+        ("Type", ctypes.c_uint),
+        ("AdapterLuid", _Luid),
+        ("hProcess", wintypes.HANDLE),
+        ("Result", ctypes.c_ubyte * 776),
+        ("VidPnSourceId", ctypes.c_uint),
+    ]
+
+
+# Пассивный счётчик кадров: WDDM отдаёт число презентаций процесса на
+# VidPnSource. Только чтение статистики драйвера — без внедрения в игру.
+gdi32 = None
+_FPS_NATIVE = False
+if IS_WINDOWS and ctypes.sizeof(ctypes.c_void_p) == 8:
+    try:
+        gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        gdi32.D3DKMTOpenAdapterFromHdc.argtypes = [
+            ctypes.POINTER(_OpenAdapterFromHdc)]
+        gdi32.D3DKMTOpenAdapterFromHdc.restype = wintypes.LONG
+        gdi32.D3DKMTQueryStatistics.argtypes = [
+            ctypes.POINTER(_D3dkmtQueryStatistics)]
+        gdi32.D3DKMTQueryStatistics.restype = wintypes.LONG
+        gdi32.D3DKMTCloseAdapter.argtypes = [ctypes.POINTER(_CloseAdapter)]
+        gdi32.D3DKMTCloseAdapter.restype = wintypes.LONG
+        _FPS_NATIVE = ctypes.sizeof(_D3dkmtQueryStatistics) == 0x328
+    except (AttributeError, OSError, ValueError):
+        gdi32 = None
+        _FPS_NATIVE = False
+
+
+def fps_from_samples(samples, min_span=0.5, max_fps=FPS_MAX):
+    """Кадры в секунду по замерам (время, суммарный счётчик кадров)."""
+    if samples is None or len(samples) < 2:
+        return None
+    first, last = samples[0], samples[-1]
+    span = float(last[0]) - float(first[0])
+    if span <= 0 or span < float(min_span):
+        return None
+    delta = int(last[1]) - int(first[1])
+    if delta < 0:
+        return None
+    value = delta / span
+    if value > float(max_fps):
+        return None
+    return int(round(value))
+
+
+class FpsMeter:
+    FRAME_RESULT_BYTES = 8
+    SOURCE_COUNT_OFFSET = 8
+    FAIL_LIMIT = 4
+
+    def __init__(self):
+        self.value = None
+        self.available = bool(_FPS_NATIVE)
+        self._pid = 0
+        self._process = None
+        self._hwnd = 0
+        self._adapter = 0
+        self._luid = None
+        self._sources = 0
+        self._samples = deque(maxlen=4)
+        self._fails = 0
+        self._next_adapter = 0.0
+
+    def _close_process(self):
+        if self._process:
+            try:
+                kernel32.CloseHandle(self._process)
+            except (OSError, AttributeError):
+                pass
+        self._process = None
+
+    def _close_adapter(self):
+        if self._adapter and gdi32 is not None:
+            try:
+                gdi32.D3DKMTCloseAdapter(
+                    ctypes.byref(_CloseAdapter(self._adapter)))
+            except (OSError, AttributeError, ValueError):
+                pass
+        self._adapter = 0
+        self._luid = None
+        self._sources = 0
+
+    def _ensure_process(self, pid):
+        if self._process and self._pid == pid:
+            return True
+        self._close_process()
+        self._samples.clear()
+        self.value = None
+        try:
+            handle = kernel32.OpenProcess(PROCESS_QUERY_ACCESS, False, pid)
+        except (OSError, AttributeError):
+            handle = None
+        if not handle:
+            return False
+        self._process = handle
+        self._pid = pid
+        return True
+
+    def _count_sources(self):
+        query = _D3dkmtQueryStatistics()
+        query.Type = D3DKMT_QUERYSTATISTICS_ADAPTER
+        query.AdapterLuid = self._luid
+        if gdi32.D3DKMTQueryStatistics(ctypes.byref(query)) != 0:
+            return 0
+        raw = ctypes.string_at(ctypes.addressof(query.Result), 12)
+        count = int.from_bytes(raw[self.SOURCE_COUNT_OFFSET:12], "little")
+        return max(0, min(count, WDDM_SOURCE_LIMIT))
+
+    def _open_adapter(self, hwnd):
+        hwnd = _hwnd_value(hwnd)
+        hdc = user32.GetDC(hwnd) if hwnd else 0
+        owned = bool(hdc)
+        if not hdc:
+            hdc = user32.GetDC(None)
+        if not hdc:
+            return False
+        try:
+            params = _OpenAdapterFromHdc()
+            params.hDc = hdc
+            status = gdi32.D3DKMTOpenAdapterFromHdc(ctypes.byref(params))
+        finally:
+            user32.ReleaseDC(hwnd if owned else None, hdc)
+        if status != 0 or not params.hAdapter:
+            return False
+        self._adapter = int(params.hAdapter)
+        self._luid = params.AdapterLuid
+        self._sources = self._count_sources()
+        if self._sources <= 0:
+            self._close_adapter()
+            return False
+        self._hwnd = hwnd
+        return True
+
+    def _read_frames(self):
+        total = 0
+        for source in range(self._sources):
+            query = _D3dkmtQueryStatistics()
+            query.Type = D3DKMT_QUERYSTATISTICS_PROCESS_VIDPNSOURCE
+            query.AdapterLuid = self._luid
+            query.hProcess = self._process
+            query.VidPnSourceId = source
+            if gdi32.D3DKMTQueryStatistics(ctypes.byref(query)) != 0:
+                if source == 0:
+                    return None
+                continue
+            raw = ctypes.string_at(
+                ctypes.addressof(query.Result), self.FRAME_RESULT_BYTES)
+            total += int.from_bytes(raw, "little")
+        return total
+
+    def sample(self, pid, hwnd, now=None):
+        if not self.available:
+            return None
+        now = time.monotonic() if now is None else float(now)
+        pid = int(pid or 0)
+        if not pid:
+            self.reset()
+            return None
+        if not self._ensure_process(pid):
+            self.value = None
+            return None
+        if self._adapter and _hwnd_value(hwnd) != self._hwnd:
+            self._close_adapter()
+            self._samples.clear()
+        if not self._adapter:
+            if now < self._next_adapter:
+                return None
+            if not self._open_adapter(hwnd):
+                self._next_adapter = now + 5.0
+                self._samples.clear()
+                return None
+        frames = self._read_frames()
+        if frames is None:
+            self._fails += 1
+            self._close_adapter()
+            self._samples.clear()
+            self._next_adapter = now + 1.5
+            if self._fails >= self.FAIL_LIMIT:
+                self.available = False
+                self.value = None
+            return None
+        self._fails = 0
+        self._samples.append((now, frames))
+        value = fps_from_samples(self._samples, min_span=FPS_WINDOW)
+        if value is None:
+            return None
+        self.value = value
+        return value
+
+    def reset(self):
+        """Сбросить историю, сохранив последнее значение для повторного показа."""
+        self._samples.clear()
+        self._fails = 0
+        self._next_adapter = 0.0
+        self._close_process()
+        self._close_adapter()
+        self._hwnd = 0
+        self._pid = 0
+
+    def close(self):
+        self.reset()
+        self.value = None
 
 
 def roblox_pids():
@@ -931,6 +1170,21 @@ class Overlay:
             self.gpu_sub_var.set("нет датчика")
         self.afk_var.set(afk_text or "")
 
+    def set_fps(self, value):
+        if not self._fps_ok():
+            self.fps_var.set("—")
+            self.fps_sub_var.set("нет датчика")
+        elif value is None:
+            self.fps_var.set("—")
+            self.fps_sub_var.set(FPS_NOTE)
+        else:
+            self.fps_var.set(str(int(value)))
+            self.fps_sub_var.set(FPS_NOTE)
+
+    @staticmethod
+    def _fps_ok():
+        return bool(_FPS_NATIVE)
+
     def destroy(self):
         try:
             self.top.destroy()
@@ -958,6 +1212,10 @@ class InGameHelper:
         self._next_status = 0.0
         self._gpu = None
         self._next_gpu = 0.0
+        self.fps = FpsMeter()
+        self._next_fps = 0.0
+        self._fps_active = False
+        self._fps_available_seen = bool(self.fps.available)
         self._afk_next = None
         self._afk_minutes = int(self.cfg.get("ingame_afk_minutes") or 5)
         self._afk_last = 0.0
@@ -1005,6 +1263,8 @@ class InGameHelper:
             "afk_key": self.cfg.get("ingame_afk_key") or "space",
             "afk_next_in": afk_next_in,
             "afk_last": self._afk_last,
+            "fps": (self.fps.value
+                    if self.fps.available and self.overlay.visible else None),
         })
 
     def _tick(self):
@@ -1055,6 +1315,23 @@ class InGameHelper:
                     afk_text = self._afk_text(now)
                     self.overlay.update_stats(memory_snapshot(), self._gpu,
                                               afk_text)
+            if self.overlay.visible and self._win:
+                if now >= self._next_fps:
+                    self._next_fps = now + FPS_INTERVAL
+                    self._fps_active = True
+                    value = self.fps.sample(self._win.get("pid"),
+                                            self._win.get("hwnd"), now)
+                    if value is not None:
+                        self.overlay.set_fps(value)
+            elif self._fps_active:
+                self._fps_active = False
+                self._next_fps = 0.0
+                self.fps.reset()
+            if self.fps.available != self._fps_available_seen:
+                self._fps_available_seen = bool(self.fps.available)
+                if not self._fps_available_seen:
+                    self.overlay.set_fps(None)
+                    helper_log("FPS: датчик WDDM недоступен")
             if now >= self._next_status:
                 self._next_status = now + 2
                 self._write_status()
@@ -1073,6 +1350,7 @@ class InGameHelper:
         if show:
             self.overlay.update_stats(
                 memory_snapshot(), self._gpu, self._afk_text(time.monotonic()))
+            self.overlay.set_fps(self.fps.value)
             self.overlay.show(self._win.get("rect"))
         else:
             self.overlay.hide()
@@ -1164,6 +1442,7 @@ class InGameHelper:
         except Exception:  # noqa: BLE001
             pass
         self.hotkey.stop()
+        self.fps.close()
         self.overlay.destroy()
         try:
             self.root.quit()

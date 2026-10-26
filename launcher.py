@@ -78,13 +78,14 @@ from core import (
     load_config, load_private_font, load_theme_palette, mb, merge_flags_into,
     migrate_old_config, parse_place_id, png_info, player_pids,
     play_launch_sound, probe_protocol, protect_secret, read_json_dict,
-    remove_account, remove_cursor_slot, remove_launch_icon,
-    remove_launch_sound, remove_theme_image, remove_ui_font,
-    rename_cursor_set, rename_theme_set, resize_geometry,
+    read_roblox_cookie_store, remove_account, remove_cursor_slot,
+    remove_launch_icon, remove_launch_sound, remove_theme_image,
+    remove_ui_font, rename_cursor_set, rename_theme_set, resize_geometry,
     resolve_gallery_places, restore_custom_cursors,
-    restore_launch_icon_shortcuts, roblox_status, scan_screenshots,
+    restore_launch_icon_shortcuts, roblox_deep_link, roblox_status,
+    scan_screenshots,
     screenshots_dir, save_config, set_active_account, set_cursor_slot,
-    set_theme_image, shade, shortcut_backup_count,
+    set_roblox_session, set_theme_image, shade, shortcut_backup_count,
     stop_launch_sound, theme_set_info, trunc,
     ui_font_path, ui_font_state, unload_private_font, unprotect_secret,
     update_theme_set, valid_cursor_set_name, valid_discord_app_id,
@@ -901,6 +902,7 @@ class App:
         self.ingame_helper_var = tk.StringVar(value="Помощник не запущен")
         self.ingame_roblox_var = tk.StringVar(value="Roblox: не запущен")
         self.ingame_overlay_state_var = tk.StringVar(value="Оверлей: выключен")
+        self.ingame_fps_var = tk.StringVar(value="FPS: —")
         self.ingame_hotkey_var = tk.StringVar(value="Shift+F1: не проверен")
         self.ingame_afk_state_var = tk.StringVar(value="AFK: выключен")
         self.ingame_message_var = tk.StringVar(value="")
@@ -6012,7 +6014,7 @@ class App:
         metrics = tk.Frame(preview, bg="#0b0f14")
         metrics.pack(fill="x")
         for title, value, sub in (
-                ("FPS", "—", "Roblox: Shift+F5"),
+                ("FPS", "60", "кадры игры"),
                 ("GPU", "52°C", "1.2 ГБ"),
                 ("ПАМЯТЬ", "43%", "13.7 / 31.9 ГБ")):
             cell = tk.Frame(metrics, bg="#0b0f14")
@@ -6040,10 +6042,12 @@ class App:
                  anchor="w").pack(fill="x")
         tk.Label(
             note,
-            text="FPS честно оставлен «—»: Roblox не отдаёт кадры другим "
-                 "процессам без внедрения. Нажми Shift+F5 в игре — откроется "
-                 "нативный счётчик Roblox.\n"
-                 "Температура GPU — NVIDIA через NVML; RAM и время настоящие.",
+            text="FPS настоящий: помощник читает счётчик кадров Windows "
+                 "(WDDM) для процесса Roblox — без внедрения, без чтения "
+                 "памяти игры. Значение обновляется раз в полсекунды; «—» "
+                 "появится, только если драйвер не отдаёт статистику.\n"
+                 "Температура GPU — NVIDIA через NVML; RAM и время тоже "
+                 "настоящие.",
             bg=c["surface"], fg=c["text"], font=(UI_FONT, 9),
             anchor="w", justify="left", wraplength=400).pack(
                 fill="x", pady=(6, 0))
@@ -6151,7 +6155,8 @@ class App:
         for index, var in enumerate((self.ingame_helper_var,
                                      self.ingame_hotkey_var,
                                      self.ingame_roblox_var,
-                                     self.ingame_overlay_state_var)):
+                                     self.ingame_overlay_state_var,
+                                     self.ingame_fps_var)):
             tk.Label(state_grid, textvariable=var, bg=c["surface2"],
                      fg=c["text"], font=(UI_FONT, 9), anchor="w",
                      justify="left", wraplength=300).grid(
@@ -6160,7 +6165,7 @@ class App:
         tk.Label(state_grid, textvariable=self.ingame_message_var,
                  bg=c["surface2"], fg=self.c["muted"],
                  font=(UI_FONT, 9), anchor="w", justify="left",
-                 wraplength=600).grid(row=2, column=0, columnspan=2,
+                 wraplength=600).grid(row=3, column=0, columnspan=2,
                                       sticky="w", pady=(4, 0))
 
         row_btns = tk.Frame(box, bg=c["surface"])
@@ -6201,8 +6206,9 @@ class App:
                 "не патчит и не изменяет файлы клиента.\n"
                 "•  AFK использует только системный ввод Windows и молчит, "
                 "когда игра не в фокусе.\n"
-                "•  Точный FPS снаружи без внедрения недоступен — поэтому "
-                "в оверлее «—» и подсказка Shift+F5."
+                "•  FPS берётся из статистики WDDM (D3DKMTQueryStatistics): "
+                "Windows сама считает презентации кадров процесса, помощник "
+                "только читает это число."
             )).pack(fill="x")
 
         self._refresh_ingame_status()
@@ -6316,6 +6322,7 @@ class App:
             if running:
                 self.ingame_roblox_var.set("Roblox: нет ответа")
                 self.ingame_overlay_state_var.set("Оверлей: нет данных")
+                self.ingame_fps_var.set("FPS: нет данных")
                 self.ingame_hotkey_var.set("Shift+F1: нет данных")
                 self.ingame_afk_state_var.set("AFK: нет данных")
             else:
@@ -6323,6 +6330,7 @@ class App:
                 self.ingame_overlay_state_var.set(
                     "Оверлей: выключен" if not self.cfg.get("ingame_overlay")
                     else "Оверлей: помощник не запущен")
+                self.ingame_fps_var.set("FPS: —")
                 self.ingame_hotkey_var.set("Shift+F1: помощник не запущен")
                 self.ingame_afk_state_var.set(
                     "AFK: выключен" if not self.cfg.get("ingame_afk")
@@ -6344,6 +6352,10 @@ class App:
             else:
                 overlay = "Оверлей: скрыт (Shift+F1)"
             self.ingame_overlay_state_var.set(overlay)
+            fps_value = status.get("fps") if status.get("overlay") else None
+            self.ingame_fps_var.set(
+                f"FPS: {int(fps_value)}" if isinstance(fps_value, int)
+                else "FPS: —")
             self.ingame_hotkey_var.set(
                 "Shift+F1: свободен" if status.get("hotkey")
                 else "Shift+F1: занят другой программой")
@@ -7521,7 +7533,16 @@ class App:
             self.q.put(lambda: self._client_result("already", focused))
             return
 
-        # 1) прямой запуск клиента
+        # 1) ссылка приложения Roblox — открывает главную страницу клиента
+        try:
+            os.startfile("roblox://navigation/home")
+            if self._wait_for_new_pids(before, 8):
+                self.q.put(lambda: self._client_result("protocol", True))
+                return
+        except OSError:
+            pass
+
+        # 2) прямой запуск клиента
         if kind == "installed":
             exe = find_player_exe()
             if exe:
@@ -7532,15 +7553,6 @@ class App:
                         return
                 except OSError:
                     pass
-
-        # 2) голый roblox:// протокол
-        try:
-            os.startfile("roblox://")
-            if self._wait_for_new_pids(before, 6):
-                self.q.put(lambda: self._client_result("protocol", True))
-                return
-        except OSError:
-            pass
 
         self.q.put(lambda: self._client_result("fail", False))
 
@@ -7675,7 +7687,7 @@ class App:
         """Обычный запуск roblox:// — без входа под аккаунтом."""
         if self._play_busy:
             return
-        url = f"roblox://experiences/start?placeId={pid}"
+        url = roblox_deep_link(pid)
         self._rpc_set(game, "Запускаю игру…")
         self._begin_launch_effect(game or name or "Roblox",
                                   "Передаю ссылку Roblox…")
@@ -7721,7 +7733,7 @@ class App:
     def _account_launch_worker(self, pid, name, game, account):
         if player_pids():
             close_roblox_players()
-            for _ in range(8):
+            for _ in range(20):
                 if not player_pids():
                     break
                 time.sleep(0.5)
@@ -7740,7 +7752,10 @@ class App:
             who = account.get("name") or "аккаунт"
             self.entry_var.set(pid)
             self.status_var.set(f"Запускаю {name or pid} под @{who}")
-            self.log(f"Игра запущена под аккаунтом @{who} (place {pid})")
+            how = ("новый клиент" if result.get("mode") == "app"
+                   else "старый клиент")
+            self.log(f"Игра запущена под аккаунтом @{who} "
+                     f"(place {pid}, {how})")
             self._rpc_set(game, "Играет в Roblox")
             self.root.after(
                 10000, lambda g=game: self._rpc_set(g, "Играет в Roblox"))
@@ -8544,6 +8559,49 @@ def run_selftest():
                 failures.append(f"аккаунты: ссылка запуска {url[:70]}")
             if "12345" not in url:
                 failures.append("аккаунты: place id не попал в ссылку")
+
+            link = roblox_deep_link("12345")
+            if link != "roblox://experiences/start?placeId=12345":
+                failures.append(f"аккаунты: ссылка клиента {link}")
+
+            if os.name == "nt":
+                import core as core_module
+
+                store = Path(td) / "RobloxCookies.dat"
+                plain = (
+                    "#HttpOnly_.roblox.com\tTRUE\t/\tTRUE\t0\t"
+                    ".ROBLOSECURITY\tOLD; #HttpOnly_.roblox.com\tTRUE\t/\t"
+                    "FALSE\t0\tGuestData\tUserID=1")
+                blob = core_module._dpapi_call(plain.encode("utf-8"), True)
+                if not blob:
+                    failures.append("сессия клиента: DPAPI недоступен")
+                else:
+                    store.write_text(json.dumps({
+                        "CookiesVersion": "1",
+                        "CookiesData": base64.b64encode(blob).decode(
+                            "ascii")}), encoding="utf-8")
+                    before = read_roblox_cookie_store(store)
+                    if before is None or before["cookie"] != "OLD":
+                        failures.append(f"сессия клиента: чтение {before}")
+                    wrote = set_roblox_session("NEW", store)
+                    after = read_roblox_cookie_store(store)
+                    if not wrote["ok"] or wrote["changed"] != 1:
+                        failures.append(f"сессия клиента: запись {wrote}")
+                    if after is None or after["cookie"] != "NEW":
+                        failures.append("сессия клиента: cookie не заменился")
+                    names = {core_module._cookie_entry_name(item)
+                             for item in (after or {}).get("entries", [])}
+                    if "GuestData" not in names:
+                        failures.append(
+                            "сессия клиента: чужие cookie потерялись")
+                    same = set_roblox_session("NEW", store)
+                    if not same["ok"] or same["changed"] != 0:
+                        failures.append(f"сессия клиента: лишняя запись {same}")
+                    broken_store = Path(td) / "broken.dat"
+                    broken_store.write_text("{oops", encoding="utf-8")
+                    if set_roblox_session("X", broken_store)["ok"]:
+                        failures.append(
+                            "сессия клиента: битый файл перезаписан")
     except Exception as exc:  # noqa: BLE001
         failures.append(f"accounts test: {exc}")
 
@@ -9026,8 +9084,31 @@ def run_selftest():
             if ingame_module.CORNER_BY_LABEL[
                     ingame_module.CORNER_LABELS[key]] != key:
                 failures.append(f"CORNER_BY_LABEL: {key}")
-        if "Shift+F5" not in ingame_module.FPS_NOTE:
-            failures.append("FPS_NOTE: нет подсказки Shift+F5")
+        if ingame_module.FPS_NOTE != "кадры игры":
+            failures.append(f"FPS_NOTE: {ingame_module.FPS_NOTE!r}")
+        fps_cases = [
+            ([], 0.5, None),
+            ([(0.0, 100)], 0.5, None),
+            ([(0.0, 100), (0.4, 140)], 0.5, None),
+            ([(0.0, 100), (1.0, 160)], 0.5, 60),
+            ([(0.0, 160), (1.0, 100)], 0.5, None),
+            ([(0.0, 0), (1.0, 5000)], 0.5, None),
+            ([(0.0, 0), (1.0, 0)], 0.5, 0),
+            ([(0.0, 10), (0.45, 40), (0.95, 70)], 0.9, 63),
+        ]
+        for samples, span, want in fps_cases:
+            got = ingame_module.fps_from_samples(samples, min_span=span)
+            if got != want:
+                failures.append(
+                    f"fps_from_samples({samples!r}): {got!r} != {want!r}")
+        if ctypes.sizeof(ctypes.c_void_p) == 8:
+            struct_size = ctypes.sizeof(
+                ingame_module._D3dkmtQueryStatistics)
+            if struct_size != 0x328:
+                failures.append(
+                    f"WDDM: размер структуры {struct_size} != 0x328")
+            if os.name == "nt" and not ingame_module._FPS_NATIVE:
+                failures.append("WDDM: счётчик FPS не инициализировался")
 
         with tempfile.TemporaryDirectory(prefix="maklyxa-ingame-") as td:
             status_file = Path(td) / "status.json"
@@ -9209,10 +9290,14 @@ def run_selftest():
                      "var_ingame_afk", "var_ingame_auto",
                      "combo_ingame_corner", "combo_ingame_mode",
                      "combo_ingame_key", "combo_ingame_minutes",
-                     "ingame_helper_var", "btn_ingame_start",
-                     "btn_ingame_stop", "btn_ingame_overlay"):
+                     "ingame_helper_var", "ingame_fps_var",
+                     "btn_ingame_start", "btn_ingame_stop",
+                     "btn_ingame_overlay"):
             if not hasattr(app, attr):
                 failures.append(f"UI: нет поля «В игре» {attr}")
+        if not app.ingame_fps_var.get().startswith("FPS:"):
+            failures.append(
+                f"UI «В игре»: статус FPS {app.ingame_fps_var.get()!r}")
         app.show_page("ingame")
         root.update()
         app._refresh_ingame_status()
