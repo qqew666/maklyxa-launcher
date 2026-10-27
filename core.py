@@ -37,7 +37,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -47,7 +47,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.8.6"
+VERSION = "1.8.7"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -3403,18 +3403,177 @@ def set_roblox_session(cookie, path=None):
     data = dict(store["raw"])
     data["CookiesData"] = base64.b64encode(blob).decode("ascii")
     data.setdefault("CookiesVersion", "1")
+    payload = json.dumps(data, separators=(",", ":"))
+    for _ in range(2):
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            backup = target.with_name(target.name + ".maklyxa.bak")
+            if not backup.exists():
+                shutil.copy2(target, backup)
+            tmp = target.with_suffix(".tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, target)
+        except OSError as exc:
+            return {"ok": False, "changed": 0, "error": str(exc)}
+        written = read_roblox_cookie_store(target)
+        if written is not None and written["cookie"] == cookie:
+            return {"ok": True, "changed": 1, "error": ""}
+        time.sleep(0.25)
+    return {"ok": False, "changed": 0,
+            "error": "Клиент Roblox перезаписал сессию — попробуй ещё раз"}
+
+
+ROBLOX_CLIENT_START_WAIT = 20
+ROBLOX_JOIN_WAIT = 45
+ROBLOX_LAUNCH_TRIES = 3
+
+
+def wait_for_new_players(before, seconds, settle=1.5):
+    """True — после before появился и живёт процесс игрового клиента."""
+    before = set(before or ())
+    seen = set()
+    deadline = time.time() + max(0.0, seconds)
+    while time.time() < deadline:
+        time.sleep(0.5)
+        current = player_pids()
+        seen |= current - before
+        if seen and current & seen:
+            if settle:
+                time.sleep(settle)
+            if player_pids() & seen:
+                return True
+    return False
+
+
+def roblox_store_ready(path=None, quiet=0.8, timeout=10):
+    """Дождаться, пока клиент допишет хранилище сессии."""
+    target = path if path is not None else roblox_cookie_store_path()
+    if target is None:
+        return True
+    target = Path(target)
+    stamp = None
+    deadline = time.time() + timeout
+    while True:
+        try:
+            current = target.stat().st_mtime_ns
+        except OSError:
+            return True
+        if stamp == current:
+            return True
+        stamp = current
+        if time.time() >= deadline:
+            return False
+        time.sleep(quiet)
+
+
+def roblox_log_dir():
+    """Папка журналов игрового клиента."""
+    local = os.getenv("LOCALAPPDATA")
+    if not local:
+        return None
+    folder = Path(local) / "Roblox" / "logs"
+    return folder if folder.is_dir() else None
+
+
+def _log_line_epoch(line):
+    """Время строки журнала Roblox (UTC) в epoch; None — не строка журнала."""
+    if len(line) < 24 or line[4] != "-" or line[10] != "T":
+        return None
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        backup = target.with_name(target.name + ".maklyxa.bak")
-        if not backup.exists():
-            shutil.copy2(target, backup)
-        tmp = target.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, separators=(",", ":")),
-                       encoding="utf-8")
-        os.replace(tmp, target)
-    except OSError as exc:
-        return {"ok": False, "changed": 0, "error": str(exc)}
-    return {"ok": True, "changed": 1, "error": ""}
+        stamp = datetime.strptime(
+            line[:24], "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return stamp.timestamp()
+
+
+def _join_outcome(mark):
+    """'joined' | 'failed' | None — по свежим журналам клиента."""
+    folder = roblox_log_dir()
+    if folder is None:
+        return None
+    floor = mark - 3.0
+    joined = failed = False
+    try:
+        files = [item for item in folder.glob("*.log")
+                 if item.stat().st_mtime >= floor - 60]
+    except OSError:
+        return None
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if ("game_join_loadtime" not in line
+                    and "join-game" not in line):
+                continue
+            stamp = _log_line_epoch(line)
+            if stamp is None or stamp < floor:
+                continue
+            if "game_join_loadtime" in line:
+                joined = True
+            elif "HttpError" in line or "Failed to connect" in line:
+                failed = True
+    if joined:
+        return "joined"
+    return "failed" if failed else None
+
+
+def wait_for_join(mark, seconds=ROBLOX_JOIN_WAIT, poll=1.5):
+    """'joined' | 'failed' | 'timeout' | 'unknown'."""
+    if roblox_log_dir() is None:
+        return "unknown"
+    deadline = time.time() + max(0.0, seconds)
+    while True:
+        outcome = _join_outcome(mark)
+        if outcome:
+            return outcome
+        if time.time() >= deadline:
+            return "timeout"
+        time.sleep(poll)
+
+
+def _drive_launch(url, tries=ROBLOX_LAUNCH_TRIES,
+                  wait_client=ROBLOX_CLIENT_START_WAIT,
+                  wait_join=ROBLOX_JOIN_WAIT):
+    """Отправить клиенту ссылку и дождаться входа в игру.
+
+    Клиент нового поколения иногда теряет ссылку (прошлый экземпляр ещё
+    закрывается) или не успевает подключиться к gamejoin — поэтому ссылка
+    отправляется повторно, пока не появятся процесс и вход в игру.
+    """
+    notes = []
+    already = bool(player_pids())
+    for attempt in range(1, max(1, tries) + 1):
+        before = player_pids()
+        mark = time.time()
+        try:
+            os.startfile(url)
+        except OSError as exc:
+            return {"ok": False, "attempts": attempt, "notes": notes,
+                    "error": f"Не удалось открыть ссылку Roblox: {exc}"}
+        if already:
+            return {"ok": True, "attempts": attempt, "notes": notes,
+                    "error": ""}
+        if not before and not wait_for_new_players(before, wait_client):
+            notes.append(f"Попытка {attempt}: клиент не запустился")
+        else:
+            outcome = wait_for_join(mark, wait_join)
+            if outcome in ("joined", "unknown"):
+                return {"ok": True, "attempts": attempt, "notes": notes,
+                        "error": ""}
+            notes.append(f"Попытка {attempt}: вход в игру не удался")
+        if attempt < tries:
+            time.sleep(1.0)
+    return {"ok": False, "attempts": tries, "notes": notes,
+            "error": "Roblox не смог войти в игру (сеть). "
+                     "Проверь связь с Roblox и нажми «Играть» ещё раз."}
+
+
+def launch_game(place_id):
+    """Открыть игру обычной ссылкой клиента (с проверкой и повтором)."""
+    return _drive_launch(roblox_deep_link(place_id))
 
 
 def fetch_roblox_avatar(user_id, timeout=12):
@@ -3694,6 +3853,7 @@ def launch_game_as(place_id, account_id=None, accounts_path=None):
     принимает старую ссылку roblox-player с PlaceLauncher. Для него сессия
     аккаунта кладётся в RobloxCookies.dat, после чего открывается обычная
     ссылка roblox://. Старый клиент запускается прежним способом.
+    Запуск повторяется, пока клиент не появится и не войдёт в игру.
     """
     data = load_accounts(accounts_path)
     account = None
@@ -3715,25 +3875,31 @@ def launch_game_as(place_id, account_id=None, accounts_path=None):
     if not check["ok"]:
         return {"ok": False, "account": _account_meta(account),
                 "error": check["error"]}
+    roblox_store_ready()
     session = set_roblox_session(cookie)
     if session["ok"]:
-        url = roblox_deep_link(place_id)
-        mode = "app"
-    else:
-        ticket = roblox_auth_ticket(cookie)
-        if not ticket["ok"]:
-            return {"ok": False, "account": _account_meta(account),
-                    "error": ticket["error"]}
-        url = game_launch_url(place_id, ticket["ticket"])
-        mode = "legacy"
+        driven = _drive_launch(roblox_deep_link(place_id))
+        if driven["ok"]:
+            _touch_account(account["id"], accounts_path)
+            return {"ok": True, "error": "", "mode": "app",
+                    "attempts": driven["attempts"],
+                    "notes": driven["notes"],
+                    "account": _account_meta(account)}
+        return {"ok": False, "account": _account_meta(account),
+                "notes": driven["notes"], "error": driven["error"]}
+    ticket = roblox_auth_ticket(cookie)
+    if not ticket["ok"]:
+        return {"ok": False, "account": _account_meta(account),
+                "error": ticket["error"]}
+    url = game_launch_url(place_id, ticket["ticket"])
     try:
         os.startfile(url)
     except OSError as exc:
         return {"ok": False, "account": _account_meta(account),
                 "error": f"Не удалось открыть ссылку Roblox: {exc}"}
     _touch_account(account["id"], accounts_path)
-    return {"ok": True, "error": "", "mode": mode,
-            "account": _account_meta(account)}
+    return {"ok": True, "error": "", "mode": "legacy", "attempts": 1,
+            "notes": [], "account": _account_meta(account)}
 
 
 def close_roblox_players():

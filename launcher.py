@@ -73,7 +73,7 @@ from core import (
     gallery_cache_save, gallery_seed_places, gallery_stats,
     gallery_thumb_path, game_launch_url, hit_test, import_cursor_set,
     import_launch_icon, import_launch_sound, import_theme_set,
-    import_ui_font, inspect_ui_font, launch_game_as,
+    import_ui_font, inspect_ui_font, launch_game, launch_game_as,
     launch_icon_state, launch_sound_path, list_cursor_sets, list_theme_sets,
     load_config, load_private_font, load_theme_palette, mb, merge_flags_into,
     migrate_old_config, parse_place_id, png_info, player_pids,
@@ -89,7 +89,8 @@ from core import (
     stop_launch_sound, theme_set_info, trunc,
     ui_font_path, ui_font_state, unload_private_font, unprotect_secret,
     update_theme_set, valid_cursor_set_name, valid_discord_app_id,
-    valid_geometry, valid_theme_set_name, version_tuple, work_area,
+    valid_geometry, valid_theme_set_name, version_tuple, wait_for_new_players,
+    work_area,
     write_json_dict, DiscordPresence, discord_activity, discord_frame,
 )
 
@@ -7536,7 +7537,7 @@ class App:
         # 1) ссылка приложения Roblox — открывает главную страницу клиента
         try:
             os.startfile("roblox://navigation/home")
-            if self._wait_for_new_pids(before, 8):
+            if wait_for_new_players(before, 8):
                 self.q.put(lambda: self._client_result("protocol", True))
                 return
         except OSError:
@@ -7548,24 +7549,13 @@ class App:
             if exe:
                 try:
                     subprocess.Popen([str(exe)], cwd=str(exe.parent))
-                    if self._wait_for_new_pids(before, 8):
+                    if wait_for_new_players(before, 8):
                         self.q.put(lambda: self._client_result("exe", True))
                         return
                 except OSError:
                     pass
 
         self.q.put(lambda: self._client_result("fail", False))
-
-    @staticmethod
-    def _wait_for_new_pids(before, seconds):
-        for _ in range(seconds):
-            time.sleep(1)
-            new = player_pids() - before
-            if new:
-                time.sleep(1.5)
-                if player_pids() & new:
-                    return True
-        return False
 
     def _client_result(self, outcome, focused):
         if self._closing:
@@ -7684,34 +7674,53 @@ class App:
         self._launch_plain(pid, name, game)
 
     def _launch_plain(self, pid, name, game):
-        """Обычный запуск roblox:// — без входа под аккаунтом."""
+        """Обычный запуск ссылкой клиента — без входа под аккаунтом."""
         if self._play_busy:
             return
-        url = roblox_deep_link(pid)
+        self._play_busy = True
+        self._btn_state(self.btn_play, "primary", False,
+                        text="Запускаю игру…")
         self._rpc_set(game, "Запускаю игру…")
+        self.status_var.set(f"Запускаю {name or pid}…")
         self._begin_launch_effect(game or name or "Roblox",
                                   "Передаю ссылку Roblox…")
+        threading.Thread(target=self._plain_worker,
+                         args=(pid, name, game), daemon=True).start()
+
+    def _plain_worker(self, pid, name, game):
         try:
-            os.startfile(url)
-        except OSError as exc:
-            self.log(f"Ошибка запуска: {exc}")
-            self.status_var.set("Ошибка запуска")
-            self._rpc_set("В меню", "Ошибка запуска")
-            self._end_launch_effect("Ошибка запуска")
-            self._play_error_sound()
-            if self.interactive:
-                messagebox.showerror(
-                    APP_NAME,
-                    f"Не удалось открыть ссылку roblox://\n\n{exc}",
-                    parent=self.root)
+            result = launch_game(pid)
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "attempts": 0, "notes": [],
+                      "error": f"Не удалось запустить игру: {exc}"}
+        self.q.put(lambda: self._plain_done(pid, name, game, result))
+
+    def _plain_done(self, pid, name, game, result):
+        if self._closing:
             return
-        self.entry_var.set(pid)
-        self.status_var.set(f"Запускаю {name or pid}…")
-        self.log(f"Ссылка передана системе: {url}")
-        self._end_launch_effect(f"Запускаю {name or pid}…")
-        self.root.after(
-            10000, lambda g=game: self._rpc_set(g, "Играет в Roblox"))
-        self._after_game_launch(pid, name)
+        self._play_busy = False
+        self._btn_state(self.btn_play, "primary", True,
+                        text="▶   ИГРАТЬ ПО ID")
+        for note in result.get("notes") or []:
+            self.log(note)
+        if result.get("ok"):
+            self.entry_var.set(pid)
+            self.log(f"Ссылка передана клиенту "
+                     f"(попыток: {result.get('attempts') or 1})")
+            self.status_var.set(f"Запускаю {name or pid}…")
+            self._end_launch_effect(f"Запускаю {name or pid}…")
+            self.root.after(
+                10000, lambda g=game: self._rpc_set(g, "Играет в Roblox"))
+            self._after_game_launch(pid, name)
+            return
+        error = result.get("error") or "Не удалось запустить игру."
+        self.log(f"Запуск: {error}")
+        self.status_var.set("Не удалось запустить игру")
+        self._rpc_set("В меню", "Ошибка запуска")
+        self._end_launch_effect("Ошибка запуска")
+        self._play_error_sound()
+        if self.interactive:
+            messagebox.showerror(APP_NAME, error, parent=self.root)
 
     def _start_account_launch(self, pid, name, game, account):
         if self._play_busy:
@@ -7733,10 +7742,12 @@ class App:
     def _account_launch_worker(self, pid, name, game, account):
         if player_pids():
             close_roblox_players()
-            for _ in range(20):
+            for _ in range(24):
                 if not player_pids():
                     break
                 time.sleep(0.5)
+            # клиент отпускает одиночный экземпляр и дописывает сессию
+            time.sleep(1.5)
         result = launch_game_as(pid, account["id"])
         self.q.put(lambda: self._account_launch_done(
             pid, name, game, result))
@@ -7747,6 +7758,8 @@ class App:
         self._play_busy = False
         self._btn_state(self.btn_play, "primary", True,
                         text="▶   ИГРАТЬ ПО ID")
+        for note in result.get("notes") or []:
+            self.log(note)
         account = result.get("account") or {}
         if result.get("ok"):
             who = account.get("name") or "аккаунт"
@@ -7755,7 +7768,8 @@ class App:
             how = ("новый клиент" if result.get("mode") == "app"
                    else "старый клиент")
             self.log(f"Игра запущена под аккаунтом @{who} "
-                     f"(place {pid}, {how})")
+                     f"(place {pid}, {how}, "
+                     f"попыток: {result.get('attempts') or 1})")
             self._rpc_set(game, "Играет в Roblox")
             self.root.after(
                 10000, lambda g=game: self._rpc_set(g, "Играет в Roblox"))
@@ -8604,6 +8618,99 @@ def run_selftest():
                             "сессия клиента: битый файл перезаписан")
     except Exception as exc:  # noqa: BLE001
         failures.append(f"accounts test: {exc}")
+
+    # 6d2) контроль запуска: журнал клиента и повтор ссылки
+    try:
+        import core as core_module
+
+        parsed = core_module._log_line_epoch(
+            "2026-10-27T14:36:26.633Z,8.633,3e00,6,text")
+        want = core_module.datetime(
+            2026, 10, 27, 14, 36, 26, 633000,
+            tzinfo=core_module.timezone.utc).timestamp()
+        if parsed != want:
+            failures.append(f"журнал клиента: время строки {parsed}")
+        if core_module._log_line_epoch("garbage") is not None:
+            failures.append("журнал клиента: мусор принят за время")
+
+        with tempfile.TemporaryDirectory() as td:
+            logs = Path(td)
+            original_dir = core_module.roblox_log_dir
+            core_module.roblox_log_dir = lambda: logs
+            try:
+                mark = core_module.datetime.now(
+                    core_module.timezone.utc).timestamp()
+
+                def _stamp(offset):
+                    return core_module.datetime.fromtimestamp(
+                        mark + offset,
+                        core_module.timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+                log = logs / "player.log"
+                log.write_text(
+                    f"{_stamp(-600)},1.0,1,6 [FLog::GameJoinLoadTime] "
+                    "Report game_join_loadtime: placeid:1, userid:1, \n",
+                    encoding="utf-8")
+                if core_module.wait_for_join(mark, 0.1) != "timeout":
+                    failures.append("журнал клиента: старая строка засчитана")
+                log.write_text(
+                    f"{_stamp(0)},2.0,1,6 [DFLog::HttpTraceError] "
+                    "HttpResponse error:5 message:HttpError: Timedout url:{ "
+                    "\"https://gamejoin.roblox.com/v1/join-game\" }\n",
+                    encoding="utf-8")
+                if core_module.wait_for_join(mark, 0.1) != "failed":
+                    failures.append("журнал клиента: сбой входа не замечен")
+                with log.open("a", encoding="utf-8") as fh:
+                    fh.write(
+                        f"{_stamp(0)},3.0,1,6 [FLog::GameJoinLoadTime] "
+                        "Report game_join_loadtime: placeid:1, userid:1, \n")
+                if core_module.wait_for_join(mark, 0.1) != "joined":
+                    failures.append("журнал клиента: вход не замечен")
+
+                sent = []
+                original_start = core_module.os.startfile
+                original_pids = core_module.player_pids
+                original_wait = core_module.wait_for_new_players
+                original_join = core_module.wait_for_join
+                core_module.os.startfile = sent.append
+                core_module.player_pids = lambda: set()
+                core_module.wait_for_new_players = (
+                    lambda before, seconds, settle=0: False)
+                core_module.wait_for_join = lambda mark, seconds: "failed"
+                try:
+                    failed = core_module._drive_launch("roblox://x", tries=2)
+                finally:
+                    core_module.os.startfile = original_start
+                    core_module.player_pids = original_pids
+                    core_module.wait_for_new_players = original_wait
+                    core_module.wait_for_join = original_join
+                if failed["ok"] or failed["attempts"] != 2:
+                    failures.append(f"повтор запуска: {failed}")
+                if len(sent) != 2:
+                    failures.append(f"повтор запуска: ссылок {len(sent)}")
+                if len(failed["notes"]) != 2:
+                    failures.append(
+                        f"повтор запуска: заметки {failed['notes']}")
+
+                core_module.os.startfile = sent.append
+                core_module.player_pids = lambda: {777}
+                core_module.wait_for_new_players = (
+                    lambda before, seconds, settle=0: True)
+                core_module.wait_for_join = lambda mark, seconds: "failed"
+                try:
+                    opened = core_module._drive_launch("roblox://x", tries=2)
+                finally:
+                    core_module.os.startfile = original_start
+                    core_module.player_pids = original_pids
+                    core_module.wait_for_new_players = original_wait
+                    core_module.wait_for_join = original_join
+                if not opened["ok"] or opened["attempts"] != 1:
+                    failures.append(f"повтор запуска: открытый клиент {opened}")
+            finally:
+                core_module.roblox_log_dir = original_dir
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"проверка запуска: {exc}")
 
     # 6e) стиль запуска: иконка, звук, ярлыки с резервной копией
     try:
