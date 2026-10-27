@@ -83,13 +83,15 @@ from core import (
     remove_ui_font, rename_cursor_set, rename_theme_set, resize_geometry,
     resolve_gallery_places, restore_custom_cursors,
     restore_launch_icon_shortcuts, roblox_deep_link, roblox_status,
+    roblox_window_pids,
     scan_screenshots,
     screenshots_dir, save_config, set_active_account, set_cursor_slot,
     set_roblox_session, set_theme_image, shade, shortcut_backup_count,
     stop_launch_sound, theme_set_info, trunc,
     ui_font_path, ui_font_state, unload_private_font, unprotect_secret,
     update_theme_set, valid_cursor_set_name, valid_discord_app_id,
-    valid_geometry, valid_theme_set_name, version_tuple, wait_for_new_players,
+    valid_geometry, valid_theme_set_name, version_tuple,
+    wait_for_roblox_window, wait_players_gone,
     work_area,
     write_json_dict, DiscordPresence, discord_activity, discord_frame,
 )
@@ -7521,23 +7523,37 @@ class App:
                 apply_fastflags(self.cfg, values)
 
         before = player_pids()
-        cursor_name = str(self.cfg.get("cursor_set") or "")
-        if self.cfg.get("use_custom_cursors") and not before and cursor_name:
-            cursor_result = apply_cursor_set(cursor_name)
-            self.q.put(lambda r=cursor_result: self._cursor_launch_done(r))
         if before:
             focused = False
             try:
                 focused = focus_roblox_window(before)
             except Exception:
                 focused = False
-            self.q.put(lambda: self._client_result("already", focused))
-            return
+            if focused:
+                self.q.put(lambda: self._client_result("already", True))
+                return
+            # окна нет — клиент остался в трее: сначала пробуем показать его,
+            # затем перезапускаем, иначе «Roblox уже запущен» без окна
+            try:
+                os.startfile("roblox://navigation/home")
+                if wait_for_roblox_window(12):
+                    self.q.put(lambda: self._client_result("protocol", True))
+                    return
+            except OSError:
+                pass
+            close_roblox_players()
+            wait_players_gone(10)
+            before = player_pids()
+
+        cursor_name = str(self.cfg.get("cursor_set") or "")
+        if self.cfg.get("use_custom_cursors") and not before and cursor_name:
+            cursor_result = apply_cursor_set(cursor_name)
+            self.q.put(lambda r=cursor_result: self._cursor_launch_done(r))
 
         # 1) ссылка приложения Roblox — открывает главную страницу клиента
         try:
             os.startfile("roblox://navigation/home")
-            if wait_for_new_players(before, 8):
+            if wait_for_roblox_window(12):
                 self.q.put(lambda: self._client_result("protocol", True))
                 return
         except OSError:
@@ -7549,7 +7565,7 @@ class App:
             if exe:
                 try:
                     subprocess.Popen([str(exe)], cwd=str(exe.parent))
-                    if wait_for_new_players(before, 8):
+                    if wait_for_roblox_window(12):
                         self.q.put(lambda: self._client_result("exe", True))
                         return
                 except OSError:
@@ -7655,7 +7671,9 @@ class App:
         active = self._active_account()
         if active is not None:
             who = active.get("display") or active.get("name") or "аккаунт"
-            if player_pids():
+            running = player_pids()
+            if running and roblox_window_pids(running):
+                # игра/клиент открыты на экране — спрашиваем перед закрытием
                 close_it = True
                 if self.interactive:
                     close_it = messagebox.askyesno(
@@ -7669,6 +7687,9 @@ class App:
                 self.log("Аккаунт не применён: Roblox уже запущен")
                 self.status_var.set("Запуск без смены аккаунта")
             else:
+                if running:
+                    self.log("Клиент Roblox висит в трее — перезапускаю "
+                             "под аккаунтом")
                 self._start_account_launch(pid, name, game, active)
                 return
         self._launch_plain(pid, name, game)
@@ -7742,10 +7763,7 @@ class App:
     def _account_launch_worker(self, pid, name, game, account):
         if player_pids():
             close_roblox_players()
-            for _ in range(24):
-                if not player_pids():
-                    break
-                time.sleep(0.5)
+            wait_players_gone(12)
             # клиент отпускает одиночный экземпляр и дописывает сессию
             time.sleep(1.5)
         result = launch_game_as(pid, account["id"])
@@ -8669,10 +8687,14 @@ def run_selftest():
                     failures.append("журнал клиента: вход не замечен")
 
                 sent = []
+                closed = []
                 original_start = core_module.os.startfile
                 original_pids = core_module.player_pids
                 original_wait = core_module.wait_for_new_players
                 original_join = core_module.wait_for_join
+                original_windows = core_module.roblox_window_pids
+                original_close = core_module.close_roblox_players
+                original_gone = core_module.wait_players_gone
                 core_module.os.startfile = sent.append
                 core_module.player_pids = lambda: set()
                 core_module.wait_for_new_players = (
@@ -8693,20 +8715,47 @@ def run_selftest():
                     failures.append(
                         f"повтор запуска: заметки {failed['notes']}")
 
+                # клиент открыт на экране — ссылка отдаётся сразу
                 core_module.os.startfile = sent.append
                 core_module.player_pids = lambda: {777}
-                core_module.wait_for_new_players = (
-                    lambda before, seconds, settle=0: True)
+                core_module.roblox_window_pids = lambda *a: {777}
                 core_module.wait_for_join = lambda mark, seconds: "failed"
                 try:
                     opened = core_module._drive_launch("roblox://x", tries=2)
                 finally:
                     core_module.os.startfile = original_start
                     core_module.player_pids = original_pids
-                    core_module.wait_for_new_players = original_wait
+                    core_module.roblox_window_pids = original_windows
                     core_module.wait_for_join = original_join
                 if not opened["ok"] or opened["attempts"] != 1:
                     failures.append(f"повтор запуска: открытый клиент {opened}")
+
+                # клиент в трее: ссылка не сработала — перезапуск и повтор
+                sent.clear()
+                outcomes = iter(["timeout", "joined"])
+                core_module.os.startfile = sent.append
+                core_module.player_pids = lambda: {777}
+                core_module.roblox_window_pids = lambda *a: set()
+                core_module.wait_for_join = (
+                    lambda mark, seconds: next(outcomes))
+                core_module.close_roblox_players = (
+                    lambda: closed.append(True))
+                core_module.wait_players_gone = lambda *a, **k: True
+                try:
+                    tray = core_module._drive_launch("roblox://x", tries=2)
+                finally:
+                    core_module.os.startfile = original_start
+                    core_module.player_pids = original_pids
+                    core_module.roblox_window_pids = original_windows
+                    core_module.wait_for_join = original_join
+                    core_module.close_roblox_players = original_close
+                    core_module.wait_players_gone = original_gone
+                if not tray["ok"] or tray["attempts"] != 2:
+                    failures.append(f"повтор запуска: трей {tray}")
+                if len(sent) != 2 or len(closed) != 1:
+                    failures.append(
+                        f"повтор запуска: трей ссылок {len(sent)}, "
+                        f"закрытий {len(closed)}")
             finally:
                 core_module.roblox_log_dir = original_dir
     except Exception as exc:  # noqa: BLE001

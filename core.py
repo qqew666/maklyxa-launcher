@@ -47,7 +47,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.8.7"
+VERSION = "1.8.8"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -511,6 +511,17 @@ def player_pids():
         return set()
 
 
+def wait_players_gone(seconds=12.0, poll=0.4):
+    """True — процессы Roblox завершились до истечения срока."""
+    deadline = time.time() + max(0.0, seconds)
+    while True:
+        if not player_pids():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(poll)
+
+
 def processes_named(*names):
     """Множество имён запущенных процессов (по tasklist)."""
     wanted = {name.lower() for name in names}
@@ -584,6 +595,48 @@ def focus_window_by_title(title):
         return True
     except Exception:
         return False
+
+
+def roblox_window_pids(pids=None):
+    """PID клиента Roblox с видимым окном.
+
+    Новый клиент после закрытия окна остаётся жить в трее без окон —
+    такие процессы сюда не попадают, их нужно перезапускать.
+    """
+    try:
+        wanted = set(pids) if pids is not None else player_pids()
+    except TypeError:
+        wanted = set()
+    if not wanted:
+        return set()
+    try:
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        found = set()
+
+        def _cb(hwnd, _lparam):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if (pid.value in wanted and user32.IsWindowVisible(hwnd)
+                    and user32.GetWindowTextLengthW(hwnd) > 0):
+                found.add(pid.value)
+            return True
+
+        _enum_windows(_cb)
+        return found
+    except Exception:
+        return set()
+
+
+def wait_for_roblox_window(seconds=8, poll=0.5):
+    """True — у клиента Roblox появилось видимое окно."""
+    deadline = time.time() + max(0.0, seconds)
+    while True:
+        if roblox_window_pids():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(poll)
 
 
 # ---- одноэкземплярность --------------------------------------------------------
@@ -3534,17 +3587,33 @@ def wait_for_join(mark, seconds=ROBLOX_JOIN_WAIT, poll=1.5):
         time.sleep(poll)
 
 
+ROBLOX_TRAY_WAIT = 25
+
+
 def _drive_launch(url, tries=ROBLOX_LAUNCH_TRIES,
                   wait_client=ROBLOX_CLIENT_START_WAIT,
-                  wait_join=ROBLOX_JOIN_WAIT):
+                  wait_join=ROBLOX_JOIN_WAIT,
+                  wait_tray=ROBLOX_TRAY_WAIT):
     """Отправить клиенту ссылку и дождаться входа в игру.
 
-    Клиент нового поколения иногда теряет ссылку (прошлый экземпляр ещё
-    закрывается) или не успевает подключиться к gamejoin — поэтому ссылка
-    отправляется повторно, пока не появятся процесс и вход в игру.
+    Клиент нового поколения после закрытия окна остаётся в трее и держит
+    одиночный экземпляр. Такому клиенту ссылка передаётся повторно, а если
+    он её не принял — процесс перезапускается, иначе игра не откроется без
+    диспетчера задач. Ссылка повторяется и когда клиент не успел
+    подключиться к gamejoin.
     """
     notes = []
-    already = bool(player_pids())
+    stale = player_pids()
+    if stale and roblox_window_pids(stale):
+        # клиент открыт на экране — ссылку примет его окно
+        try:
+            os.startfile(url)
+        except OSError as exc:
+            return {"ok": False, "attempts": 1, "notes": notes,
+                    "error": f"Не удалось открыть ссылку Roblox: {exc}"}
+        return {"ok": True, "attempts": 1, "notes": notes, "error": ""}
+    if stale:
+        notes.append("Клиент Roblox висит в трее — передаю ссылку ему")
     for attempt in range(1, max(1, tries) + 1):
         before = player_pids()
         mark = time.time()
@@ -3553,9 +3622,18 @@ def _drive_launch(url, tries=ROBLOX_LAUNCH_TRIES,
         except OSError as exc:
             return {"ok": False, "attempts": attempt, "notes": notes,
                     "error": f"Не удалось открыть ссылку Roblox: {exc}"}
-        if already:
-            return {"ok": True, "attempts": attempt, "notes": notes,
-                    "error": ""}
+        if stale:
+            outcome = wait_for_join(mark, wait_tray)
+            if outcome in ("joined", "unknown"):
+                return {"ok": True, "attempts": attempt, "notes": notes,
+                        "error": ""}
+            notes.append(f"Попытка {attempt}: клиент в трее не открыл игру")
+            if attempt < tries:
+                close_roblox_players()
+                wait_players_gone(10)
+                stale = set()
+                time.sleep(1.0)
+            continue
         if not before and not wait_for_new_players(before, wait_client):
             notes.append(f"Попытка {attempt}: клиент не запустился")
         else:
@@ -3566,9 +3644,9 @@ def _drive_launch(url, tries=ROBLOX_LAUNCH_TRIES,
             notes.append(f"Попытка {attempt}: вход в игру не удался")
         if attempt < tries:
             time.sleep(1.0)
-    return {"ok": False, "attempts": tries, "notes": notes,
-            "error": "Roblox не смог войти в игру (сеть). "
-                     "Проверь связь с Roblox и нажми «Играть» ещё раз."}
+    return {"ok": False, "attempts": max(1, tries), "notes": notes,
+            "error": "Roblox не открыл игру. Нажми «Играть» ещё раз — "
+                     "зависший клиент лаунчер закроет сам."}
 
 
 def launch_game(place_id):
@@ -3876,6 +3954,12 @@ def launch_game_as(place_id, account_id=None, accounts_path=None):
         return {"ok": False, "account": _account_meta(account),
                 "error": check["error"]}
     roblox_store_ready()
+    if player_pids():
+        # клиент в трее держит сессию в памяти — без перезапуска
+        # подмена .ROBLOSECURITY не даст нужный аккаунт
+        close_roblox_players()
+        wait_players_gone(12)
+        time.sleep(1.0)
     session = set_roblox_session(cookie)
     if session["ok"]:
         driven = _drive_launch(roblox_deep_link(place_id))
@@ -3903,9 +3987,13 @@ def launch_game_as(place_id, account_id=None, accounts_path=None):
 
 
 def close_roblox_players():
-    """Закрыть игровые процессы Roblox. Вызывать только после согласия."""
+    """Закрыть игровые процессы Roblox (включая зависший трей).
+
+    Вызывать только после согласия: игра может быть открыта.
+    """
     try:
-        subprocess.run(["taskkill", "/IM", "RobloxPlayerBeta.exe", "/F"],
+        subprocess.run(["taskkill", "/IM", "RobloxPlayerBeta.exe",
+                        "/F", "/T"],
                        capture_output=True, timeout=15,
                        creationflags=CREATE_NO_WINDOW)
         return True
