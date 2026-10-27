@@ -7532,15 +7532,8 @@ class App:
             if focused:
                 self.q.put(lambda: self._client_result("already", True))
                 return
-            # окна нет — клиент остался в трее: сначала пробуем показать его,
-            # затем перезапускаем, иначе «Roblox уже запущен» без окна
-            try:
-                os.startfile("roblox://navigation/home")
-                if wait_for_roblox_window(12):
-                    self.q.put(lambda: self._client_result("protocol", True))
-                    return
-            except OSError:
-                pass
+            # окна нет — клиент остался в трее и ссылок не принимает:
+            # перезапускаем, иначе «Roblox уже запущен» без окна
             close_roblox_players()
             wait_players_gone(10)
             before = player_pids()
@@ -8730,14 +8723,12 @@ def run_selftest():
                 if not opened["ok"] or opened["attempts"] != 1:
                     failures.append(f"повтор запуска: открытый клиент {opened}")
 
-                # клиент в трее: ссылка не сработала — перезапуск и повтор
+                # клиент в трее: ссылок не принимает — закрывается до запуска
                 sent.clear()
-                outcomes = iter(["timeout", "joined"])
                 core_module.os.startfile = sent.append
                 core_module.player_pids = lambda: {777}
                 core_module.roblox_window_pids = lambda *a: set()
-                core_module.wait_for_join = (
-                    lambda mark, seconds: next(outcomes))
+                core_module.wait_for_join = lambda mark, seconds: "joined"
                 core_module.close_roblox_players = (
                     lambda: closed.append(True))
                 core_module.wait_players_gone = lambda *a, **k: True
@@ -8750,12 +8741,15 @@ def run_selftest():
                     core_module.wait_for_join = original_join
                     core_module.close_roblox_players = original_close
                     core_module.wait_players_gone = original_gone
-                if not tray["ok"] or tray["attempts"] != 2:
+                if not tray["ok"] or tray["attempts"] != 1:
                     failures.append(f"повтор запуска: трей {tray}")
-                if len(sent) != 2 or len(closed) != 1:
+                if len(sent) != 1 or len(closed) != 1:
                     failures.append(
                         f"повтор запуска: трей ссылок {len(sent)}, "
                         f"закрытий {len(closed)}")
+                if len(tray["notes"]) != 1:
+                    failures.append(
+                        f"повтор запуска: трей заметки {tray['notes']}")
             finally:
                 core_module.roblox_log_dir = original_dir
     except Exception as exc:  # noqa: BLE001

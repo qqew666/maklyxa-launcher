@@ -3587,20 +3587,16 @@ def wait_for_join(mark, seconds=ROBLOX_JOIN_WAIT, poll=1.5):
         time.sleep(poll)
 
 
-ROBLOX_TRAY_WAIT = 25
-
-
 def _drive_launch(url, tries=ROBLOX_LAUNCH_TRIES,
                   wait_client=ROBLOX_CLIENT_START_WAIT,
-                  wait_join=ROBLOX_JOIN_WAIT,
-                  wait_tray=ROBLOX_TRAY_WAIT):
+                  wait_join=ROBLOX_JOIN_WAIT):
     """Отправить клиенту ссылку и дождаться входа в игру.
 
     Клиент нового поколения после закрытия окна остаётся в трее и держит
-    одиночный экземпляр. Такому клиенту ссылка передаётся повторно, а если
-    он её не принял — процесс перезапускается, иначе игра не откроется без
-    диспетчера задач. Ссылка повторяется и когда клиент не успел
-    подключиться к gamejoin.
+    одиночный запуск, но ссылку на игру из трея не принимает. Такой процесс
+    закрывается перед запуском — иначе игра не откроется без диспетчера
+    задач. Ссылка повторяется и когда клиент не успел подключиться
+    к gamejoin.
     """
     notes = []
     stale = player_pids()
@@ -3613,7 +3609,10 @@ def _drive_launch(url, tries=ROBLOX_LAUNCH_TRIES,
                     "error": f"Не удалось открыть ссылку Roblox: {exc}"}
         return {"ok": True, "attempts": 1, "notes": notes, "error": ""}
     if stale:
-        notes.append("Клиент Roblox висит в трее — передаю ссылку ему")
+        notes.append("Клиент Roblox висел в трее — закрываю и запускаю заново")
+        close_roblox_players()
+        wait_players_gone(10)
+        time.sleep(1.0)
     for attempt in range(1, max(1, tries) + 1):
         before = player_pids()
         mark = time.time()
@@ -3622,18 +3621,6 @@ def _drive_launch(url, tries=ROBLOX_LAUNCH_TRIES,
         except OSError as exc:
             return {"ok": False, "attempts": attempt, "notes": notes,
                     "error": f"Не удалось открыть ссылку Roblox: {exc}"}
-        if stale:
-            outcome = wait_for_join(mark, wait_tray)
-            if outcome in ("joined", "unknown"):
-                return {"ok": True, "attempts": attempt, "notes": notes,
-                        "error": ""}
-            notes.append(f"Попытка {attempt}: клиент в трее не открыл игру")
-            if attempt < tries:
-                close_roblox_players()
-                wait_players_gone(10)
-                stale = set()
-                time.sleep(1.0)
-            continue
         if not before and not wait_for_new_players(before, wait_client):
             notes.append(f"Попытка {attempt}: клиент не запустился")
         else:
