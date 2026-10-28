@@ -56,6 +56,7 @@ from core import (
     GRAPHICS_MODES, HTTP_HEADERS, INSTALLER_URL,
     IMAGE_ONLY_ACCENT, IMAGE_ONLY_PALETTE, LAUNCH_DIR, RELEASES_URL,
     THEMES, THEME_ORDER, VERSION, WINDOW_TITLE,
+    ROBLOX_APP_THEMES,
     THEME_SETS_DIR, THEME_TINTS,
     account_avatar_path, account_session, accounts_state, add_account,
     acquire_single_instance, apply_cursor_set, apply_fastflags,
@@ -83,10 +84,11 @@ from core import (
     remove_ui_font, rename_cursor_set, rename_theme_set, resize_geometry,
     resolve_gallery_places, restore_custom_cursors,
     restore_launch_icon_shortcuts, roblox_deep_link, roblox_status,
-    roblox_window_pids,
+    roblox_theme_state, roblox_window_pids,
     scan_screenshots,
     screenshots_dir, save_config, set_active_account, set_cursor_slot,
-    set_roblox_session, set_theme_image, shade, shortcut_backup_count,
+    set_roblox_session, set_roblox_theme, set_theme_image, shade,
+    shortcut_backup_count,
     stop_launch_sound, theme_set_info, trunc,
     ui_font_path, ui_font_state, unload_private_font, unprotect_secret,
     update_theme_set, valid_cursor_set_name, valid_discord_app_id,
@@ -180,6 +182,45 @@ NAV_GROUPS = [
 ]
 
 
+def round_window_corners(hwnd, radius=12):
+    """Скруглить окно без рамки через регион Windows."""
+    if os.name != "nt" or not hwnd:
+        return False
+    try:
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(ctypes.c_void_p(hwnd),
+                                    ctypes.byref(rect)):
+            return False
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        if width <= 0 or height <= 0:
+            return False
+        region = gdi32.CreateRoundRectRgn(
+            0, 0, width + 1, height + 1, radius, radius)
+        if not region:
+            return False
+        # регион переходит во владение окна — удалять его нельзя
+        user32.SetWindowRgn(ctypes.c_void_p(hwnd), region, True)
+        return True
+    except (AttributeError, OSError):
+        return False
+
+
+def square_window_corners(hwnd):
+    """Вернуть окну прямоугольную форму (максимизация)."""
+    if os.name != "nt" or not hwnd:
+        return False
+    try:
+        ctypes.windll.user32.SetWindowRgn(
+            ctypes.c_void_p(hwnd), None, True)
+        return True
+    except (AttributeError, OSError):
+        return False
+
+
 # ---- безрамочное окно ----------------------------------------------------------
 
 
@@ -203,9 +244,11 @@ class FramelessWindow:
         self._styled = False
         self._alt_seen = 0.0
         self._was_foreground = True
+        self._region_job = None
 
         root.overrideredirect(True)
         root.bind("<Map>", self._on_map, add="+")
+        root.bind("<Configure>", self._on_configure, add="+")
         root.bind("<Button-1>", self._on_press, add="+")
         root.bind("<B1-Motion>", self._on_drag, add="+")
         root.bind("<ButtonRelease-1>", self._on_release, add="+")
@@ -303,8 +346,31 @@ class FramelessWindow:
                                   ctypes.c_int(style))
         except Exception:
             pass
+        self._apply_region()
 
-    # -- геометрия ------------------------------------------------------------
+    def _apply_region(self):
+        """Скруглить углы окна; в максимизации — прямые."""
+        self._region_job = None
+        hwnd = self._hwnd()
+        if not hwnd:
+            return
+        if self.maximized:
+            square_window_corners(hwnd)
+        else:
+            round_window_corners(hwnd, 12)
+
+    def _on_configure(self, event):
+        if self.root is None or event.widget is not self.root:
+            return
+        if self._region_job is not None:
+            try:
+                self.root.after_cancel(self._region_job)
+            except tk.TclError:
+                pass
+        try:
+            self._region_job = self.root.after(40, self._apply_region)
+        except tk.TclError:
+            self._region_job = None
 
     def _frame(self):
         """(x, y, w, h) окна в экранных координатах."""
@@ -403,6 +469,7 @@ class FramelessWindow:
         x, y, w, h = work_area()
         self.root.geometry(f"{w}x{h}+{x}+{y}")
         self.maximized = True
+        self.root.after_idle(self._apply_region)
         self._notify_max()
 
     def restore(self):
@@ -414,6 +481,7 @@ class FramelessWindow:
             geom = f"{DEFAULT_SIZE[0]}x{DEFAULT_SIZE[1]}+{x + 40}+{y + 40}"
         self.root.geometry(geom)
         self.maximized = False
+        self.root.after_idle(self._apply_region)
         self._notify_max()
 
     def toggle_maximize(self):
@@ -1119,13 +1187,15 @@ class App:
         titlebar.pack(fill="x")
         titlebar.pack_propagate(False)
 
+        lights = tk.Frame(titlebar, bg=c["titlebar"])
+        lights.pack(side="left", padx=(14, 4))
         if ICON_PNG.exists():
             try:
                 img = tk.PhotoImage(file=str(ICON_PNG))
                 img = img.subsample(12, 12)      # 256 → 21 px
                 self._title_icon = img
                 tk.Label(titlebar, image=img, bg=c["titlebar"],
-                         bd=0).pack(side="left", padx=(16, 8))
+                         bd=0).pack(side="left", padx=(8, 8))
             except tk.TclError:
                 pass
         tk.Label(titlebar, text=APP_NAME, bg=c["titlebar"], fg=c["text"],
@@ -1138,12 +1208,13 @@ class App:
             font=(UI_FONT, 9))
         self.title_crumb.pack(side="left", padx=(14, 0))
 
-        close_btn = self._window_button(
-            titlebar, "✕", self.close, danger=True)
-        max_btn = self._window_button(
-            titlebar, "□", self.frameless.toggle_maximize)
-        min_btn = self._window_button(
-            titlebar, "─", self.frameless.minimize)
+        close_btn = self._traffic_light(
+            lights, "#ff5f57", "#5c0b06", "✕", self.close)
+        min_btn = self._traffic_light(
+            lights, "#febc2e", "#5c3d00", "–", self.frameless.minimize)
+        max_btn = self._traffic_light(
+            lights, "#28c840", "#0b4a12", "＋",
+            self.frameless.toggle_maximize)
         self.max_button = max_btn
         self.frameless.on_max_change = self._on_max_change
 
@@ -1623,37 +1694,38 @@ class App:
                            fill=accent,
                            font=(UI_FONT, 16 if compact else 20, "bold"))
 
-    def _window_button(self, parent, glyph, command, danger=False):
-        c = self.c
-        base = c["titlebar"]
-        btn = tk.Button(
-            parent, text=glyph, relief="flat", bd=0, takefocus=False,
-            bg=base, fg=c["text"], activebackground=base,
-            activeforeground=c["text"], font=(UI_FONT, 11),
-            cursor="hand2", highlightthickness=0, width=6,
-            command=command)
-        btn.pack(side="right", fill="y")
+    def _traffic_light(self, parent, color, glyph_color, glyph, command):
+        """Кнопка окна как в macOS: цветной кружок со знаком при наведении."""
+        size = 14
+        canvas = tk.Canvas(
+            parent, width=size, height=size, bg=self.c["titlebar"],
+            highlightthickness=0, bd=0, cursor="hand2", takefocus=0)
+        dot = canvas.create_oval(2, 2, size - 2, size - 2,
+                                 fill=color, outline="")
+        mark = canvas.create_text(size / 2, size / 2, text="",
+                                  fill=glyph_color,
+                                  font=(UI_FONT, 7, "bold"))
+        canvas.hover_glyph = glyph
+        canvas.pack(side="left", padx=(0, 8))
 
         def on_enter(_e):
-            if danger:
-                btn.configure(bg="#e81123", fg="#ffffff",
-                              activebackground="#e81123",
-                              activeforeground="#ffffff")
-            else:
-                hot = shade(base, 1.35)
-                btn.configure(bg=hot, activebackground=hot)
+            canvas.itemconfigure(dot, fill=shade(color, 1.14))
+            canvas.itemconfigure(
+                mark, text=getattr(canvas, "hover_glyph", glyph))
 
         def on_leave(_e):
-            btn.configure(bg=base, fg=c["text"], activebackground=base,
-                          activeforeground=c["text"])
-        btn.bind("<Enter>", on_enter)
-        btn.bind("<Leave>", on_leave)
-        return btn
+            canvas.itemconfigure(dot, fill=color)
+            canvas.itemconfigure(mark, text="")
+
+        canvas.bind("<Enter>", on_enter)
+        canvas.bind("<Leave>", on_leave)
+        canvas.bind("<Button-1>", lambda _e: command())
+        return canvas
 
     def _on_max_change(self, maximized):
         try:
-            self.max_button.configure(text="❐" if maximized else "□")
-        except tk.TclError:
+            self.max_button.hover_glyph = "❐" if maximized else "＋"
+        except (AttributeError, tk.TclError):
             pass
 
     # -- страницы -----------------------------------------------------------------
@@ -3618,6 +3690,31 @@ class App:
             "Картинка становится фоном всего окна, а режим «только картинка» "
             "убирает цвета темы и оставляет фото.")
 
+        self.roblox_theme_var = tk.StringVar(value="Проверяю…")
+        rob = self._card(
+            pad, title="Тема Roblox", glyph="◑",
+            subtitle="Оформление самого клиента Roblox: главная страница, "
+                     "меню и настройки. Меняется официальный параметр "
+                     "appStorage.json — файлы игры остаются нетронутыми.")
+        row = tk.Frame(rob, bg=c["surface"])
+        row.pack(fill="x", pady=(10, 0))
+        self.btn_roblox_dark = self._button(
+            row, "Тёмная", lambda: self._set_roblox_theme("dark"),
+            side="left")
+        self.btn_roblox_light = self._button(
+            row, "Светлая", lambda: self._set_roblox_theme("light"),
+            side="left", padx=(8, 0))
+        tk.Label(row, textvariable=self.roblox_theme_var, bg=c["surface"],
+                 fg=c["muted"], font=(UI_FONT, 9), anchor="w").pack(
+                     side="left", padx=(14, 0))
+        self._hint(
+            rob,
+            "Тему Roblox читает при запуске, поэтому клиент должен быть "
+            "закрыт — работающий файл лаунчер не трогает. Рядом остаётся "
+            "копия appStorage.json.maklyxa.bak, чтобы можно было вернуть "
+            "исходное оформление.", wrap=560)
+        self._refresh_roblox_theme()
+
         inner = self._card(
             pad, title="Мои темы", glyph="◐",
             subtitle="Выбери тему слева — справа можно переименовать её, "
@@ -3750,6 +3847,50 @@ class App:
             wrap=470)
         self._refresh_theme_panel()
         self.root.after_idle(self._render_theme_preview)
+
+    def _refresh_roblox_theme(self):
+        var = getattr(self, "roblox_theme_var", None)
+        if var is None:
+            return
+        state = roblox_theme_state()
+        theme = state.get("theme") or ""
+        if not state.get("ok"):
+            var.set("недоступно: " + str(state.get("error") or ""))
+        elif theme:
+            var.set("Сейчас: " + ROBLOX_APP_THEMES[theme].lower())
+        else:
+            var.set("Тема ещё не задана")
+        for key, btn in (("dark", getattr(self, "btn_roblox_dark", None)),
+                         ("light", getattr(self, "btn_roblox_light", None))):
+            if btn is None:
+                continue
+            label = "Тёмная" if key == "dark" else "Светлая"
+            try:
+                btn.configure(text=("● " + label) if key == theme else label)
+            except tk.TclError:
+                pass
+
+    def _set_roblox_theme(self, theme):
+        result = set_roblox_theme(theme)
+        if not result.get("ok"):
+            self.status_var.set("Тема Roblox не изменена")
+            self.log("Тема Roblox: " + str(result.get("error") or ""))
+            if self.interactive:
+                messagebox.showwarning(
+                    APP_NAME,
+                    "Не удалось сменить тему Roblox:\n"
+                    + str(result.get("error") or ""), parent=self.root)
+            self._refresh_roblox_theme()
+            return False
+        label = ROBLOX_APP_THEMES[theme].lower()
+        if result.get("changed"):
+            self.status_var.set(f"Тема Roblox: {label}")
+            self.log(f"Тема Roblox переключена на «{label}» — применится "
+                     "при следующем запуске клиента")
+        else:
+            self.status_var.set(f"Тема Roblox уже {label}")
+        self._refresh_roblox_theme()
+        return True
 
     def _refresh_theme_panel(self, select=None):
         box = getattr(self, "theme_sets_box", None)
@@ -5958,11 +6099,14 @@ class App:
 
         self._page_header(
             pad, "◳", "В игре",
-            "Оверлей поверх Roblox по Shift+F1 и AFK-режим. Помощник — "
-            "отдельный процесс: не внедряется в клиент и не меняет его файлы.")
+            "Оверлей и островок с временем и музыкой поверх Roblox по "
+            "Shift+F1, плюс AFK-режим. Помощник — отдельный процесс: "
+            "не внедряется в клиент и не меняет его файлы.")
 
         self.var_ingame_overlay = tk.BooleanVar(
             value=bool(self.cfg.get("ingame_overlay")))
+        self.var_ingame_island = tk.BooleanVar(
+            value=bool(self.cfg.get("ingame_island")))
         self.var_ingame_start = tk.BooleanVar(
             value=bool(self.cfg.get("ingame_overlay_start")))
         self.var_ingame_auto = tk.BooleanVar(
@@ -6080,6 +6224,51 @@ class App:
             "запускается автоматически, как только Roblox открывается; "
             "Shift+F1 переключает оверлей глобально. Если комбинацию занял "
             "другой программой — пользуйся кнопкой.", wrap=560)
+
+        # -- островок
+        island = self._card(
+            pad, title="Островок",
+            subtitle="Пилюля сверху по центру игры: время, а если играет "
+                     "музыка — название трека и обложка",
+            glyph="◒")
+        self._checkbox(
+            island, "Показывать островок (Shift+F1 вместе с оверлеем)",
+            self.var_ingame_island,
+            command=self._ingame_feature_toggle).pack(
+                anchor="w", pady=(6, 0))
+
+        preview = tk.Frame(island, bg=c["surface2"], padx=12, pady=12)
+        preview.pack(fill="x", pady=(10, 0))
+        pill = tk.Frame(preview, bg="#0e131b", padx=14, pady=7,
+                        highlightthickness=1, highlightbackground="#2c3a4c")
+        pill.pack(anchor="center")
+        tk.Label(pill, text="21:40", bg="#0e131b", fg="#eef4fb",
+                 font=(UI_FONT, 12, "bold")).pack(side="left")
+        tk.Frame(pill, bg="#2c3a4c", width=1, height=24).pack(
+            side="left", fill="y", padx=12)
+        art = tk.Frame(pill, bg="#182231", width=26, height=26,
+                       highlightthickness=1, highlightbackground="#2c3a4c")
+        art.pack(side="left")
+        art.pack_propagate(False)
+        tk.Label(art, text="♪", bg="#182231", fg="#93a6ba",
+                 font=(UI_FONT, 9)).pack(expand=True)
+        track = tk.Frame(pill, bg="#0e131b")
+        track.pack(side="left", padx=(10, 0))
+        tk.Label(track, text="Название трека", bg="#0e131b",
+                 fg="#eef4fb", font=(UI_FONT, 9, "bold")).pack(anchor="w")
+        tk.Label(track, text="Исполнитель", bg="#0e131b", fg="#93a6ba",
+                 font=(UI_FONT, 7)).pack(anchor="w")
+        tk.Label(preview, text="пример: музыка не играет — остаются часы",
+                 bg=c["surface2"], fg=c["muted"],
+                 font=(UI_FONT, 8)).pack(pady=(8, 0))
+        self._hint(
+            island,
+            "Трек берётся из системной медиасессии Windows — Spotify, "
+            "браузер, проигрыватель. Помощник не подключается к аккаунтам "
+            "и не читает файлы музыки: только название, исполнитель и "
+            "обложку, которые Windows и так показывает в оверлее громкости. "
+            "Когда музыка на паузе, островок показывает только время.",
+            wrap=560)
 
         # -- AFK
         afk = self._card(
@@ -6220,6 +6409,7 @@ class App:
         if not hasattr(self, "var_ingame_overlay"):
             return
         self.cfg["ingame_overlay"] = bool(self.var_ingame_overlay.get())
+        self.cfg["ingame_island"] = bool(self.var_ingame_island.get())
         self.cfg["ingame_overlay_start"] = bool(self.var_ingame_start.get())
         self.cfg["ingame_auto"] = bool(self.var_ingame_auto.get())
         self.cfg["ingame_afk"] = bool(self.var_ingame_afk.get())
@@ -6251,14 +6441,18 @@ class App:
         self.log("In-game: настройки обновлены")
 
     def _ingame_feature_toggle(self):
+        if self.var_ingame_overlay.get() or self.var_ingame_island.get():
+            self.var_ingame_start.set(True)
         self._save_ingame_cfg()
-        if self.var_ingame_overlay.get() or self.var_ingame_afk.get():
+        if (self.var_ingame_overlay.get() or self.var_ingame_island.get()
+                or self.var_ingame_afk.get()):
             self._maybe_start_ingame_helper(force=True)
 
     def _maybe_start_ingame_helper(self, force=False):
         if not self.interactive or self._closing or self._ingame_busy:
             return
         if not (self.cfg.get("ingame_overlay")
+                or self.cfg.get("ingame_island")
                 or self.cfg.get("ingame_afk")):
             return
         if ingame_mod.helper_running():
@@ -6276,6 +6470,7 @@ class App:
         if not hasattr(self, "combo_ingame_corner"):
             return
         overlay_on = bool(self.var_ingame_overlay.get())
+        island_on = bool(self.var_ingame_island.get())
         afk_on = bool(self.var_ingame_afk.get())
         key_mode = (self.var_ingame_mode.get()
                     == ingame_mod.AFK_MODE_LABELS["key"])
@@ -6291,9 +6486,10 @@ class App:
         desired = bool(self._ingame_last
                        and self._ingame_last.get("overlay_desired"))
         if self.btn_ingame_overlay is not None:
+            name = "оверлей" if overlay_on else "островок"
             self._btn_state(
-                self.btn_ingame_overlay, "primary", overlay_on,
-                text="Скрыть оверлей" if desired else "Показать оверлей")
+                self.btn_ingame_overlay, "primary", overlay_on or island_on,
+                text=("Скрыть " if desired else "Показать ") + name)
         if self.btn_ingame_start is not None:
             self._btn_state(self.btn_ingame_start, "primary",
                             not running and not self._ingame_busy,
@@ -6474,9 +6670,10 @@ class App:
             self.log("In-game: помощник остановлен")
 
     def _ingame_toggle_overlay(self):
-        if not self.cfg.get("ingame_overlay"):
+        overlay_on = bool(self.cfg.get("ingame_overlay"))
+        if not (overlay_on or self.cfg.get("ingame_island")):
             self.ingame_message_var.set(
-                "Оверлей выключен — включи его выше")
+                "Показ выключен — включи оверлей или островок выше")
             return
         if not ingame_mod.helper_running():
             self._ingame_start(show=True)
@@ -6490,11 +6687,12 @@ class App:
         if not ingame_mod.toggle_overlay():
             self.ingame_message_var.set("Не удалось переключить оверлей")
             return
+        name = "Оверлей" if overlay_on else "Островок"
         if want_show:
             self.ingame_message_var.set(
-                "Оверлей включён — появится поверх Roblox")
+                f"{name} включён — появится поверх Roblox")
         else:
-            self.ingame_message_var.set("Оверлей скрыт")
+            self.ingame_message_var.set(f"{name} скрыт")
         self.root.after(500, self._refresh_ingame_status)
 
     def _open_ingame_dir(self):
@@ -9436,7 +9634,8 @@ def run_selftest():
             app.var_default.set(before_save["default_place_id"] or "")
             app.var_discord_rpc.set(bool(before_save["discord_rpc"]))
 
-        for attr in ("var_ingame_overlay", "var_ingame_start",
+        for attr in ("var_ingame_overlay", "var_ingame_island",
+                     "var_ingame_start",
                      "var_ingame_afk", "var_ingame_auto",
                      "combo_ingame_corner", "combo_ingame_mode",
                      "combo_ingame_key", "combo_ingame_minutes",
@@ -9464,6 +9663,7 @@ def run_selftest():
             failures.append(
                 "UI «В игре»: угол оверлея недоступен при включённом оверлее")
         app.var_ingame_overlay.set(True)
+        app.var_ingame_island.set(True)
         app.var_ingame_start.set(True)
         app.var_ingame_afk.set(True)
         app.var_ingame_auto.set(True)
@@ -9475,7 +9675,8 @@ def run_selftest():
         root.update()
         saved_ingame = load_config()
         expected_saved = {
-            "ingame_overlay": True, "ingame_overlay_start": True,
+            "ingame_overlay": True, "ingame_island": True,
+            "ingame_overlay_start": True,
             "ingame_afk": True, "ingame_auto": True,
             "ingame_overlay_corner": "bl", "ingame_afk_mode": "key",
             "ingame_afk_key": "x", "ingame_afk_minutes": 7,

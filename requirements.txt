@@ -1,0 +1,4 @@
+Pillow>=11.0
+winrt-runtime>=3.0
+winrt-Windows.Media.Control>=10.0.28000
+winrt-Windows.Storage.Streams>=10.0.28000

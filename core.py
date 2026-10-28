@@ -47,7 +47,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.8.8"
+VERSION = "1.9.0"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -218,6 +218,7 @@ DEFAULT_CONFIG = {
     "ui_font_name": "",
     "ui_font_family": "",
     "ingame_overlay": True,
+    "ingame_island": False,
     "ingame_overlay_start": False,
     "ingame_overlay_corner": "tr",
     "ingame_auto": True,
@@ -350,7 +351,8 @@ def load_config(path=None):
     for flag in ("auto_close", "save_history", "remember_last",
                  "apply_flags_on_launch", "use_custom_cursors",
                  "discord_rpc", "launch_sound", "error_sound",
-                 "ingame_overlay", "ingame_overlay_start",
+                 "ingame_overlay", "ingame_island",
+                 "ingame_overlay_start",
                  "ingame_auto", "ingame_afk"):
         cfg[flag] = bool(cfg.get(flag))
     corner = str(cfg.get("ingame_overlay_corner") or "").lower()
@@ -3526,6 +3528,113 @@ def roblox_log_dir():
         return None
     folder = Path(local) / "Roblox" / "logs"
     return folder if folder.is_dir() else None
+
+
+ROBLOX_APP_THEMES = {"dark": "Тёмная", "light": "Светлая"}
+
+
+def roblox_app_storage_path():
+    """appStorage.json клиента Roblox — там лежит тема приложения."""
+    local = os.getenv("LOCALAPPDATA")
+    if not local:
+        return None
+    return Path(local) / "Roblox" / "LocalStorage" / "appStorage.json"
+
+
+def _read_app_storage(path):
+    """(dict, исходный текст) или (None, '')."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+        data = json.loads(text)
+    except (OSError, ValueError):
+        return None, ""
+    return (data if isinstance(data, dict) else None), text
+
+
+def _device_themes(data):
+    """Разбор DeviceLevelTheme: {user_id: 'dark'|'light'}."""
+    raw = data.get("DeviceLevelTheme")
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(key): str(value).lower() for key, value in parsed.items()}
+
+
+def roblox_theme_state(path=None):
+    """Текущая тема клиента Roblox (тёмная/светлая)."""
+    target = Path(path) if path is not None else roblox_app_storage_path()
+    if target is None:
+        return {"ok": False, "error": "не найдена папка Roblox",
+                "theme": "", "device": {}, "path": None}
+    data, _text = _read_app_storage(target)
+    if data is None:
+        return {"ok": False, "error": "appStorage.json ещё нет — "
+                                      "запусти Roblox один раз",
+                "theme": "", "device": {}, "path": target}
+    device = _device_themes(data)
+    auth = str(data.get("AuthenticatedTheme") or "").lower()
+    theme = auth if auth in ROBLOX_APP_THEMES else ""
+    if not theme and device:
+        counts = {}
+        for value in device.values():
+            counts[value] = counts.get(value, 0) + 1
+        theme = max(counts, key=counts.get)
+    return {"ok": True, "theme": theme, "auth": auth, "device": device,
+            "path": target, "error": ""}
+
+
+def set_roblox_theme(theme, path=None):
+    """Сменить тему клиента Roblox (только при закрытом клиенте).
+
+    Пишет AuthenticatedTheme и DeviceLevelTheme в appStorage.json —
+    официальный файл настроек приложения Roblox. Перед первой записью
+    рядом остаётся резервная копия *.maklyxa.bak.
+    """
+    theme = str(theme or "").lower()
+    if theme not in ROBLOX_APP_THEMES:
+        return {"ok": False, "error": "неизвестная тема"}
+    if player_pids():
+        return {"ok": False,
+                "error": "Roblox запущен — закрой клиент и повтори"}
+    target = Path(path) if path is not None else roblox_app_storage_path()
+    if target is None:
+        return {"ok": False, "error": "не найдена папка Roblox"}
+    data, text = _read_app_storage(target)
+    if data is None:
+        return {"ok": False, "error": "appStorage.json ещё нет — "
+                                      "запусти Roblox один раз"}
+    device = _device_themes(data)
+    same = (str(data.get("AuthenticatedTheme") or "").lower() == theme
+            and (not device or all(v == theme for v in device.values())))
+    backup = target.with_name(target.name + ".maklyxa.bak")
+    if same:
+        return {"ok": True, "theme": theme, "changed": False,
+                "backup": backup if backup.is_file() else None, "error": ""}
+    try:
+        if not backup.is_file():
+            shutil.copy2(target, backup)
+        data["AuthenticatedTheme"] = theme
+        if device:
+            data["DeviceLevelTheme"] = json.dumps(
+                {key: theme for key in device},
+                ensure_ascii=False, separators=(",", ":"))
+        data["DeviceLevelThemeSnapshotTimestamp"] = str(int(time.time()))
+        compact = "\n" not in text
+        out = json.dumps(data, ensure_ascii=False,
+                         separators=(",", ":") if compact else None,
+                         indent=None if compact else 2)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(out, encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "theme": theme, "changed": True,
+            "backup": backup, "error": ""}
 
 
 def _log_line_epoch(line):

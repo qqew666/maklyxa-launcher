@@ -3,6 +3,7 @@
 """In-game helper: safe click-through overlay and anti-AFK for Roblox."""
 
 import ctypes
+import io
 import json
 import os
 import queue
@@ -22,6 +23,26 @@ try:
     import core
 except ImportError:
     core = None
+
+try:
+    from PIL import Image, ImageDraw, ImageTk
+except Exception:  # Pillow не обязателен для остального помощника
+    Image = ImageDraw = ImageTk = None
+
+try:
+    from winrt.windows.media.control import (
+        GlobalSystemMediaTransportControlsSessionManager as MEDIA_MANAGER,
+        GlobalSystemMediaTransportControlsSessionPlaybackStatus as PLAYBACK,
+    )
+    from winrt.windows.storage.streams import (
+        Buffer as WINRT_BUFFER,
+        DataReader as WINRT_READER,
+        InputStreamOptions as WINRT_INPUT,
+    )
+    MEDIA_PLAYING = int(getattr(PLAYBACK, "PLAYING", 4))
+except Exception:  # старые Windows или нет pywinrt — островок без трека
+    MEDIA_MANAGER = None
+    MEDIA_PLAYING = 4
 
 IS_WINDOWS = os.name == "nt"
 
@@ -48,6 +69,16 @@ WDDM_SOURCE_LIMIT = 8
 PROCESS_QUERY_ACCESS = 0x0400 | 0x1000
 D3DKMT_QUERYSTATISTICS_ADAPTER = 0
 D3DKMT_QUERYSTATISTICS_PROCESS_VIDPNSOURCE = 8
+
+ISLAND_KEY = "#010203"
+ISLAND_BG = (14, 19, 27, 255)
+ISLAND_BORDER = (44, 58, 76, 255)
+ISLAND_TEXT = "#eef4fb"
+ISLAND_MUTED = "#93a6ba"
+ISLAND_H = 44
+ISLAND_TOP_MARGIN = 10
+ISLAND_COVER = 26
+MEDIA_POLL = 2.0
 
 CORNER_LABELS = {
     "tl": "Слева сверху",
@@ -939,6 +970,34 @@ class HotkeyThread:
         self._thread.join(timeout=3.6)
 
 
+def overlay_font(root, cfg):
+    """Подключить сохранённый TTF/OTF только к процессу оверлея."""
+    if core is None:
+        return "Segoe UI"
+    path = None
+    try:
+        state = core.ui_font_state()
+        path = state.get("path")
+        if path is None or not core.load_private_font(path):
+            return "Segoe UI"
+        available = {str(name).casefold(): str(name)
+                     for name in tkfont.families(root)}
+        candidates = list(state.get("families") or [])
+        candidates.append((cfg or {}).get("ui_font_family") or "")
+        for candidate in candidates:
+            key = str(candidate or "").strip().casefold()
+            if key and key in available:
+                return available[key]
+        core.unload_private_font(path)
+    except Exception:  # noqa: BLE001 — шрифт не должен ломать оверлей
+        if path is not None:
+            try:
+                core.unload_private_font(path)
+            except Exception:
+                pass
+    return "Segoe UI"
+
+
 class Overlay:
     BG = "#0b0f14"
     BORDER = "#243040"
@@ -949,7 +1008,7 @@ class Overlay:
     def __init__(self, root, cfg):
         self.root = root
         self.cfg = cfg
-        self.FONT = self._load_overlay_font(cfg)
+        self.FONT = overlay_font(root, cfg)
         self.top = tk.Toplevel(root)
         self.top.withdraw()
         self.top.overrideredirect(True)
@@ -984,33 +1043,6 @@ class Overlay:
             except ValueError:
                 pass
         return "#00c48c"
-
-    def _load_overlay_font(self, cfg):
-        """Подключить сохранённый TTF/OTF только к процессу оверлея."""
-        if core is None:
-            return "Segoe UI"
-        path = None
-        try:
-            state = core.ui_font_state()
-            path = state.get("path")
-            if path is None or not core.load_private_font(path):
-                return "Segoe UI"
-            available = {str(name).casefold(): str(name)
-                         for name in tkfont.families(self.root)}
-            candidates = list(state.get("families") or [])
-            candidates.append((cfg or {}).get("ui_font_family") or "")
-            for candidate in candidates:
-                key = str(candidate or "").strip().casefold()
-                if key and key in available:
-                    return available[key]
-            core.unload_private_font(path)
-        except Exception:  # noqa: BLE001 — шрифт не должен ломать оверлей
-            if path is not None:
-                try:
-                    core.unload_private_font(path)
-                except Exception:
-                    pass
-        return "Segoe UI"
 
     def _build(self):
         self.fps_var = tk.StringVar(value="—")
@@ -1192,6 +1224,402 @@ class Overlay:
             pass
 
 
+def _pil_lanczos():
+    if Image is None:
+        return 1
+    return getattr(getattr(Image, "Resampling", Image), "LANCZOS", 1)
+
+
+class MediaWatcher(threading.Thread):
+    """Текущий трек из системных медиасессий Windows (SMTC)."""
+
+    def __init__(self):
+        super().__init__(daemon=True, name="maklyxa-media")
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._state = {"ok": False, "playing": False, "title": "",
+                       "artist": "", "cover": b"", "key": ""}
+        self._cover_key = ""
+        self._cover = b""
+        self.error = ""
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self._state)
+
+    def stop(self):
+        self._stop_event.set()
+
+    def run(self):
+        if MEDIA_MANAGER is None:
+            self.error = "pywinrt недоступен"
+            helper_log("музыка: pywinrt не установлен — островок без трека")
+            return
+        init_apartment = None
+        uninit_apartment = None
+        apartment = None
+        try:
+            from winrt.runtime import (
+                ApartmentType as apartment, init_apartment, uninit_apartment)
+        except Exception:
+            pass
+        try:
+            if init_apartment is not None:
+                try:
+                    init_apartment(apartment.MULTI_THREADED)
+                except (TypeError, AttributeError):
+                    init_apartment()
+            import asyncio
+            asyncio.run(self._loop())
+        except Exception as exc:  # noqa: BLE001
+            self.error = f"{type(exc).__name__}: {exc}"
+            helper_log(f"музыка: {self.error}")
+        finally:
+            if uninit_apartment is not None:
+                try:
+                    uninit_apartment()
+                except Exception:
+                    pass
+
+    async def _loop(self):
+        import asyncio
+        manager = None
+        while not self._stop_event.is_set():
+            try:
+                if manager is None:
+                    manager = await MEDIA_MANAGER.request_async()
+                state = await self._collect(manager)
+                with self._lock:
+                    self._state = state
+            except Exception as exc:  # noqa: BLE001
+                manager = None
+                if not self.error:
+                    self.error = f"{type(exc).__name__}: {exc}"
+                    helper_log(f"музыка: {self.error}")
+            await asyncio.sleep(MEDIA_POLL)
+
+    async def _collect(self, manager):
+        state = {"ok": True, "playing": False, "title": "", "artist": "",
+                 "cover": b"", "key": ""}
+        session = manager.get_current_session()
+        if session is None:
+            return state
+        info = session.get_playback_info()
+        if info is None or int(info.playback_status) != MEDIA_PLAYING:
+            return state
+        props = await session.try_get_media_properties_async()
+        if props is None:
+            return state
+        title = str(props.title or "").strip()
+        artist = str(props.artist or "").strip()
+        if not title and not artist:
+            return state
+        key = f"{session.source_app_user_model_id}|{title}|{artist}"
+        if key != self._cover_key and props.thumbnail is not None:
+            cover = await self._thumbnail(props.thumbnail)
+            if cover:
+                self._cover_key = key
+                self._cover = cover
+        cover = self._cover if key == self._cover_key else b""
+        state.update(playing=True, title=title, artist=artist,
+                     cover=cover, key=key)
+        return state
+
+    async def _thumbnail(self, reference):
+        stream = await reference.open_read_async()
+        try:
+            size = int(stream.size)
+            if size <= 0 or size > 8 * 1024 * 1024:
+                return b""
+            buffer = WINRT_BUFFER(size)
+            await stream.read_async(buffer, size, WINRT_INPUT.NONE)
+            reader = WINRT_READER.from_buffer(buffer)
+            data = bytearray(size)
+            reader.read_bytes(data)
+            return bytes(data)
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+
+class Island:
+    """Пилюля сверху экрана: часы и текущий трек с обложкой."""
+
+    BG = "#0e131b"
+    BORDER = "#2c3a4c"
+    TEXT = ISLAND_TEXT
+    MUTED = ISLAND_MUTED
+
+    def __init__(self, root, cfg):
+        self.root = root
+        self.cfg = cfg
+        self.FONT = overlay_font(root, cfg)
+        self.clock_font = tkfont.Font(root=root, family=self.FONT,
+                                      size=13, weight="bold")
+        self.title_font = tkfont.Font(root=root, family=self.FONT,
+                                      size=10, weight="bold")
+        self.artist_font = tkfont.Font(root=root, family=self.FONT, size=8)
+        self.top = tk.Toplevel(root)
+        self.top.withdraw()
+        self.top.overrideredirect(True)
+        self._key_ok = False
+        try:
+            self.top.attributes("-topmost", True)
+            self.top.attributes("-alpha", 0.95)
+            self.top.attributes("-toolwindow", True)
+            self.top.attributes("-transparentcolor", ISLAND_KEY)
+            self._key_ok = True
+        except tk.TclError:
+            pass
+        self.canvas = tk.Canvas(
+            self.top, bg=ISLAND_KEY if self._key_ok else self.BG,
+            highlightthickness=0, bd=0)
+        self.canvas.pack()
+        self._visible = False
+        self._hwnd = None
+        self._root_hwnd = None
+        self._bg_photo = None
+        self._cover_photo = None
+        self._size = (0, 0)
+        self._rect = None
+        self._clock = ""
+        self._music = False
+        self._title = ""
+        self._artist = ""
+        self._cover = b""
+        self._key = ""
+        self._paint()
+        self.top.update_idletasks()
+        self._hwnd = int(self.top.winfo_id())
+        self._root_hwnd = int(
+            user32.GetAncestor(self._hwnd, 2) or self._hwnd) if IS_WINDOWS \
+            else self._hwnd
+        self._apply_style()
+
+    # -- отрисовка -----------------------------------------------------------
+
+    def _measure(self):
+        clock_w = self.clock_font.measure(self._clock or "00:00")
+        if not self._music:
+            return max(88, int(clock_w) + 40), ISLAND_H
+        text_w = max(self.title_font.measure(self._title),
+                     self.artist_font.measure(self._artist))
+        text_w = min(max(text_w, 64), 230)
+        width = 16 + clock_w + 13 + 1 + 13 + ISLAND_COVER + 10 + text_w + 18
+        return int(width), ISLAND_H
+
+    def _rounded_bg(self, width, height):
+        if Image is None or ImageTk is None:
+            return None
+        scale = 4
+        try:
+            image = Image.new("RGBA", (width * scale, height * scale),
+                              (0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            draw.rounded_rectangle(
+                (scale, scale, width * scale - scale - 1,
+                 height * scale - scale - 1),
+                radius=height * scale / 2, fill=ISLAND_BG,
+                outline=ISLAND_BORDER, width=scale)
+            base = Image.new("RGB", image.size,
+                             ISLAND_KEY if self._key_ok else self.BG)
+            base.paste(image, (0, 0), image)
+            base = base.resize((width, height), _pil_lanczos())
+            return ImageTk.PhotoImage(base)
+        except Exception:
+            return None
+
+    def _cover_image(self):
+        if not self._cover or Image is None or ImageTk is None:
+            return None
+        try:
+            image = Image.open(io.BytesIO(self._cover)).convert("RGBA")
+            width, height = image.size
+            side = min(width, height)
+            image = image.crop(((width - side) // 2, (height - side) // 2,
+                                (width + side) // 2, (height + side) // 2))
+            image = image.resize((ISLAND_COVER, ISLAND_COVER),
+                                 _pil_lanczos())
+            mask = Image.new("L", (ISLAND_COVER * 4, ISLAND_COVER * 4), 0)
+            ImageDraw.Draw(mask).rounded_rectangle(
+                (0, 0, ISLAND_COVER * 4 - 1, ISLAND_COVER * 4 - 1),
+                radius=ISLAND_COVER * 4, fill=255)
+            mask = mask.resize((ISLAND_COVER, ISLAND_COVER), _pil_lanczos())
+            image.putalpha(mask)
+            return ImageTk.PhotoImage(image)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _fit(text, font, width):
+        text = str(text or "")
+        if font.measure(text) <= width:
+            return text
+        ellipsis = "…"
+        while text and font.measure(text + ellipsis) > width:
+            text = text[:-1]
+        return (text + ellipsis) if text else ellipsis
+
+    def _paint(self):
+        self._clock = time.strftime("%H:%M")
+        width, height = self._measure()
+        self._size = (width, height)
+        self.canvas.configure(width=width, height=height)
+        self.canvas.delete("all")
+        self._bg_photo = self._rounded_bg(width, height)
+        if self._bg_photo is not None:
+            self.canvas.create_image(0, 0, anchor="nw",
+                                     image=self._bg_photo)
+        else:
+            self.canvas.create_rectangle(
+                1, 1, width - 1, height - 1, fill=self.BG,
+                outline=self.BORDER)
+        pad = 16
+        self.canvas.create_text(
+            pad, height / 2, text=self._clock, anchor="w",
+            fill=self.TEXT, font=self.clock_font)
+        if not self._music:
+            return
+        clock_w = self.clock_font.measure(self._clock)
+        separator = pad + clock_w + 13
+        self.canvas.create_line(separator, 12, separator, height - 12,
+                                fill=self.BORDER)
+        cover_x = separator + 13
+        cover_y = (height - ISLAND_COVER) / 2
+        self._cover_photo = self._cover_image()
+        if self._cover_photo is not None:
+            self.canvas.create_image(cover_x, cover_y, anchor="nw",
+                                     image=self._cover_photo)
+        else:
+            self.canvas.create_oval(
+                cover_x, cover_y, cover_x + ISLAND_COVER,
+                cover_y + ISLAND_COVER, fill="#182231",
+                outline=self.BORDER)
+        text_x = cover_x + ISLAND_COVER + 10
+        text_w = max(24, width - text_x - 18)
+        title = self._fit(self._title, self.title_font, text_w)
+        artist = self._fit(self._artist, self.artist_font, text_w)
+        if artist:
+            self.canvas.create_text(
+                text_x, 14, text=title, anchor="w", fill=self.TEXT,
+                font=self.title_font)
+            self.canvas.create_text(
+                text_x, 30, text=artist, anchor="w", fill=self.MUTED,
+                font=self.artist_font)
+        else:
+            self.canvas.create_text(
+                text_x, height / 2, text=title, anchor="w",
+                fill=self.TEXT, font=self.title_font)
+        if self._visible:
+            self._place()
+
+    def _place(self):
+        if not self._rect:
+            return
+        width, height = self._size
+        left, top, right = self._rect
+        x = int(left) + max(0, (int(right) - int(left) - width) // 2)
+        y = int(top) + ISLAND_TOP_MARGIN
+        self.top.geometry(f"{width}x{height}+{x}+{y}")
+
+    # -- данные --------------------------------------------------------------
+
+    def set_media(self, state):
+        state = state or {}
+        playing = bool(state.get("playing")) and bool(
+            state.get("title") or state.get("artist"))
+        title = str(state.get("title") or "") if playing else ""
+        artist = str(state.get("artist") or "") if playing else ""
+        key = str(state.get("key") or "") if playing else ""
+        cover = state.get("cover") or b""
+        if not cover and playing and key == self._key:
+            cover = self._cover
+        if (playing, title, artist, key, cover) == (
+                self._music, self._title, self._artist, self._key,
+                self._cover):
+            return
+        self._music = playing
+        self._title = title
+        self._artist = artist
+        self._key = key
+        self._cover = cover
+        self._paint()
+
+    def set_clock(self):
+        if time.strftime("%H:%M") == self._clock:
+            return
+        self._paint()
+
+    # -- окно ----------------------------------------------------------------
+
+    def _apply_style(self):
+        if not IS_WINDOWS or not self._hwnd:
+            return
+        try:
+            if ctypes.sizeof(ctypes.c_void_p) == 8:
+                get_long = user32.GetWindowLongPtrW
+                set_long = user32.SetWindowLongPtrW
+            else:
+                get_long = user32.GetWindowLongW
+                set_long = user32.SetWindowLongW
+            get_long.argtypes = [wintypes.HWND, ctypes.c_int]
+            get_long.restype = ctypes.c_ssize_t
+            set_long.argtypes = [wintypes.HWND, ctypes.c_int,
+                                 ctypes.c_ssize_t]
+            set_long.restype = ctypes.c_ssize_t
+            for hwnd in {self._hwnd, self._root_hwnd}:
+                if not hwnd:
+                    continue
+                style = int(get_long(hwnd, -20))
+                # прозрачен для кликов, не активируется, без кнопки в панели
+                style |= 0x00000020 | 0x08000000 | 0x00000080
+                set_long(hwnd, -20, style)
+            user32.SetWindowPos(
+                self._root_hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0,
+                0x0001 | 0x0002 | 0x0010 | 0x0020)
+        except (OSError, AttributeError):
+            pass
+
+    @property
+    def visible(self):
+        return self._visible
+
+    def show(self, rect):
+        if not rect:
+            return
+        if isinstance(rect, dict):
+            left, top = rect.get("left", 0), rect.get("top", 0)
+            right = rect.get("right", left)
+        else:
+            left, top, right = rect[0], rect[1], rect[2]
+        self._rect = (left, top, right)
+        self._place()
+        previous = user32.GetForegroundWindow() if IS_WINDOWS else None
+        if not self._visible:
+            self.top.deiconify()
+            self.top.attributes("-topmost", True)
+            self._apply_style()
+            self._visible = True
+        else:
+            self.top.lift()
+        if (IS_WINDOWS and previous
+                and user32.GetForegroundWindow() != previous):
+            user32.SetForegroundWindow(previous)
+
+    def hide(self):
+        if self._visible:
+            self.top.withdraw()
+            self._visible = False
+
+    def destroy(self):
+        try:
+            self.top.destroy()
+        except tk.TclError:
+            pass
+
+
 class InGameHelper:
     def __init__(self, root, stop_handle, toggle_handle):
         self.root = root
@@ -1199,6 +1627,8 @@ class InGameHelper:
         self.toggle_handle = toggle_handle
         self.cfg = core.load_config() if core is not None else {}
         self.overlay = Overlay(root, self.cfg)
+        self.island = Island(root, self.cfg)
+        self.media = None
         self.events = queue.Queue()
         self.hotkey = HotkeyThread(self.events)
         self._desired = bool(self.cfg.get("ingame_overlay_start"))
@@ -1232,11 +1662,14 @@ class InGameHelper:
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
         self._initialized = True
         if (not self.cfg.get("ingame_overlay")
+                and not self.cfg.get("ingame_island")
                 and not self.cfg.get("ingame_afk")):
             helper_log("нет включённых функций — выход")
             self._write_status()
             self.root.after(50, self.shutdown)
             return
+        if self.cfg.get("ingame_island"):
+            self._ensure_media()
         if self.cfg.get("ingame_afk"):
             self._afk_next = time.monotonic() + afk_interval_seconds(
                 self._afk_minutes)
@@ -1256,6 +1689,8 @@ class InGameHelper:
             "foreground": bool(win and win.get("foreground")),
             "overlay": bool(self.overlay.visible),
             "overlay_desired": bool(self._desired),
+            "island": bool(self.island.visible),
+            "island_desired": bool(self._desired),
             "hotkey": bool(self.hotkey.ok),
             "hotkey_error": "" if self.hotkey.ok else self.hotkey.error,
             "afk": bool(self.cfg.get("ingame_afk")),
@@ -1354,14 +1789,42 @@ class InGameHelper:
             self.overlay.show(self._win.get("rect"))
         else:
             self.overlay.hide()
+        self._apply_island()
+
+    def _apply_island(self):
+        enabled = bool(self.cfg.get("ingame_island"))
+        show = (enabled and self._desired and self._win
+                and self._win.get("foreground"))
+        if show:
+            if self.media is None:
+                self._ensure_media()
+            self.island.set_media(
+                self.media.snapshot() if self.media is not None else None)
+            self.island.set_clock()
+            self.island.show(self._win.get("rect"))
+        else:
+            self.island.hide()
+
+    def _ensure_media(self):
+        if self.media is not None or not IS_WINDOWS:
+            return
+        self.media = MediaWatcher()
+        self.media.start()
+
+    def _drop_media(self):
+        if self.media is None:
+            return
+        self.media.stop()
+        self.media = None
 
     def _toggle(self):
-        if not self.cfg.get("ingame_overlay"):
+        if not (self.cfg.get("ingame_overlay")
+                or self.cfg.get("ingame_island")):
             return
         self._desired = not self._desired
         self._apply_overlay()
         self._write_status()
-        helper_log(f"оверлей: {'показан' if self._desired else 'скрыт'}")
+        helper_log(f"HUD: {'показан' if self._desired else 'скрыт'}")
 
     def _reload_config(self):
         if core is None:
@@ -1370,14 +1833,18 @@ class InGameHelper:
         if not isinstance(fresh, dict):
             return
         changed = any(fresh.get(key) != self.cfg.get(key) for key in (
-            "ingame_overlay", "ingame_afk", "ingame_afk_mode",
-            "ingame_afk_key", "ingame_afk_minutes",
+            "ingame_overlay", "ingame_island", "ingame_afk",
+            "ingame_afk_mode", "ingame_afk_key", "ingame_afk_minutes",
             "ingame_overlay_corner", "accent"))
         if (fresh.get("ingame_overlay_start")
                 and not self.cfg.get("ingame_overlay_start")):
             self._desired = True
         self.cfg = fresh
         self.overlay.apply_config(fresh)
+        if fresh.get("ingame_island"):
+            self._ensure_media()
+        else:
+            self._drop_media()
         if fresh.get("ingame_afk"):
             minutes = int(fresh.get("ingame_afk_minutes") or 5)
             if minutes != self._afk_minutes:
@@ -1388,7 +1855,8 @@ class InGameHelper:
             self._afk_next = None
         if changed:
             helper_log("настройки обновлены")
-        if not fresh.get("ingame_overlay") and not fresh.get("ingame_afk"):
+        if (not fresh.get("ingame_overlay") and not fresh.get("ingame_island")
+                and not fresh.get("ingame_afk")):
             helper_log("функции выключены — выход")
             self.shutdown()
 
@@ -1443,7 +1911,12 @@ class InGameHelper:
             pass
         self.hotkey.stop()
         self.fps.close()
+        self._drop_media()
         self.overlay.destroy()
+        try:
+            self.island.destroy()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             self.root.quit()
         except tk.TclError:
