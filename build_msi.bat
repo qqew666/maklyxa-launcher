@@ -1,7 +1,7 @@
 @echo off
 cd /d "%~dp0"
 
-set VERSION=1.9.0
+set VERSION=1.9.1
 
 if not exist "dist\MaklyxaLauncher.exe" (
     call build.bat

@@ -289,7 +289,28 @@ def _launcher_command():
     return [str(runner), str(script), "--ingame"]
 
 
-def start_helper(wait=2.5):
+PYI_ENV_VARS = ("_PYI_APPLICATION_HOME_DIR", "_PYI_ARCHIVE_FILE",
+                "_PYI_PARENT_PROCESS_LEVEL", "_PYI_SPLASH_IPC")
+
+
+def helper_env():
+    """Окружение помощника без унаследованной папки _MEI лаунчера."""
+    env = os.environ.copy()
+    for key in PYI_ENV_VARS:
+        env.pop(key, None)
+    if getattr(sys, "frozen", False):
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
+
+def helper_cwd():
+    # папка _MEI не должна быть текущей: Windows не удаляет занятый каталог
+    if getattr(sys, "frozen", False):
+        return str(Path(sys.executable).resolve().parent)
+    return str(Path(__file__).resolve().parent)
+
+
+def start_helper(wait=5.0):
     if not IS_WINDOWS:
         return False, "только Windows"
     if helper_running():
@@ -300,7 +321,7 @@ def start_helper(wait=2.5):
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, close_fds=True,
             creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-            cwd=str(Path(__file__).resolve().parent))
+            cwd=helper_cwd(), env=helper_env())
     except OSError as exc:
         return False, f"не запустился: {exc}"
     deadline = time.monotonic() + max(0.2, float(wait))
@@ -1955,6 +1976,8 @@ def _create_events():
 def main():
     if not IS_WINDOWS:
         return 1
+    if core is not None:
+        core.remember_bundle_dir()
     stop_handle, toggle_handle, error = _create_events()
     if error:
         helper_log(error)

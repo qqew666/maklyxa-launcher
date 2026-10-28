@@ -30,6 +30,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -47,7 +48,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -668,6 +669,117 @@ def acquire_single_instance():
         return handle
     except Exception:
         return object()
+
+
+# ---- уборка брошенных распаковок ----------------------------------------------
+
+BUNDLE_STATE = CONFIG_DIR / "bundles.json"
+
+
+def remember_bundle_dir():
+    """Запомнить свою папку _MEI на случай, если её не удастся убрать."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        path = str(Path(sys._MEIPASS).resolve())
+    except (AttributeError, OSError):
+        return
+    try:
+        data = json.loads(BUNDLE_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = []
+    if not isinstance(data, list):
+        data = []
+    if path not in data:
+        data.append(path)
+    try:
+        BUNDLE_STATE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = BUNDLE_STATE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data[-20:]), encoding="utf-8")
+        os.replace(tmp, BUNDLE_STATE)
+    except OSError:
+        pass
+
+
+def _is_our_bundle(path):
+    # после неудачной уборки в папке остаются только Tk-файлы и иконка
+    if not (path / "_tkinter.pyd").is_file():
+        return False
+    return ((path / "icon.png").is_file()
+            or (path / "tcl9tk90.dll").is_file())
+
+
+def _drop_bundle(path):
+    dll = next(path.glob("python3*.dll"), None)
+    if dll is None:
+        return False
+    try:
+        dll.unlink()
+    except OSError:
+        return False
+    shutil.rmtree(path, ignore_errors=True)
+    return not path.exists()
+
+
+def cleanup_stale_bundle_dirs(min_age=600):
+    """Удалить свои брошенные папки _MEI от PyInstaller onefile.
+
+    Своя распаковка узнаётся по записи в bundles.json или по Tk-файлам
+    и иконке лаунчера. Занятая папка не трогается: python3*.dll удаляется
+    первым, и отказ в доступе отменяет уборку всей папки.
+    """
+    if not getattr(sys, "frozen", False):
+        return 0
+    current = Path(getattr(sys, "_MEIPASS", "")).resolve()
+    now = time.time()
+    try:
+        recorded = json.loads(BUNDLE_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        recorded = []
+    if not isinstance(recorded, list):
+        recorded = []
+    kept = []
+    removed = 0
+    for item in recorded:
+        try:
+            path = Path(item)
+            if path.resolve() == current:
+                kept.append(item)
+                continue
+            if not path.is_dir():
+                continue
+            if now - path.stat().st_mtime < min_age:
+                kept.append(item)
+                continue
+            if _drop_bundle(path):
+                removed += 1
+            else:
+                kept.append(item)
+        except OSError:
+            continue
+    try:
+        candidates = list(Path(tempfile.gettempdir()).glob("_MEI*"))
+    except OSError:
+        candidates = []
+    for path in candidates:
+        try:
+            if not path.is_dir() or path.resolve() == current:
+                continue
+            if now - path.stat().st_mtime < min_age:
+                continue
+            if not _is_our_bundle(path):
+                continue
+            if _drop_bundle(path):
+                removed += 1
+        except OSError:
+            continue
+    try:
+        tmp = BUNDLE_STATE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(kept[-20:]), encoding="utf-8")
+        os.replace(tmp, BUNDLE_STATE)
+    except OSError:
+        pass
+    return removed
 
 
 # ---- данные игры (публичный API) ------------------------------------------------

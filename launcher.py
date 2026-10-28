@@ -48,6 +48,8 @@ except Exception:  # Pillow не обязателен для запуска
 
 import ingame as ingame_mod
 
+import core
+
 from core import (
     ACCENT_PRESETS, APP_NAME, BOOT_BOOLS_FROST, BOOT_BOOLS_SHARED,
     BUNDLE_DIR, CONFIG_DIR, CONFIG_PATH, CURSOR_SLOTS, CUSTOMIZE_DIR,
@@ -6591,9 +6593,10 @@ class App:
         if self._ingame_busy or self._closing:
             return
         if not (self.cfg.get("ingame_overlay")
+                or self.cfg.get("ingame_island")
                 or self.cfg.get("ingame_afk")):
             self.ingame_message_var.set(
-                "Сначала включи оверлей или AFK-режим")
+                "Сначала включи оверлей, островок или AFK-режим")
             return
         self._ingame_user_stopped = False
         if ingame_mod.helper_running():
@@ -9745,6 +9748,21 @@ def run_selftest():
             ingame_mod.read_status = original_read_status
             app._ingame_user_stopped = original_user_stopped
             app._ingame_next_auto = original_next_auto
+        saved_env = {key: os.environ.get(key)
+                     for key in ingame_mod.PYI_ENV_VARS}
+        try:
+            for key in ingame_mod.PYI_ENV_VARS:
+                os.environ[key] = "selftest"
+            helper_env = ingame_mod.helper_env()
+            for key in ingame_mod.PYI_ENV_VARS:
+                if key in helper_env:
+                    failures.append(f"помощник: {key} унаследован")
+        finally:
+            for key, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
         if app._rpc is not None:
             failures.append("UI: presence запустился без интерактива")
         if app.discord_status_var.get() == "":
@@ -10232,6 +10250,10 @@ def main():
     if _INSTANCE is False:
         # второй экземпляр: его окно уже выведено вперёд
         return
+    core.remember_bundle_dir()
+    if getattr(sys, "frozen", False) and not ingame_mod.helper_running():
+        threading.Thread(target=core.cleanup_stale_bundle_dirs,
+                         daemon=True).start()
 
     root = tk.Tk()
     start_page = None
