@@ -48,7 +48,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.9.4"
+VERSION = "1.9.6"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -198,6 +198,7 @@ DEFAULT_CONFIG = {
     "remember_last": True,
     "default_place_id": "",
     "last_place_id": "",
+    "roblox_version": "",
     "favorites": [],
     "history": [],
     "fps_limit": 0,
@@ -341,6 +342,7 @@ def load_config(path=None):
     for key in ("default_place_id", "last_place_id"):
         value = str(cfg.get(key) or "")
         cfg[key] = value if value.isdigit() else ""
+    cfg["roblox_version"] = str(cfg.get("roblox_version") or "").strip()[:260]
     cfg["cursor_set"] = str(cfg.get("cursor_set") or "")
 
     for key in ("favorites", "history"):
@@ -1865,6 +1867,165 @@ def find_player_dirs():
         except OSError:
             continue
     return sorted(found.values(), key=lambda p: str(p).lower())
+
+
+def file_version_text(path):
+    """Версия exe из ресурса Windows («0.745.0.7451137») или ''."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        version = ctypes.WinDLL("version")
+        version.GetFileVersionInfoSizeW.argtypes = [
+            wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+        version.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+        version.GetFileVersionInfoW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+        version.GetFileVersionInfoW.restype = wintypes.BOOL
+        version.VerQueryValueW.argtypes = [
+            ctypes.c_void_p, wintypes.LPCWSTR,
+            ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.UINT)]
+        version.VerQueryValueW.restype = wintypes.BOOL
+        target = str(path)
+        size = version.GetFileVersionInfoSizeW(target, None)
+        if not size:
+            return ""
+        buffer = ctypes.create_string_buffer(size)
+        if not version.GetFileVersionInfoW(target, 0, size, buffer):
+            return ""
+        pointer = ctypes.c_void_p()
+        length = wintypes.UINT()
+        # строка версии из таблицы строк — как в свойствах файла Windows
+        translation = ctypes.c_void_p()
+        trans_len = wintypes.UINT()
+        if version.VerQueryValueW(buffer, "\\VarFileInfo\\Translation",
+                                  ctypes.byref(translation),
+                                  ctypes.byref(trans_len)):
+            if trans_len.value >= 4:
+                pair = ctypes.cast(translation,
+                                   ctypes.POINTER(ctypes.c_uint16))
+                lang, codepage = pair[0], pair[1]
+                for key in ("ProductVersion", "FileVersion"):
+                    sub = (f"\\StringFileInfo\\{lang:04x}{codepage:04x}"
+                           f"\\{key}")
+                    text_ptr = ctypes.c_void_p()
+                    text_len = wintypes.UINT()
+                    if not version.VerQueryValueW(
+                            buffer, sub, ctypes.byref(text_ptr),
+                            ctypes.byref(text_len)):
+                        continue
+                    if not text_len.value:
+                        continue
+                    value = ctypes.wstring_at(text_ptr, text_len.value)
+                    value = value.split("\x00", 1)[0].strip()
+                    value = re.sub(r"[,\s]+", ".", value).strip(".")
+                    if re.fullmatch(r"\d+(?:\.\d+){2,3}", value):
+                        return value
+        if not version.VerQueryValueW(buffer, "\\", ctypes.byref(pointer),
+                                     ctypes.byref(length)):
+            return ""
+        if length.value < 16:
+            return ""
+        numbers = ctypes.cast(pointer, ctypes.POINTER(ctypes.c_uint32))
+        high, low = numbers[2], numbers[3]
+        if not high and not low:
+            return ""
+        return f"{high >> 16}.{high & 0xffff}.{low >> 16}.{low & 0xffff}"
+    except Exception:  # noqa: BLE001 — версия не критична для запуска
+        return ""
+
+
+def roblox_versions_dir():
+    """Папка установленных версий официального клиента."""
+    local = os.getenv("LOCALAPPDATA")
+    if not local:
+        return None
+    return Path(local) / "Roblox" / "Versions"
+
+
+def roblox_version_entries():
+    """Установленные версии игрового клиента, свежие сверху.
+
+    Одна запись на RobloxPlayerBeta.exe: путь, папка version-…, версия из
+    ресурса Windows, дата изменения и размер.
+    """
+    roots = []
+    local = os.getenv("LOCALAPPDATA", "")
+    if local:
+        for name in ("Roblox", "Froststrap", "Bloxstrap"):
+            roots.append(Path(local) / name / "Versions")
+    roots.append(Path(r"C:\Program Files\Froststrap"))
+    roots.append(Path(r"C:\Program Files (x86)\Froststrap"))
+
+    seen, entries = set(), []
+    for root in roots:
+        try:
+            if not root.is_dir():
+                continue
+            for exe in root.glob("**/RobloxPlayerBeta.exe"):
+                try:
+                    if not exe.is_file():
+                        continue
+                    key = str(exe.resolve()).lower()
+                    stat = exe.stat()
+                except OSError:
+                    continue
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.append({
+                    "exe": exe,
+                    "folder": exe.parent,
+                    "name": exe.parent.name,
+                    "version": file_version_text(exe) or exe.parent.name,
+                    "mtime": stat.st_mtime,
+                    "size": stat.st_size,
+                })
+        except OSError:
+            continue
+    entries.sort(key=lambda item: item["mtime"], reverse=True)
+    # одна и та же сборка бывает и у Roblox, и у бутстрапера — оставляем
+    # свежую копию (она выше в списке после сортировки)
+    unique, names = [], set()
+    for item in entries:
+        key = item["name"].lower()
+        if key in names:
+            continue
+        names.add(key)
+        unique.append(item)
+    return unique
+
+
+def selected_roblox_exe(cfg=None):
+    """Клиент, который запускает лаунчер: выбранная версия или самая новая."""
+    value = str((cfg or {}).get("roblox_version") or "").strip()
+    if value:
+        try:
+            target = Path(value)
+            if target.is_file():
+                return target
+        except OSError:
+            pass
+    return find_player_exe()
+
+
+def configured_roblox_exe(cfg=None):
+    """Выбранная версия, если она отличается от самой новой, иначе None."""
+    chosen = selected_roblox_exe(cfg)
+    if chosen is None:
+        return None
+    newest = find_player_exe()
+    try:
+        if newest is not None and (
+                Path(chosen).resolve() == Path(newest).resolve()
+                or Path(chosen).parent.name.lower()
+                == Path(newest).parent.name.lower()):
+            return None
+    except OSError:
+        pass
+    return Path(chosen)
 
 
 def cursor_install_roots(prefer_mods=False):
@@ -4009,9 +4170,65 @@ def _drive_launch(url, tries=ROBLOX_LAUNCH_TRIES,
                      "зависший клиент лаунчер закроет сам."}
 
 
-def launch_game(place_id):
-    """Открыть игру обычной ссылкой клиента (с проверкой и повтором)."""
-    return _drive_launch(roblox_deep_link(place_id))
+def _drive_exe_launch(exe, url, tries=ROBLOX_LAUNCH_TRIES,
+                      wait_client=ROBLOX_CLIENT_START_WAIT,
+                      wait_join=ROBLOX_JOIN_WAIT):
+    """Запустить выбранную версию клиента напрямую и дождаться входа.
+
+    Ссылка передаётся exe аргументом — так же, как бутстраперы передают
+    её обычному клиенту. Открытый на экране клиент не закрываем: ссылка
+    уходит ему, а выбранная версия применится после перезапуска.
+    """
+    notes = []
+    target = Path(exe)
+    if not target.is_file():
+        return {"ok": False, "attempts": 0, "notes": notes,
+                "error": "Выбранная версия Roblox не найдена на диске."}
+    stale = player_pids()
+    if stale and roblox_window_pids(stale):
+        notes.append("Roblox уже открыт — ссылка передана ему, выбранная "
+                     "версия применится после закрытия клиента")
+        try:
+            os.startfile(url)
+        except OSError as exc:
+            return {"ok": False, "attempts": 1, "notes": notes,
+                    "error": f"Не удалось открыть ссылку Roblox: {exc}"}
+        return {"ok": True, "attempts": 1, "notes": notes, "error": ""}
+    if stale:
+        notes.append("Клиент Roblox висел в трее — закрываю и запускаю "
+                     "выбранную версию")
+        close_roblox_players()
+        wait_players_gone(10)
+        time.sleep(1.0)
+    for attempt in range(1, max(1, tries) + 1):
+        before = player_pids()
+        mark = time.time()
+        try:
+            subprocess.Popen([str(target), url], cwd=str(target.parent))
+        except OSError as exc:
+            return {"ok": False, "attempts": attempt, "notes": notes,
+                    "error": f"Не удалось запустить выбранную версию: {exc}"}
+        if not before and not wait_for_new_players(before, wait_client):
+            notes.append(f"Попытка {attempt}: клиент не запустился")
+        else:
+            outcome = wait_for_join(mark, wait_join)
+            if outcome in ("joined", "unknown"):
+                return {"ok": True, "attempts": attempt, "notes": notes,
+                        "error": ""}
+            notes.append(f"Попытка {attempt}: вход в игру не удался")
+        if attempt < tries:
+            time.sleep(1.0)
+    return {"ok": False, "attempts": max(1, tries), "notes": notes,
+            "error": "Выбранная версия Roblox не открыла игру. Верни «Авто» "
+                     "в строке версии или нажми «Играть» ещё раз."}
+
+
+def launch_game(place_id, player_exe=None):
+    """Открыть игру ссылкой клиента (или выбранной версией напрямую)."""
+    url = roblox_deep_link(place_id)
+    if player_exe is not None:
+        return _drive_exe_launch(player_exe, url)
+    return _drive_launch(url)
 
 
 def fetch_roblox_avatar(user_id, timeout=12):
@@ -4284,7 +4501,8 @@ def _touch_account(account_id, path=None):
     save_accounts(data, path)
 
 
-def launch_game_as(place_id, account_id=None, accounts_path=None):
+def launch_game_as(place_id, account_id=None, accounts_path=None,
+                   player_exe=None):
     """Запустить игру под выбранным аккаунтом.
 
     Новый клиент Roblox (0.744+, WebView2) сам выполняет вход в игру и не
@@ -4292,6 +4510,7 @@ def launch_game_as(place_id, account_id=None, accounts_path=None):
     аккаунта кладётся в RobloxCookies.dat, после чего открывается обычная
     ссылка roblox://. Старый клиент запускается прежним способом.
     Запуск повторяется, пока клиент не появится и не войдёт в игру.
+    player_exe — выбранная в лаунчере версия: она запускается напрямую.
     """
     data = load_accounts(accounts_path)
     account = None
@@ -4322,10 +4541,15 @@ def launch_game_as(place_id, account_id=None, accounts_path=None):
         time.sleep(1.0)
     session = set_roblox_session(cookie)
     if session["ok"]:
-        driven = _drive_launch(roblox_deep_link(place_id))
+        if player_exe is not None:
+            driven = _drive_exe_launch(player_exe,
+                                       roblox_deep_link(place_id))
+        else:
+            driven = _drive_launch(roblox_deep_link(place_id))
         if driven["ok"]:
             _touch_account(account["id"], accounts_path)
-            return {"ok": True, "error": "", "mode": "app",
+            return {"ok": True, "error": "",
+                    "mode": "exe" if player_exe is not None else "app",
                     "attempts": driven["attempts"],
                     "notes": driven["notes"],
                     "account": _account_meta(account)}
@@ -4336,6 +4560,16 @@ def launch_game_as(place_id, account_id=None, accounts_path=None):
         return {"ok": False, "account": _account_meta(account),
                 "error": ticket["error"]}
     url = game_launch_url(place_id, ticket["ticket"])
+    if player_exe is not None:
+        driven = _drive_exe_launch(player_exe, url)
+        if driven["ok"]:
+            _touch_account(account["id"], accounts_path)
+            return {"ok": True, "error": "", "mode": "exe",
+                    "attempts": driven["attempts"],
+                    "notes": driven["notes"],
+                    "account": _account_meta(account)}
+        return {"ok": False, "account": _account_meta(account),
+                "notes": driven["notes"], "error": driven["error"]}
     try:
         os.startfile(url)
     except OSError as exc:

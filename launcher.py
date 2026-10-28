@@ -66,13 +66,15 @@ from core import (
     apply_launch_icon_to_shortcuts, bootstrapper_running, browser_login,
     build_gallery_groups, build_theme_palette, check_launcher_update,
     client_settings_paths, close_roblox_players, collect_play_sessions,
+    configured_roblox_exe,
     copy_current_cursor_set,
     create_cursor_set, create_theme_set, cursor_install_roots,
     cursor_set_files, cursor_set_warnings, cursor_slot_path,
     cursor_state_info, datacenter_regions, delete_cursor_set,
     delete_theme_set, ensure_cursor_sets_dir, ensure_theme_sets_dir,
     export_cursor_set, export_theme_set, fetch_game_icon, fetch_game_info,
-    fastflag_values, find_bootstrapper_settings, find_player_exe,
+    fastflag_values, file_version_text, find_bootstrapper_settings,
+    find_player_exe,
     focus_roblox_window, fmt_num, gallery_assign, gallery_cache_load,
     gallery_cache_save, gallery_seed_places, gallery_stats,
     gallery_thumb_path, game_launch_url, hit_test, import_cursor_set,
@@ -87,9 +89,11 @@ from core import (
     remove_ui_font, rename_cursor_set, rename_theme_set, resize_geometry,
     resolve_gallery_places, restore_custom_cursors,
     restore_launch_icon_shortcuts, roblox_deep_link, roblox_status,
-    roblox_theme_state, roblox_window_pids,
+    roblox_theme_state, roblox_version_entries, roblox_versions_dir,
+    roblox_window_pids,
     scan_screenshots,
-    screenshots_dir, save_config, set_active_account, set_cursor_slot,
+    screenshots_dir, save_config, selected_roblox_exe, set_active_account,
+    set_cursor_slot,
     set_roblox_session, set_roblox_theme, set_theme_image, shade,
     shortcut_backup_count,
     stop_launch_sound, theme_set_info, trunc,
@@ -2159,6 +2163,39 @@ class App:
         self.recent_box.bind("<Double-Button-1>", self._recent_activate)
         self._hint(right, "Enter или двойной клик — запустить игру.",
                    wrap=270)
+
+        # выбор установленной версии клиента
+        version_card = self._card(
+            pad, title="Версия Roblox", glyph="◈",
+            subtitle="Если новая версия что-то сломала, запусти другую "
+                     "установленную сборку. «Авто» — самая новая.")
+        ver_row = tk.Frame(version_card, bg=c["surface"])
+        ver_row.pack(fill="x", pady=(10, 0))
+        self.roblox_version_var = tk.StringVar()
+        self.roblox_version_box = ttk.Combobox(
+            ver_row, textvariable=self.roblox_version_var,
+            state="readonly", width=54)
+        self.roblox_version_box.pack(side="left", fill="x", expand=True)
+        self.roblox_version_box.bind(
+            "<<ComboboxSelected>>", self._roblox_version_pick)
+        self._button(ver_row, "Обновить", self._refresh_roblox_versions,
+                     side="left", padx=(8, 0))
+        self._button(ver_row, "Папка", self._open_roblox_versions_dir,
+                     side="left")
+        self.roblox_version_note_var = tk.StringVar(value="")
+        ver_note = tk.Label(
+            version_card, textvariable=self.roblox_version_note_var,
+            bg=c["surface"], fg=self.accent, font=(UI_FONT, 9, "bold"),
+            anchor="w", justify="left", wraplength=560)
+        ver_note.pack(fill="x", pady=(8, 0))
+        self.accent_fgs.append(ver_note)
+        self._hint(
+            version_card,
+            "Выбранная сборка запускается напрямую — без бутстрапера и "
+            "автообновления. Вход в аккаунт, FastFlags и оверлей работают "
+            "как обычно. Если папку версии удалят, лаунчер сам вернётся "
+            "к самой новой.", wrap=560)
+        self._refresh_roblox_versions()
 
         # запуск игры по ссылке или Place ID
         inner = self._card(pad)
@@ -6444,7 +6481,9 @@ class App:
             "браузер, проигрыватель. Помощник не подключается к аккаунтам "
             "и не читает файлы музыки: только название, исполнитель и "
             "обложку, которые Windows и так показывает в оверлее громкости. "
-            "Когда музыка на паузе, островок показывает только время. "
+            "Трек показывается автоматически, как только музыка играет — "
+            "даже если галочка островка снята: без галочки островок "
+            "появляется только на время трека и прячется на паузе. "
             "«Отдельные часы» — своя пилюля с секундами: включаются сразу "
             "и переключаются только своим биндом, не трогая оверлей "
             "и островок.",
@@ -8096,7 +8135,13 @@ class App:
     def _apply_status(self, kind, detail):
         self.roblox_kind = kind
         if kind == "installed":
-            version = Path(detail).parent.name or Path(detail).name
+            chosen = selected_roblox_exe(getattr(self, "cfg", None))
+            target = str(chosen or detail)
+            version = file_version_text(target)
+            if version:
+                version = ".".join(version.split(".")[:2])
+            else:
+                version = Path(target).parent.name or Path(target).name
             text = f"Roblox: установлен ({version})"
         elif kind == "bootstrapper":
             text = (f"Roblox: найден бутстрапер {Path(detail).name} — "
@@ -8354,26 +8399,32 @@ class App:
             cursor_result = apply_cursor_set(cursor_name)
             self.q.put(lambda r=cursor_result: self._cursor_launch_done(r))
 
-        # 1) ссылка приложения Roblox — открывает главную страницу клиента
-        try:
-            os.startfile("roblox://navigation/home")
-            if wait_for_roblox_window(12):
-                self.q.put(lambda: self._client_result("protocol", True))
-                return
-        except OSError:
-            pass
+        chosen = configured_roblox_exe(self.cfg)
+        if chosen is not None:
+            self.log(f"Версия Roblox: прямой запуск {chosen.parent.name}")
 
-        # 2) прямой запуск клиента
-        if kind == "installed":
+        # 1) ссылка приложения Roblox — открывает главную страницу клиента
+        if chosen is None:
+            try:
+                os.startfile("roblox://navigation/home")
+                if wait_for_roblox_window(12):
+                    self.q.put(lambda: self._client_result("protocol", True))
+                    return
+            except OSError:
+                pass
+
+        # 2) прямой запуск клиента: выбранная версия или самая новая
+        exe = chosen
+        if exe is None and kind == "installed":
             exe = find_player_exe()
-            if exe:
-                try:
-                    subprocess.Popen([str(exe)], cwd=str(exe.parent))
-                    if wait_for_roblox_window(12):
-                        self.q.put(lambda: self._client_result("exe", True))
-                        return
-                except OSError:
-                    pass
+        if exe:
+            try:
+                subprocess.Popen([str(exe)], cwd=str(exe.parent))
+                if wait_for_roblox_window(12):
+                    self.q.put(lambda: self._client_result("exe", True))
+                    return
+            except OSError:
+                pass
 
         self.q.put(lambda: self._client_result("fail", False))
 
@@ -8428,6 +8479,101 @@ class App:
             self.start_download()
         else:
             self.status_var.set("Roblox не установлен — см. Настройки")
+
+    # -- версия клиента -----------------------------------------------------------
+
+    @staticmethod
+    def _version_key(path):
+        try:
+            return str(Path(path).resolve()).lower()
+        except OSError:
+            return str(path).lower()
+
+    @staticmethod
+    def _roblox_version_text(exe):
+        version = file_version_text(str(exe))
+        if version:
+            return version
+        try:
+            return Path(exe).parent.name or Path(exe).name
+        except (TypeError, ValueError):
+            return str(exe)
+
+    def _refresh_roblox_versions(self):
+        box = getattr(self, "roblox_version_box", None)
+        if box is None:
+            return
+        entries = roblox_version_entries()
+        newest = selected_roblox_exe({"roblox_version": ""})
+        newest_key = self._version_key(newest) if newest is not None else ""
+        choices = [("", "Авто — самая новая версия")]
+        for entry in entries:
+            date = time.strftime("%d.%m.%Y", time.localtime(entry["mtime"]))
+            mark = (" · используется"
+                    if self._version_key(entry["exe"]) == newest_key else "")
+            choices.append((
+                str(entry["exe"]),
+                f"{entry['version']} · {entry['name']} · {date}{mark}"))
+        self._roblox_version_choices = choices
+        box.configure(values=[label for _path, label in choices])
+        saved = str(self.cfg.get("roblox_version") or "")
+        index = 0
+        if saved:
+            saved_key = self._version_key(saved)
+            saved_folder = Path(saved).parent.name.lower()
+            for position, (path, _label) in enumerate(choices):
+                if not path:
+                    continue
+                if (self._version_key(path) == saved_key
+                        or Path(path).parent.name.lower() == saved_folder):
+                    index = position
+                    break
+        box.current(index)
+        note_var = getattr(self, "roblox_version_note_var", None)
+        if note_var is None:
+            return
+        if not entries:
+            note_var.set("Установленные версии не найдены — скачай Roblox "
+                         "в настройках")
+        elif index:
+            label = choices[index][1].split(" · ")[0]
+            note_var.set(f"Запускается {label} — напрямую, без обновления")
+        elif saved:
+            note_var.set("Сохранённая версия не найдена — используется "
+                         "самая новая")
+        elif newest is not None:
+            note_var.set("Авто: " + self._roblox_version_text(newest))
+        else:
+            note_var.set("Roblox не найден")
+
+    def _roblox_version_pick(self, _event=None):
+        choices = getattr(self, "_roblox_version_choices", [])
+        index = self.roblox_version_box.current()
+        if not (0 <= index < len(choices)):
+            return
+        path = str(choices[index][0] or "")
+        self.cfg["roblox_version"] = path
+        save_config(self.cfg)
+        if path:
+            self.log(f"Версия Roblox: выбрана {Path(path).parent.name} — "
+                     "запуск напрямую")
+            self.status_var.set("Запускается выбранная версия Roblox")
+        else:
+            self.log("Версия Roblox: автоматически (самая новая)")
+            self.status_var.set("Версия Roblox: авто")
+        self._refresh_roblox_versions()
+        self._refresh_sidebar_status()
+
+    def _open_roblox_versions_dir(self):
+        folder = roblox_versions_dir()
+        if folder is None or not folder.is_dir():
+            self.status_var.set("Папка версий Roblox не найдена")
+            self.log("Папка версий Roblox не найдена")
+            return
+        try:
+            os.startfile(str(folder))
+        except OSError as exc:
+            self.log(f"Не удалось открыть папку версий: {exc}")
 
     # -- запуск игры ------------------------------------------------------------------------------
 
@@ -8509,12 +8655,16 @@ class App:
         self.status_var.set(f"Запускаю {name or pid}…")
         self._begin_launch_effect(game or name or "Roblox",
                                   "Передаю ссылку Roblox…")
+        player_exe = configured_roblox_exe(self.cfg)
+        if player_exe is not None:
+            self.log(f"Версия Roblox: запуск {Path(player_exe).parent.name}")
         threading.Thread(target=self._plain_worker,
-                         args=(pid, name, game), daemon=True).start()
+                         args=(pid, name, game, player_exe),
+                         daemon=True).start()
 
-    def _plain_worker(self, pid, name, game):
+    def _plain_worker(self, pid, name, game, player_exe=None):
         try:
-            result = launch_game(pid)
+            result = launch_game(pid, player_exe=player_exe)
         except Exception as exc:  # noqa: BLE001
             result = {"ok": False, "attempts": 0, "notes": [],
                       "error": f"Не удалось запустить игру: {exc}"}
@@ -8560,17 +8710,23 @@ class App:
                  f"(place {pid})")
         self._begin_launch_effect(game or name or "Roblox",
                                   "Подключаю аккаунт…")
+        player_exe = configured_roblox_exe(self.cfg)
+        if player_exe is not None:
+            self.log(f"Версия Roblox: запуск {Path(player_exe).parent.name} "
+                     "под аккаунтом")
         threading.Thread(
             target=self._account_launch_worker,
-            args=(pid, name, game, account), daemon=True).start()
+            args=(pid, name, game, account, player_exe),
+            daemon=True).start()
 
-    def _account_launch_worker(self, pid, name, game, account):
+    def _account_launch_worker(self, pid, name, game, account,
+                               player_exe=None):
         if player_pids():
             close_roblox_players()
             wait_players_gone(12)
             # клиент отпускает одиночный экземпляр и дописывает сессию
             time.sleep(1.5)
-        result = launch_game_as(pid, account["id"])
+        result = launch_game_as(pid, account["id"], player_exe=player_exe)
         self.q.put(lambda: self._account_launch_done(
             pid, name, game, result))
 
@@ -8587,8 +8743,9 @@ class App:
             who = account.get("name") or "аккаунт"
             self.entry_var.set(pid)
             self.status_var.set(f"Запускаю {name or pid} под @{who}")
-            how = ("новый клиент" if result.get("mode") == "app"
-                   else "старый клиент")
+            how = {"app": "новый клиент", "legacy": "старый клиент",
+                   "exe": "выбранная версия"}.get(
+                       result.get("mode"), "клиент")
             self.log(f"Игра запущена под аккаунтом @{who} "
                      f"(place {pid}, {how}, "
                      f"попыток: {result.get('attempts') or 1})")
@@ -9116,6 +9273,43 @@ def run_selftest():
             failures.append(f"player_pids: неожиданный тип {type(pids)}")
     except Exception as exc:  # noqa: BLE001
         failures.append(f"player_pids: {exc}")
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            ver_path = Path(td) / "config.json"
+            ver_path.write_text(json.dumps(
+                {"roblox_version": "  " + sys.executable + "  "}),
+                encoding="utf-8")
+            loaded = load_config(path=ver_path)
+            if loaded.get("roblox_version") != sys.executable:
+                failures.append(
+                    "config: roblox_version "
+                    f"{loaded.get('roblox_version')!r}")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"roblox_version config: {exc}")
+
+    try:
+        entries = roblox_version_entries()
+        if not isinstance(entries, list):
+            failures.append("roblox_version_entries: не список")
+        for item in entries:
+            if not Path(item["exe"]).is_file():
+                failures.append("roblox_version_entries: битый путь")
+                break
+            if not str(item.get("version") or ""):
+                failures.append("roblox_version_entries: пустая версия")
+                break
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"roblox_version_entries: {exc}")
+    try:
+        probe = {"roblox_version": sys.executable}
+        if selected_roblox_exe(probe) != Path(sys.executable):
+            failures.append("selected_roblox_exe: выбор не учтён")
+        if configured_roblox_exe({"roblox_version": ""}) is not None:
+            failures.append(
+                "configured_roblox_exe: авто даёт переопределение")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"selected_roblox_exe: {exc}")
 
     # 6) FastFlags: слияние во временном файле
     try:
@@ -10286,6 +10480,17 @@ def run_selftest():
             failures.append("UI: нет списка аккаунтов")
         if not hasattr(app, "theme_sets_box"):
             failures.append("UI: нет списка своих тем")
+        if not hasattr(app, "roblox_version_box"):
+            failures.append("UI: нет выбора версии Roblox")
+        else:
+            values = list(app.roblox_version_box["values"])
+            if not values or not str(values[0]).startswith("Авто"):
+                failures.append(f"UI: список версий {values[:2]}")
+            if app.roblox_version_box.current() != 0:
+                failures.append("UI: авто-версия не выбрана по умолчанию")
+            app._roblox_version_pick()
+            if app.cfg.get("roblox_version"):
+                failures.append("UI: авто-версия записала путь")
         if not hasattr(app, "launch_icon_status_var"):
             failures.append("UI: нет статуса иконки запуска")
         if not hasattr(app, "var_launch_sound"):

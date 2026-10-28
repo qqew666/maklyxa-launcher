@@ -2123,7 +2123,7 @@ class InGameHelper:
             self._write_status()
             self.root.after(50, self.shutdown)
             return
-        if self.cfg.get("ingame_island"):
+        if self.cfg.get("ingame_island") or self.cfg.get("ingame_overlay"):
             self._ensure_media()
         if self.cfg.get("ingame_afk"):
             self._afk_next = time.monotonic() + afk_interval_seconds(
@@ -2270,13 +2270,15 @@ class InGameHelper:
 
     def _apply_island(self):
         enabled = bool(self.cfg.get("ingame_island"))
-        show = (enabled and self._desired and self._win
-                and self._win.get("foreground"))
+        auto = bool(self.cfg.get("ingame_overlay"))
+        state = self.media.snapshot() if self.media is not None else None
+        playing = bool(state and state.get("playing"))
+        show = (self._desired and self._win and self._win.get("foreground")
+                and (enabled or (auto and playing)))
         if show:
             if self.media is None:
                 self._ensure_media()
-            self.island.set_media(
-                self.media.snapshot() if self.media is not None else None)
+            self.island.set_media(state)
             self.island.set_clock()
             self.island.show(self._win.get("rect"))
         else:
@@ -2343,7 +2345,7 @@ class InGameHelper:
         self.overlay.apply_config(fresh)
         self.clock.apply_config(fresh)
         self._reload_hotkey()
-        if fresh.get("ingame_island"):
+        if fresh.get("ingame_island") or fresh.get("ingame_overlay"):
             self._ensure_media()
         else:
             self._drop_media()
