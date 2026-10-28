@@ -48,7 +48,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.9.2"
+VERSION = "1.9.3"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -79,6 +79,7 @@ LAUNCH_SHORTCUT_BACKUP_DIR = LAUNCH_DIR / "shortcuts_backup"
 LAUNCH_SHORTCUT_BACKUP_PATH = LAUNCH_DIR / "shortcuts.json"
 LAUNCH_SOUND_MAX = 12 * 1024 * 1024
 CUSTOMIZE_DIR = CONFIG_DIR / "Customize"
+UPDATE_DIR = CONFIG_DIR / "Updates"
 UI_FONT_DIR = CUSTOMIZE_DIR / "Fonts"
 UI_FONT_MAX = 20 * 1024 * 1024
 UI_FONT_EXTS = (".ttf", ".otf")
@@ -209,6 +210,7 @@ DEFAULT_CONFIG = {
     "theme": DEFAULT_THEME,
     "custom_theme": "",
     "window_geometry": "",
+    "window_buttons": "mac",
     "discord_rpc": True,
     "discord_app_id": "",
     "launch_sound": True,
@@ -405,6 +407,8 @@ def load_config(path=None):
     cfg["window_geometry"] = (str(cfg.get("window_geometry") or "")
                               if valid_geometry(cfg.get("window_geometry"))
                               else "")
+    buttons = str(cfg.get("window_buttons") or "").lower()
+    cfg["window_buttons"] = buttons if buttons in ("mac", "win") else "mac"
     return cfg
 
 
@@ -820,20 +824,155 @@ def check_launcher_update(timeout=8):
     latest = version_tuple(tag)
     current = version_tuple(VERSION) or ()
     page = str(release.get("html_url") or RELEASES_URL)
-    msi = next(
-        (str(a.get("browser_download_url") or "")
-         for a in release.get("assets") or []
-         if str(a.get("name") or "").lower().endswith(".msi")), "")
+    assets = {}
+    for item in release.get("assets") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").lower()
+        info = release_asset(item)
+        if info is None:
+            continue
+        if name.endswith(".exe") and "exe" not in assets:
+            assets["exe"] = info
+        elif name.endswith(".msi") and "msi" not in assets:
+            assets["msi"] = info
     return {
         "current": VERSION,
         "tag": tag,
         "latest": ".".join(str(n) for n in latest) if latest else tag,
         "name": str(release.get("name") or tag),
         "url": page,
-        "download": msi or page,
+        "download": (assets.get("exe") or assets.get("msi") or
+                     {}).get("url") or page,
+        "assets": assets,
         "prerelease": bool(release.get("prerelease")),
         "is_newer": bool(latest and latest > current),
     }
+
+
+def release_asset(item):
+    """Файл релиза: имя, ссылка, размер и sha256 (если GitHub отдал digest)."""
+    url = str(item.get("browser_download_url") or "")
+    if not url:
+        return None
+    digest = str(item.get("digest") or "")
+    if digest.lower().startswith("sha256:"):
+        digest = digest.split(":", 1)[1]
+    digest = digest.lower() if re.fullmatch(r"[0-9a-fA-F]{64}", digest) else ""
+    try:
+        size = max(0, int(item.get("size") or 0))
+    except (TypeError, ValueError):
+        size = 0
+    return {
+        "name": str(item.get("name") or ""),
+        "url": url,
+        "size": size,
+        "sha256": digest,
+    }
+
+
+def sha256_file(path, chunk=1048576):
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(chunk), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def update_file_name(asset):
+    """Безопасное имя файла обновления из имени ассета."""
+    name = Path(str((asset or {}).get("name") or "")).name
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    return name or "MaklyxaLauncher-update.exe"
+
+
+def update_file_valid(path, asset):
+    """Файл уже скачан и совпадает с ассетом по размеру/хешу."""
+    path = Path(path)
+    asset = asset or {}
+    try:
+        size = int(asset.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    sha = str(asset.get("sha256") or "")
+    if not size and not sha:
+        return False
+    try:
+        if not path.is_file():
+            return False
+        if size and path.stat().st_size != size:
+            return False
+        if sha and sha256_file(path) != sha:
+            return False
+    except OSError:
+        return False
+    return True
+
+
+class UpdateCancelled(Exception):
+    """Скачивание обновления прервано пользователем."""
+
+
+def _unlink_quiet(path):
+    try:
+        Path(path).unlink()
+    except OSError:
+        pass
+
+
+def _download_to_part(url, part, size, progress, cancel, timeout, chunk):
+    req = urllib.request.Request(url, headers=HTTP_HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        try:
+            total = int(resp.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            total = 0
+        total = total or int(size or 0)
+        done = 0
+        with open(part, "wb") as fh:
+            while True:
+                if cancel is not None and cancel.is_set():
+                    raise UpdateCancelled()
+                block = resp.read(chunk)
+                if not block:
+                    break
+                fh.write(block)
+                done += len(block)
+                if progress is not None:
+                    progress(done, total)
+    if total and done != total:
+        raise OSError(f"скачано {done} из {total} байт")
+
+
+def download_update(url, target, size=0, sha256="", progress=None,
+                    cancel=None, timeout=60, chunk=131072, attempts=2):
+    """Скачивает файл обновления во временный .part и проверяет его."""
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    part = target.with_name(target.name + ".part")
+    last = None
+    for attempt in range(max(1, attempts)):
+        if cancel is not None and cancel.is_set():
+            raise UpdateCancelled()
+        try:
+            _download_to_part(url, part, size, progress, cancel, timeout, chunk)
+            if sha256 and sha256_file(part) != str(sha256).lower():
+                raise ValueError("контрольная сумма файла не совпала")
+            os.replace(part, target)
+            return True
+        except UpdateCancelled:
+            _unlink_quiet(part)
+            raise
+        except ValueError:
+            _unlink_quiet(part)
+            raise
+        except OSError as exc:
+            _unlink_quiet(part)
+            last = exc
+            if attempt + 1 >= attempts:
+                raise
+            time.sleep(0.8)
+    raise last or OSError("не удалось скачать файл")
 
 
 def fetch_game_info(place_id, timeout=8):

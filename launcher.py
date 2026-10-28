@@ -52,12 +52,13 @@ import core
 
 from core import (
     ACCENT_PRESETS, APP_NAME, BOOT_BOOLS_FROST, BOOT_BOOLS_SHARED,
-    BUNDLE_DIR, CONFIG_DIR, CONFIG_PATH, CURSOR_SLOTS, CUSTOMIZE_DIR,
+    BUNDLE_DIR, CONFIG_DIR, CONFIG_PATH, CREATE_NO_WINDOW,
+    CURSOR_SLOTS, CUSTOMIZE_DIR,
     DEFAULT_CONFIG, DEFAULT_THEME,
     DISCORD_PORTAL_URL, DISCOVER_URL, FPS_CHOICES, FLAG_API, FLAG_FPS, FLAG_QUALITY,
     GRAPHICS_MODES, HTTP_HEADERS, INSTALLER_URL,
     IMAGE_ONLY_ACCENT, IMAGE_ONLY_PALETTE, LAUNCH_DIR, RELEASES_URL,
-    THEMES, THEME_ORDER, VERSION, WINDOW_TITLE,
+    THEMES, THEME_ORDER, UPDATE_DIR, VERSION, WINDOW_TITLE,
     ROBLOX_APP_THEMES,
     THEME_SETS_DIR, THEME_TINTS,
     account_avatar_path, account_session, accounts_state, add_account,
@@ -98,6 +99,7 @@ from core import (
     wait_for_roblox_window, wait_players_gone,
     work_area,
     write_json_dict, DiscordPresence, discord_activity, discord_frame,
+    download_update, update_file_name, update_file_valid, UpdateCancelled,
 )
 
 ICON_PNG = BUNDLE_DIR / "icon.png"
@@ -182,6 +184,72 @@ NAV_GROUPS = [
      ("flags", "cursors", "themes", "launchstyle")),
     ("СИСТЕМА", ("settings", "log")),
 ]
+
+DETACHED_PROCESS = 0x00000008
+
+UPDATE_SCRIPT = r"""$ErrorActionPreference = 'Stop'
+$WaitPid = @@PID@@
+$Target = @@TARGET@@
+$NewFile = @@NEWFILE@@
+$Msi = @@MSI@@
+$deadline = (Get-Date).AddSeconds(120)
+while ($WaitPid -gt 0 -and (Get-Date) -lt $deadline) {
+    if (-not (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Milliseconds 400
+}
+Start-Sleep -Milliseconds 500
+if ($Msi -ne '') {
+    $ok = $false
+    try {
+        $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', ('"' + $Msi + '"'), '/passive', '/norestart') -Verb RunAs -Wait -PassThru
+        if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) { $ok = $true }
+    } catch { $ok = $false }
+    if ($ok) {
+        Remove-Item -LiteralPath $Msi -Force -ErrorAction SilentlyContinue
+        if ($Target -ne '') {
+            Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target)
+        }
+    }
+    exit 0
+}
+$copied = $false
+while ((Get-Date) -lt $deadline) {
+    try {
+        Copy-Item -LiteralPath $NewFile -Destination $Target -Force -ErrorAction Stop
+        $copied = $true
+        break
+    } catch {
+        Start-Sleep -Milliseconds 500
+    }
+}
+if (-not $copied) {
+    try {
+        $cmd = "Copy-Item -LiteralPath '" + ($NewFile -replace "'", "''") + "' -Destination '" + ($Target -replace "'", "''") + "' -Force"
+        Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-Command', $cmd) -Wait
+        $copied = $true
+    } catch {
+        $copied = $false
+    }
+}
+if ($copied) {
+    Remove-Item -LiteralPath $NewFile -Force -ErrorAction SilentlyContinue
+    Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target)
+}
+exit 0
+"""
+
+
+def _ps_quote(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def build_update_script(wait_pid, target="", new_file="", msi=""):
+    """PowerShell-скрипт: дождаться выхода лаунчера, заменить файл, запустить."""
+    return (UPDATE_SCRIPT
+            .replace("@@PID@@", str(int(wait_pid)))
+            .replace("@@TARGET@@", _ps_quote(target))
+            .replace("@@NEWFILE@@", _ps_quote(new_file))
+            .replace("@@MSI@@", _ps_quote(msi)))
 
 
 def round_window_corners(hwnd, radius=12):
@@ -913,7 +981,13 @@ class App:
         self.update_status_var = tk.StringVar(
             value="Проверка ещё не выполнялась")
         self._update_busy = False
-        self._update_url = ""
+        self._upd_asset = None
+        self._upd_file = None
+        self._upd_version = ""
+        self._upd_busy = False
+        self._upd_cancel = threading.Event()
+        self._upd_install_busy = False
+        self._upd_helper_stop_sent = False
         self.account_name_var = tk.StringVar(value="Не выбран")
         self.account_user_var = tk.StringVar(value="Войти в аккаунт")
         self.game_account_var = tk.StringVar(value="Аккаунт не выбран")
@@ -1191,15 +1265,20 @@ class App:
         titlebar.pack(fill="x")
         titlebar.pack_propagate(False)
 
-        lights = tk.Frame(titlebar, bg=c["titlebar"])
-        lights.pack(side="left", padx=(14, 4))
+        win_controls = self.cfg.get("window_buttons") == "win"
+        controls = tk.Frame(titlebar, bg=c["titlebar"])
+        if win_controls:
+            controls.pack(side="right", fill="y")
+        else:
+            controls.pack(side="left", padx=(14, 4))
         if ICON_PNG.exists():
             try:
                 img = tk.PhotoImage(file=str(ICON_PNG))
                 img = img.subsample(12, 12)      # 256 → 21 px
                 self._title_icon = img
                 tk.Label(titlebar, image=img, bg=c["titlebar"],
-                         bd=0).pack(side="left", padx=(8, 8))
+                         bd=0).pack(side="left",
+                                     padx=(14, 8) if win_controls else (8, 8))
             except tk.TclError:
                 pass
         tk.Label(titlebar, text=APP_NAME, bg=c["titlebar"], fg=c["text"],
@@ -1212,13 +1291,22 @@ class App:
             font=(UI_FONT, 9))
         self.title_crumb.pack(side="left", padx=(14, 0))
 
-        close_btn = self._traffic_light(
-            lights, "#ff5f57", "#5c0b06", "✕", self.close)
-        min_btn = self._traffic_light(
-            lights, "#febc2e", "#5c3d00", "–", self.frameless.minimize)
-        max_btn = self._traffic_light(
-            lights, "#28c840", "#0b4a12", "＋",
-            self.frameless.toggle_maximize)
+        if win_controls:
+            min_btn = self._window_button(
+                controls, "–", self.frameless.minimize)
+            max_btn = self._window_button(
+                controls, "□", self.frameless.toggle_maximize)
+            close_btn = self._window_button(
+                controls, "✕", self.close, danger=True)
+        else:
+            close_btn = self._traffic_light(
+                controls, "#ff5f57", "#5c0b06", "✕", self.close)
+            min_btn = self._traffic_light(
+                controls, "#febc2e", "#5c3d00", "–",
+                self.frameless.minimize)
+            max_btn = self._traffic_light(
+                controls, "#28c840", "#0b4a12", "＋",
+                self.frameless.toggle_maximize)
         self.max_button = max_btn
         self.frameless.on_max_change = self._on_max_change
 
@@ -1726,9 +1814,29 @@ class App:
         canvas.bind("<Button-1>", lambda _e: command())
         return canvas
 
+    def _window_button(self, parent, glyph, command, danger=False):
+        """Кнопка окна как в Windows: плоская, во всю высоту шапки."""
+        c = self.c
+        hot_bg = "#e81123" if danger else c["hover"]
+        hot_fg = "#ffffff" if danger else c["text"]
+        btn = tk.Button(
+            parent, text=glyph, command=command, relief="flat", bd=0,
+            font=(UI_FONT, 10), cursor="hand2", takefocus=False,
+            bg=c["titlebar"], fg=c["text"], padx=0, pady=0, width=5,
+            activebackground=hot_bg, activeforeground=hot_fg,
+            highlightthickness=0)
+        btn.pack(side="left", fill="y")
+        btn.bind("<Enter>", lambda _e: btn.configure(bg=hot_bg, fg=hot_fg))
+        btn.bind("<Leave>",
+                 lambda _e: btn.configure(bg=c["titlebar"], fg=c["text"]))
+        return btn
+
     def _on_max_change(self, maximized):
         try:
-            self.max_button.hover_glyph = "❐" if maximized else "＋"
+            if isinstance(self.max_button, tk.Canvas):
+                self.max_button.hover_glyph = "❐" if maximized else "＋"
+            else:
+                self.max_button.configure(text="❐" if maximized else "□")
         except (AttributeError, tk.TclError):
             pass
 
@@ -6967,10 +7075,28 @@ class App:
                                           font=(UI_FONT, 9))
         self.accent_name_label.pack(side="left", padx=8)
 
+        buttons_row = tk.Frame(inner4, bg=c["surface"])
+        buttons_row.pack(fill="x", pady=(14, 0))
+        tk.Label(buttons_row, text="Кнопки окна", bg=c["surface"],
+                 fg=c["text"], font=(UI_FONT, 10)).pack(side="left")
+        style_btns = tk.Frame(buttons_row, bg=c["surface"])
+        style_btns.pack(side="right")
+        self.window_style_buttons = {}
+        current_style = self.cfg.get("window_buttons", "mac")
+        for key, label in (("mac", "macOS"), ("win", "Windows")):
+            kind = "primary" if current_style == key else "ghost"
+            self.window_style_buttons[key] = self._button(
+                style_btns, label,
+                lambda v=key: self.set_window_buttons(v),
+                kind=kind, side="left",
+                padx=(8, 0) if key == "win" else 0)
+        self._hint(inner4, "macOS — цветные кружки слева, Windows — "
+                    "кнопки свернуть, развернуть и закрыть справа.", wrap=540)
+
         # обновления
         inner_upd = self._card(
             pad, title="Обновления",
-            subtitle="Проверка последнего релиза MaklyxaLauncher на GitHub",
+            subtitle="Проверка и скачивание новых версий с GitHub",
             glyph="⟳")
         upd_row = tk.Frame(inner_upd, bg=c["surface"])
         upd_row.pack(fill="x", pady=(8, 0))
@@ -6983,18 +7109,37 @@ class App:
             upd_btns, "Проверить обновления", self.check_updates,
             side="left")
         self.btn_update_get = self._button(
-            upd_btns, "Скачать обновление", self.open_update,
+            upd_btns, "Скачать обновление", self.start_update_download,
             kind="primary", side="left", padx=(8, 0))
+        self.btn_update_install = self._button(
+            upd_btns, "Установить и перезапустить", self.install_update,
+            kind="primary", side="left", padx=(8, 0))
+        self.btn_update_cancel = self._button(
+            upd_btns, "Отмена", self.cancel_update_download,
+            side="left", padx=(8, 0))
         self.btn_update_get.pack_forget()
+        self.btn_update_install.pack_forget()
+        self.btn_update_cancel.pack_forget()
         tk.Label(inner_upd, textvariable=self.update_status_var,
                  bg=c["surface"], fg=c["muted"],
                  font=(UI_FONT, 9), anchor="w").pack(
                      fill="x", pady=(9, 0))
+        self.upd_progress = tk.Frame(inner_upd, bg=c["surface"])
+        self.upd_progress.pack(fill="x")
+        self.upd_bar = ttk.Progressbar(self.upd_progress, maximum=100,
+                                       style="green.Horizontal.TProgressbar")
+        self.upd_label = tk.Label(self.upd_progress, text="",
+                                  bg=c["surface"], fg=c["muted"],
+                                  font=(UI_FONT, 9), anchor="w")
+        self.upd_bar.pack_forget()
+        self.upd_label.pack_forget()
         self._hint(
             inner_upd,
-            "Сеть используется только по нажатию кнопки. Лаунчер сравнивает "
-            "версии и открывает страницу загрузки — ничего не скачивается "
-            "и не устанавливается само.", wrap=540)
+            "Лаунчер сам скачает файл обновления с GitHub и проверит размер "
+            "и контрольную сумму. «Установить» заменит файл лаунчера и "
+            "запустит его заново — настройки и аккаунты сохранятся.", wrap=540)
+        if self._upd_file is not None and Path(self._upd_file).is_file():
+            self._show_update_install()
 
         # о программе
         inner5 = self._card(pad, title="О программе", glyph="ⓘ")
@@ -7262,7 +7407,9 @@ class App:
     def _update_widgets_alive(self):
         try:
             return bool(self.btn_update.winfo_exists()
-                        and self.btn_update_get.winfo_exists())
+                        and self.btn_update_get.winfo_exists()
+                        and self.btn_update_install.winfo_exists()
+                        and self.btn_update_cancel.winfo_exists())
         except (AttributeError, tk.TclError):
             return False
 
@@ -7276,23 +7423,40 @@ class App:
         if error:
             self.update_status_var.set(
                 "Не удалось связаться с GitHub — проверь подключение")
+            self._hide_update_install()
             self.btn_update_get.pack_forget()
             self.log(f"Проверка обновлений: {error}")
             self.status_var.set("Не удалось проверить обновления")
             return
         latest = result.get("latest") or "?"
         if result.get("is_newer"):
+            asset = self._pick_update_asset(result)
+            self._upd_asset = asset
+            self._upd_version = latest
             label = f"Доступна версия {latest}"
             if result.get("prerelease"):
                 label += " (бета)"
+            if asset is not None and asset.get("size"):
+                label += f" · {mb(asset['size'])} МБ"
             self.update_status_var.set(label)
-            self._update_url = (result.get("download")
-                                or result.get("url") or RELEASES_URL)
+            self._hide_update_install()
+            self._btn_state(self.btn_update_get, "primary", True,
+                            text="Скачать обновление" if asset
+                            else "Открыть загрузку")
             if not self.btn_update_get.winfo_manager():
                 self.btn_update_get.pack(side="left", padx=(8, 0))
+            if asset is not None:
+                target = self._update_target_path(asset)
+                if update_file_valid(target, asset):
+                    self._upd_file = target
+                    self._show_update_install()
             self.log(f"Проверка обновлений: доступна версия {latest}")
             self.status_var.set(f"Доступна версия {latest}")
             return
+        self._upd_asset = None
+        self._upd_file = None
+        self._upd_version = ""
+        self._hide_update_install()
         self.update_status_var.set(
             f"Установлена последняя версия — {VERSION}")
         self.btn_update_get.pack_forget()
@@ -7300,10 +7464,272 @@ class App:
                  f"{VERSION}")
         self.status_var.set("Обновлений нет")
 
-    def open_update(self):
-        url = self._update_url or RELEASES_URL
-        self.log("Открываю страницу загрузки обновления")
-        webbrowser.open(url)
+    def _hide_update_install(self):
+        self.btn_update_install.pack_forget()
+        self.btn_update_cancel.pack_forget()
+
+    def _show_update_install(self):
+        version = f" {self._upd_version}" if self._upd_version else ""
+        self.update_status_var.set(
+            f"Обновление{version} скачано — нажми «Установить и перезапустить»")
+        self.btn_update_get.pack_forget()
+        if not self.btn_update_install.winfo_manager():
+            self.btn_update_install.pack(side="left", padx=(8, 0))
+
+    def _pick_update_asset(self, result):
+        """Для установленной копии — MSI, для портативной — exe."""
+        assets = result.get("assets") or {}
+        order = ("msi", "exe") if self._installed_build() else ("exe", "msi")
+        for kind in order:
+            asset = assets.get(kind)
+            if isinstance(asset, dict) and asset.get("url"):
+                return dict(asset, kind=kind)
+        return None
+
+    @staticmethod
+    def _launcher_exe():
+        if not getattr(sys, "frozen", False):
+            return None
+        try:
+            return Path(sys.executable).resolve()
+        except OSError:
+            return Path(sys.executable)
+
+    def _installed_build(self):
+        exe = self._launcher_exe()
+        if exe is None:
+            return False
+        path = os.path.normcase(str(exe))
+        for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+            root = os.environ.get(var)
+            if not root:
+                continue
+            root = os.path.normcase(os.path.abspath(root)).rstrip("\\")
+            if path == root or path.startswith(root + "\\"):
+                return True
+        return False
+
+    @staticmethod
+    def _update_target_path(asset):
+        return UPDATE_DIR / update_file_name(asset)
+
+    def start_update_download(self):
+        if self._upd_busy or self._upd_install_busy:
+            return
+        asset = self._upd_asset
+        if not isinstance(asset, dict) or not asset.get("url"):
+            self.log("Ассет обновления не найден — открываю страницу релиза")
+            self.status_var.set("Открываю страницу релиза")
+            webbrowser.open(RELEASES_URL)
+            return
+        target = self._update_target_path(asset)
+        if update_file_valid(target, asset):
+            self._upd_finished(target)
+            return
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._upd_error(exc)
+            return
+        self._upd_busy = True
+        self._upd_cancel.clear()
+        self._btn_state(self.btn_update, "ghost", False)
+        self.btn_update_get.pack_forget()
+        if not self.btn_update_cancel.winfo_manager():
+            self.btn_update_cancel.pack(side="left", padx=(8, 0))
+        self.upd_bar["value"] = 0
+        self.upd_bar.pack(fill="x", pady=(8, 0))
+        self.upd_label.pack(fill="x")
+        self.upd_label.configure(text="Подключение…")
+        self.update_status_var.set(
+            f"Скачиваю обновление {self._upd_version}…")
+        self.status_var.set("Скачиваю обновление…")
+        self.log(f"Скачивание обновления: {asset.get('url')}")
+
+        def worker():
+            try:
+                download_update(
+                    asset["url"], target,
+                    size=asset.get("size") or 0,
+                    sha256=asset.get("sha256") or "",
+                    progress=lambda done, total: self.q.put(
+                        lambda d=done, t=total: self._upd_progress(d, t)),
+                    cancel=self._upd_cancel)
+                self.q.put(lambda: self._upd_finished(target))
+            except UpdateCancelled:
+                self.q.put(self._upd_cancelled_update)
+            except Exception as exc:  # noqa: BLE001
+                self.q.put(lambda e=exc: self._upd_error(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cancel_update_download(self):
+        if self._upd_busy:
+            self._upd_cancel.set()
+            self.upd_label.configure(text="Отмена…")
+
+    def _upd_progress(self, done, total):
+        if self._closing:
+            return
+        try:
+            if total > 0:
+                pct = min(100.0, done * 100.0 / total)
+                self.upd_bar["value"] = pct
+                self.upd_label.configure(
+                    text=f"{mb(done)} из {mb(total)} МБ · {pct:.0f}%")
+            else:
+                self.upd_label.configure(text=f"{mb(done)} МБ")
+        except tk.TclError:
+            pass
+
+    def _upd_reset_progress(self):
+        self._upd_busy = False
+        self.upd_bar.pack_forget()
+        self.upd_label.pack_forget()
+        self.btn_update_cancel.pack_forget()
+        self._btn_state(self.btn_update, "ghost", True,
+                        text="Проверить обновления")
+        self._btn_state(self.btn_update_get, "primary", True,
+                        text="Скачать обновление")
+
+    def _upd_finished(self, target):
+        self._upd_reset_progress()
+        if self._closing:
+            return
+        self._upd_file = Path(target)
+        try:
+            size = self._upd_file.stat().st_size
+        except OSError:
+            size = 0
+        self._show_update_install()
+        self.log(f"Обновление скачано: {self._upd_file} ({mb(size)} МБ)")
+        self.status_var.set("Обновление скачано")
+
+    def _upd_cancelled_update(self):
+        self._upd_reset_progress()
+        if self._closing:
+            return
+        if not self.btn_update_get.winfo_manager():
+            self.btn_update_get.pack(side="left", padx=(8, 0))
+        self.update_status_var.set("Скачивание обновления отменено")
+        self.status_var.set("Скачивание отменено")
+        self.log("Скачивание обновления отменено")
+
+    def _upd_error(self, exc):
+        self._upd_reset_progress()
+        if self._closing:
+            return
+        if not self.btn_update_get.winfo_manager():
+            self.btn_update_get.pack(side="left", padx=(8, 0))
+        self.update_status_var.set(
+            "Не удалось скачать обновление — попробуй ещё раз")
+        self.status_var.set("Ошибка скачивания обновления")
+        self.log(f"Ошибка скачивания обновления: {exc}")
+        if self.interactive:
+            messagebox.showerror(
+                APP_NAME,
+                f"Не удалось скачать обновление:\n{exc}\n\n"
+                "Проверь интернет и попробуй снова.",
+                parent=self.root)
+
+    def install_update(self):
+        if self._upd_busy or self._upd_install_busy:
+            return
+        path = self._upd_file
+        if path is None or not Path(path).is_file():
+            self._upd_file = None
+            self.update_status_var.set(
+                "Файл обновления не найден — скачай его заново")
+            return
+        path = Path(path)
+        exe = self._launcher_exe()
+        kind = (self._upd_asset or {}).get("kind") or (
+            "msi" if path.suffix.lower() == ".msi" else "exe")
+        if exe is None:
+            if self.interactive:
+                messagebox.showinfo(
+                    APP_NAME,
+                    "Лаунчер запущен из исходников — автоматическая "
+                    f"установка недоступна.\nФайл обновления: {path}",
+                    parent=self.root)
+            try:
+                if kind == "msi":
+                    os.startfile(str(path))
+                    self.log("Открываю установщик обновления")
+                else:
+                    os.startfile(str(path.parent))
+            except OSError as exc:
+                self.log(f"Не удалось открыть обновление: {exc}")
+            return
+        if self.interactive:
+            note = ("Установщик запросит права администратора. "
+                    if kind == "msi" else "")
+            if not messagebox.askyesno(
+                    APP_NAME,
+                    f"{note}Лаунчер закроется, обновление установится и "
+                    "запустится снова.\nПродолжить?",
+                    parent=self.root):
+                return
+        self._upd_install_busy = True
+        self.btn_update_install.pack_forget()
+        self.update_status_var.set("Останавливаю помощник перед обновлением…")
+        self.status_var.set("Устанавливаю обновление…")
+        self._install_after_helper(time.monotonic() + 6.0)
+
+    def _install_after_helper(self, deadline):
+        if self._closing:
+            return
+        if ingame_mod.helper_running():
+            if time.monotonic() < deadline:
+                if not self._upd_helper_stop_sent:
+                    ingame_mod.stop_helper()
+                    self._upd_helper_stop_sent = True
+                    self.log("In-game: останавливаю помощник перед "
+                             "обновлением")
+                self.root.after(
+                    300, lambda: self._install_after_helper(deadline))
+                return
+            self.log("In-game: помощник не завершился — запускаю обновление")
+        self._upd_helper_stop_sent = False
+        self._launch_updater()
+
+    def _launch_updater(self):
+        path = Path(self._upd_file)
+        exe = self._launcher_exe()
+        kind = (self._upd_asset or {}).get("kind") or (
+            "msi" if path.suffix.lower() == ".msi" else "exe")
+        if kind == "msi":
+            args = {"target": str(exe or ""), "new_file": "", "msi": str(path)}
+        else:
+            args = {"target": str(exe or ""), "new_file": str(path), "msi": ""}
+        try:
+            fd, name = tempfile.mkstemp(prefix="maklyxa-update-",
+                                        suffix=".ps1")
+            os.close(fd)
+            script = Path(name)
+            script.write_text(build_update_script(os.getpid(), **args),
+                              encoding="utf-8-sig")
+            subprocess.Popen(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-WindowStyle", "Hidden", "-File", str(script)],
+                creationflags=CREATE_NO_WINDOW | DETACHED_PROCESS,
+                close_fds=True)
+        except OSError as exc:
+            self._upd_install_busy = False
+            self._upd_helper_stop_sent = False
+            self._upd_reset_progress()
+            self._show_update_install()
+            self.update_status_var.set(
+                "Не удалось запустить установку обновления")
+            self.status_var.set("Ошибка установки обновления")
+            self.log(f"Ошибка установки обновления: {exc}")
+            if self.interactive:
+                messagebox.showerror(
+                    APP_NAME, f"Ошибка установки:\n{exc}", parent=self.root)
+            return
+        self.log(f"Установка обновления: {path}")
+        self.status_var.set("Лаунчер перезапустится с новой версией")
+        self.root.after(150, self.close)
 
     def _close_on_alt_tab(self):
         """Alt+Tab в другое окно закрывает лаунчер, а не оставляет его висеть."""
@@ -7311,7 +7737,8 @@ class App:
             return
         if self._login_busy or self._login_window_alive():
             return
-        if self._client_busy or self._play_busy or self._dl_active:
+        if (self._client_busy or self._play_busy or self._dl_active
+                or self._upd_busy or self._upd_install_busy):
             return
         self.close()
 
@@ -8158,6 +8585,18 @@ class App:
         if save:
             self.log(f"Тема оформления: {label}")
 
+    def set_window_buttons(self, style):
+        """Стиль кнопок окна: mac (слева) или win (справа)."""
+        style = style if style in ("mac", "win") else "mac"
+        if self.cfg.get("window_buttons") == style:
+            return
+        self.cfg["window_buttons"] = style
+        save_config(self.cfg)
+        self._rebuild()
+        label = "macOS" if style == "mac" else "Windows"
+        self.status_var.set(f"Кнопки окна: {label}")
+        self.log(f"Кнопки окна: {label}")
+
     def set_accent(self, color):
         color = color.lower()
         if self.theme_name == "custom" and self.c.get("image_only"):
@@ -8389,6 +8828,21 @@ def run_selftest():
     except Exception as exc:  # noqa: BLE001
         failures.append(f"config in-game test: {exc}")
 
+    # 2c) конфиг: стиль кнопок окна
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            wb_path = Path(td) / "config.json"
+            wb_path.write_text(json.dumps({"window_buttons": "WIN"}),
+                               encoding="utf-8")
+            if load_config(path=wb_path)["window_buttons"] != "win":
+                failures.append("config: window_buttons=WIN не нормализован")
+            wb_path.write_text(json.dumps({"window_buttons": "linux"}),
+                               encoding="utf-8")
+            if load_config(path=wb_path)["window_buttons"] != "mac":
+                failures.append("config: неизвестный window_buttons не сброшен")
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"config window buttons test: {exc}")
+
     cfg_real = load_config()
     if not save_config(cfg_real):
         failures.append("не удалось записать реальный config.json")
@@ -8483,14 +8937,24 @@ def run_selftest():
             core_module._get_json = lambda url, timeout=8: [{
                 "tag_name": "v99.0.0", "name": "Тест", "html_url": "u",
                 "prerelease": False, "draft": False,
-                "assets": [{"name": "MaklyxaLauncher-99.0.0-x64.msi",
-                            "browser_download_url": "https://x/app.msi"}]}]
+                "assets": [
+                    {"name": "MaklyxaLauncher.exe",
+                     "browser_download_url": "https://x/app.exe",
+                     "size": 10, "digest": "sha256:" + "a" * 64},
+                    {"name": "MaklyxaLauncher-99.0.0-x64.msi",
+                     "browser_download_url": "https://x/app.msi",
+                     "size": 20}]}]
             upd = check_launcher_update()
             if upd.get("error") or not upd.get("is_newer"):
                 failures.append(f"check_launcher_update: {upd}")
-            if upd.get("download") != "https://x/app.msi":
+            if upd.get("download") != "https://x/app.exe":
                 failures.append(
                     f"check_launcher_update: ассет {upd.get('download')!r}")
+            assets = upd.get("assets") or {}
+            if (assets.get("exe") or {}).get("sha256") != "a" * 64:
+                failures.append("check_launcher_update: sha256 не разобран")
+            if (assets.get("msi") or {}).get("size") != 20:
+                failures.append("check_launcher_update: размер msi не разобран")
 
             core_module._get_json = lambda url, timeout=8: [{
                 "tag_name": f"v{VERSION}", "html_url": "u", "assets": []}]
@@ -8507,6 +8971,41 @@ def run_selftest():
                     "check_launcher_update: ошибка сети не поймана")
         finally:
             core_module._get_json = original_get
+
+        # скачивание обновления с прогрессом и проверкой хеша (file://)
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                src = Path(tmp_dir) / "asset.exe"
+                src.write_bytes(b"maklyxa" * 5000)
+                dst = Path(tmp_dir) / "out" / "asset.exe"
+                digest = core_module.sha256_file(src)
+                seen = []
+                ok = download_update(
+                    src.as_uri(), dst, size=src.stat().st_size, sha256=digest,
+                    progress=lambda done, total: seen.append(done))
+                if not ok or dst.read_bytes() != src.read_bytes():
+                    failures.append("download_update: файл скачан неверно")
+                if not seen or seen[-1] != src.stat().st_size:
+                    failures.append("download_update: прогресс не дошёл")
+                if not update_file_valid(dst, {"size": src.stat().st_size,
+                                               "sha256": digest}):
+                    failures.append("update_file_valid: свой файл не принят")
+                if update_file_valid(dst, {"sha256": "0" * 64}):
+                    failures.append("update_file_valid: чужой хеш принят")
+                if update_file_name({"name": "../a b.exe"}) != "a_b.exe":
+                    failures.append(
+                        "update_file_name: имя не очищено")
+                bad = Path(tmp_dir) / "bad.exe"
+                try:
+                    download_update(src.as_uri(), bad, sha256="0" * 64)
+                except ValueError:
+                    pass
+                else:
+                    failures.append("download_update: битый хеш не отклонён")
+                if bad.exists() or Path(str(bad) + ".part").exists():
+                    failures.append("download_update: мусор после ошибки")
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"download update test: {exc}")
     except Exception as exc:  # noqa: BLE001
         failures.append(f"update check test: {exc}")
 
@@ -10015,6 +10514,41 @@ def run_selftest():
         if ui_theme["ok"]:
             delete_theme_set(ui_theme["name"])
 
+        # кнопки окна: macOS / Windows
+        if not hasattr(app, "window_style_buttons"):
+            failures.append("UI: нет выбора кнопок окна")
+        else:
+            for style in ("win", "mac"):
+                app.set_window_buttons(style)
+                root.update()
+                if app.cfg.get("window_buttons") != style:
+                    failures.append(
+                        f"window_buttons: {style} не сохранился в конфиг")
+                if load_config().get("window_buttons") != style:
+                    failures.append(
+                        f"window_buttons: {style} не записан на диск")
+                button = getattr(app, "max_button", None)
+                if button is None or not button.winfo_exists():
+                    failures.append(
+                        f"window_buttons: кнопки окна не построены ({style})")
+                elif style == "win" and isinstance(button, tk.Canvas):
+                    failures.append(
+                        "window_buttons: стиль Windows, а кнопки macOS")
+                elif style == "mac" and not isinstance(button, tk.Canvas):
+                    failures.append(
+                        "window_buttons: стиль macOS, а кнопки Windows")
+                if style == "win" and button is not None:
+                    app._on_max_change(True)
+                    if button.cget("text") != "❐":
+                        failures.append(
+                            "window_buttons: значок разворота не сменился")
+                    app._on_max_change(False)
+                    if button.cget("text") != "□":
+                        failures.append(
+                            "window_buttons: значок разворота не вернулся")
+            if not app.window_style_buttons["win"].cget("text") == "Windows":
+                failures.append("UI: нет кнопки Windows в оформлении")
+
         # безрамочное окно: панель задач и сворачивание
         test_geom = f"{MIN_W}x{MIN_H}+-32000+-32000"
         root.geometry(test_geom)
@@ -10076,20 +10610,42 @@ def run_selftest():
         else:
             app._on_update_checked({
                 "current": VERSION, "latest": "99.0.0", "tag": "v99.0.0",
-                "url": RELEASES_URL, "download": RELEASES_URL,
+                "url": RELEASES_URL, "download": "https://x/app.exe",
+                "assets": {"exe": {"name": "MaklyxaLauncher.exe",
+                                   "url": "https://x/app.exe",
+                                   "size": 22000000, "sha256": ""}},
                 "prerelease": False, "is_newer": True})
             root.update()
             if "99.0.0" not in app.update_status_var.get():
                 failures.append("UI: доступное обновление не показано")
             if not app.btn_update_get.winfo_manager():
                 failures.append("UI: кнопка загрузки скрыта при обновлении")
-            if app._update_url != RELEASES_URL:
-                failures.append("UI: ссылка на обновление не сохранена")
+            if (app._upd_asset or {}).get("url") != "https://x/app.exe":
+                failures.append("UI: ассет обновления не сохранён")
+            if app.btn_update_install.winfo_manager():
+                failures.append("UI: кнопка установки видна до скачивания")
+            tmp_upd = Path(tempfile.gettempdir()) / "maklyxa_selftest_upd.exe"
+            tmp_upd.write_bytes(b"update")
+            app._upd_version = "99.0.0"
+            app._upd_finished(tmp_upd)
+            root.update()
+            if not app.btn_update_install.winfo_manager():
+                failures.append("UI: кнопка установки скрыта после скачивания")
+            if app.btn_update_get.winfo_manager():
+                failures.append("UI: кнопка скачивания осталась после загрузки")
+            try:
+                tmp_upd.unlink()
+            except OSError:
+                pass
             app._on_update_checked({"current": VERSION, "latest": VERSION,
                                     "is_newer": False})
             root.update()
             if app.btn_update_get.winfo_manager():
                 failures.append("UI: кнопка загрузки осталась без обновления")
+            if app.btn_update_install.winfo_manager():
+                failures.append("UI: кнопка установки осталась без обновления")
+            if app._upd_asset is not None:
+                failures.append("UI: ассет остался без обновления")
             if "последняя" not in app.update_status_var.get():
                 failures.append("UI: нет статуса последней версии")
 
