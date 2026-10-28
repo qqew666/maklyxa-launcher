@@ -48,7 +48,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.9.1"
+VERSION = "1.9.2"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -222,6 +222,7 @@ DEFAULT_CONFIG = {
     "ingame_island": False,
     "ingame_overlay_start": False,
     "ingame_overlay_corner": "tr",
+    "ingame_hotkey": "shift+f1",
     "ingame_auto": True,
     "ingame_afk": False,
     "ingame_afk_mode": "mouse",
@@ -359,6 +360,9 @@ def load_config(path=None):
     corner = str(cfg.get("ingame_overlay_corner") or "").lower()
     cfg["ingame_overlay_corner"] = (
         corner if corner in ("tl", "tr", "bl", "br") else "tr")
+    hotkey = re.sub(r"\s+", "", str(cfg.get("ingame_hotkey") or "").lower())
+    cfg["ingame_hotkey"] = (
+        hotkey if re.fullmatch(r"[a-z0-9+]{3,48}", hotkey) else "shift+f1")
     afk_mode = str(cfg.get("ingame_afk_mode") or "").lower()
     cfg["ingame_afk_mode"] = (
         afk_mode if afk_mode in ("mouse", "key") else "mouse")

@@ -49,9 +49,11 @@ IS_WINDOWS = os.name == "nt"
 STOP_EVENT = r"Local\MaklyxaLauncherInGameStop_v1"
 TOGGLE_EVENT = r"Local\MaklyxaLauncherInGameToggle_v1"
 HOTKEY_ID = 0xB10
+MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
+MOD_WIN = 0x0008
 MOD_NOREPEAT = 0x4000
-VK_F1 = 0x70
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
 EVENT_MODIFY_STATE = 0x0002
@@ -106,6 +108,178 @@ AFK_MODE_LABELS = {
     "key": "Клавиша",
 }
 AFK_MODE_BY_LABEL = {label: key for key, label in AFK_MODE_LABELS.items()}
+
+DEFAULT_HOTKEY = "shift+f1"
+HOTKEY_MOD_ORDER = ("ctrl", "alt", "shift", "win")
+HOTKEY_MODS = {
+    "ctrl": MOD_CONTROL,
+    "alt": MOD_ALT,
+    "shift": MOD_SHIFT,
+    "win": MOD_WIN,
+}
+HOTKEY_MOD_LABELS = {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "win": "Win",
+}
+HOTKEY_VK = {
+    "space": 0x20,
+    "tab": 0x09,
+    "enter": 0x0D,
+    "esc": 0x1B,
+    "backspace": 0x08,
+    "insert": 0x2D,
+    "delete": 0x2E,
+    "home": 0x24,
+    "end": 0x23,
+    "pageup": 0x21,
+    "pagedown": 0x22,
+    "left": 0x25,
+    "up": 0x26,
+    "right": 0x27,
+    "down": 0x28,
+    "minus": 0xBD,
+    "equals": 0xBB,
+    "comma": 0xBC,
+    "period": 0xBE,
+    "slash": 0xBF,
+    "semicolon": 0xBA,
+    "quote": 0xDE,
+    "backquote": 0xC0,
+    "bracketleft": 0xDB,
+    "bracketright": 0xDD,
+    "backslash": 0xDC,
+}
+for _letter in "abcdefghijklmnopqrstuvwxyz":
+    HOTKEY_VK[_letter] = ord(_letter.upper())
+for _digit in "0123456789":
+    HOTKEY_VK[_digit] = ord(_digit)
+for _number in range(1, 25):
+    HOTKEY_VK[f"f{_number}"] = 0x6F + _number
+HOTKEY_KEY_LABELS = {
+    "space": "Space",
+    "tab": "Tab",
+    "enter": "Enter",
+    "esc": "Esc",
+    "backspace": "Backspace",
+    "insert": "Insert",
+    "delete": "Delete",
+    "home": "Home",
+    "end": "End",
+    "pageup": "PgUp",
+    "pagedown": "PgDn",
+    "left": "Left",
+    "up": "Up",
+    "right": "Right",
+    "down": "Down",
+    "minus": "-",
+    "equals": "=",
+    "comma": ",",
+    "period": ".",
+    "slash": "/",
+    "semicolon": ";",
+    "quote": "'",
+    "backquote": "`",
+    "bracketleft": "[",
+    "bracketright": "]",
+    "backslash": "\\",
+}
+HOTKEY_KEY_ALIASES = {
+    "return": "enter",
+    "escape": "esc",
+    "prior": "pageup",
+    "next": "pagedown",
+    "plus": "equals",
+    "underscore": "minus",
+    "colon": "semicolon",
+    "quotedbl": "quote",
+    "less": "comma",
+    "greater": "period",
+    "question": "slash",
+    "bar": "backslash",
+    "asciitilde": "backquote",
+    "braceleft": "bracketleft",
+    "braceright": "bracketright",
+}
+HOTKEY_MOD_KEYSYMS = {
+    "control_l", "control_r", "shift_l", "shift_r", "alt_l", "alt_r",
+    "win_l", "win_r", "super_l", "super_r", "meta_l", "meta_r",
+    "caps_lock", "num_lock", "scroll_lock", "menu",
+}
+
+
+def normalize_hotkey(spec):
+    """'Ctrl + Shift + H' -> 'ctrl+shift+h'; None для негодной записи."""
+    text = str(spec or "").strip().lower().replace(" ", "+")
+    parts = [part for part in text.split("+") if part]
+    mods = set()
+    key = None
+    for part in parts:
+        if part in ("ctrl", "control"):
+            mods.add("ctrl")
+        elif part in ("alt", "menu"):
+            mods.add("alt")
+        elif part == "shift":
+            mods.add("shift")
+        elif part in ("win", "windows", "super", "meta"):
+            mods.add("win")
+        elif key is None and part in HOTKEY_VK:
+            key = part
+        else:
+            return None
+    if key is None:
+        return None
+    ordered = [name for name in HOTKEY_MOD_ORDER if name in mods]
+    return "+".join(ordered + [key])
+
+
+def hotkey_parts(spec):
+    """(модификаторы WinAPI, виртуальный код клавиши) или None."""
+    normalized = normalize_hotkey(spec)
+    if not normalized:
+        return None
+    parts = normalized.split("+")
+    mods = 0
+    for part in parts[:-1]:
+        mods |= HOTKEY_MODS[part]
+    return mods, HOTKEY_VK[parts[-1]]
+
+
+def hotkey_label(spec):
+    normalized = normalize_hotkey(spec) or DEFAULT_HOTKEY
+    parts = normalized.split("+")
+    labels = [HOTKEY_MOD_LABELS[part] for part in parts[:-1]]
+    key = parts[-1]
+    labels.append(HOTKEY_KEY_LABELS.get(key, key.upper()))
+    return "+".join(labels)
+
+
+def key_from_keysym(keysym):
+    """Имя клавиши Tk -> каноническое имя для normalize_hotkey."""
+    name = str(keysym or "").strip().lower()
+    if not name or name in HOTKEY_MOD_KEYSYMS:
+        return None
+    name = HOTKEY_KEY_ALIASES.get(name, name)
+    return name if name in HOTKEY_VK else None
+
+
+def pressed_hotkey_modifiers():
+    """Модификаторы, зажатые прямо сейчас (надёжнее event.state)."""
+    if not IS_WINDOWS:
+        return []
+    checks = (("ctrl", 0x11), ("alt", 0x12), ("shift", 0x10),
+              ("win", 0x5B), ("win", 0x5C))
+    mods = []
+    for name, vk in checks:
+        try:
+            down = bool(user32.GetAsyncKeyState(vk) & 0x8000)
+        except (OSError, AttributeError):
+            return []
+        if down and name not in mods:
+            mods.append(name)
+    return [name for name in HOTKEY_MOD_ORDER if name in mods]
+
 
 user32 = ctypes.WinDLL("user32", use_last_error=True) if IS_WINDOWS else None
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True) if IS_WINDOWS else None
@@ -926,8 +1100,9 @@ def send_micro_action(mode="mouse", key="space"):
 
 
 class HotkeyThread:
-    def __init__(self, events):
+    def __init__(self, events, spec=DEFAULT_HOTKEY):
         self.events = events
+        self.spec = normalize_hotkey(spec) or DEFAULT_HOTKEY
         self.ok = False
         self.error = ""
         self._thread = None
@@ -936,9 +1111,16 @@ class HotkeyThread:
         self._tid = 0
         self._registered = False
 
+    @property
+    def label(self):
+        return hotkey_label(self.spec)
+
     def start(self):
         if not IS_WINDOWS:
             self.error = "только Windows"
+            return False
+        if not hotkey_parts(self.spec):
+            self.error = "неверная комбинация"
             return False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -946,19 +1128,28 @@ class HotkeyThread:
         return self.ok
 
     def _register(self):
+        parsed = hotkey_parts(self.spec)
+        if parsed is None:
+            return False
+        mods, key = parsed
         try:
             return bool(user32.RegisterHotKey(
-                None, HOTKEY_ID, MOD_SHIFT | MOD_NOREPEAT, VK_F1))
+                None, HOTKEY_ID, mods | MOD_NOREPEAT, key))
         except (OSError, AttributeError):
             return False
 
     def _run(self):
         self._tid = int(kernel32.GetCurrentThreadId())
-        while not self._stop.is_set() and not self._register():
-            self.error = "Shift+F1 занят другой программой"
+        while not self._stop.is_set():
+            if self._register():
+                break
             self._ready.set()
+            if not hotkey_parts(self.spec):
+                self.error = "неверная комбинация"
+                return
+            self.error = f"{self.label} занят другой программой"
             self._stop.wait(3.0)
-        if self._registered or self._stop.is_set():
+        if self._stop.is_set():
             self._ready.set()
             return
         self._registered = True
@@ -1044,6 +1235,8 @@ class Overlay:
         self._hwnd = None
         self._root_hwnd = None
         self._accent = self._accent_color(cfg)
+        self._hotkey_label = hotkey_label((cfg or {}).get("ingame_hotkey"))
+        self._hotkey_ok = True
         self._build()
         self.top.update_idletasks()
         self._hwnd = int(self.top.winfo_id())
@@ -1051,7 +1244,6 @@ class Overlay:
             user32.GetAncestor(self._hwnd, 2) or self._hwnd) if IS_WINDOWS \
             else self._hwnd
         self._apply_style()
-        self._hotkey_ok = True
 
     @staticmethod
     def _accent_color(cfg):
@@ -1072,58 +1264,72 @@ class Overlay:
         self.gpu_sub_var = tk.StringVar(value="нет датчика")
         self.ram_var = tk.StringVar(value="—")
         self.ram_sub_var = tk.StringVar(value="")
+        self.afk_var = tk.StringVar(value="—")
+        self.afk_sub_var = tk.StringVar(value="выкл.")
         self.time_var = tk.StringVar(value=time.strftime("%H:%M:%S"))
-        self.hint_var = tk.StringVar(value="Shift+F1 скрыть")
-        self.afk_var = tk.StringVar(value="")
+        self.hint_var = tk.StringVar(
+            value=f"{self._hotkey_label} скрыть")
+        self.live_var = tk.StringVar(value="● LIVE")
 
         body = tk.Frame(self.top, bg=self.BG,
                         highlightbackground=self.BORDER,
                         highlightthickness=1)
         body.pack(fill="both", expand=True)
+        self.rail = tk.Frame(body, bg=self._accent, width=4)
+        self.rail.pack(side="left", fill="y")
+        content = tk.Frame(body, bg=self.BG)
+        content.pack(side="left", fill="both", expand=True,
+                     padx=(11, 14), pady=(9, 8))
 
-        head = tk.Frame(body, bg=self.BG)
-        head.pack(fill="x", padx=12, pady=(9, 0))
+        head = tk.Frame(content, bg=self.BG)
+        head.pack(fill="x")
         self.brand_label = tk.Label(
             head, text="MAKLYXA", bg=self.BG, fg=self._accent,
             font=(self.FONT, 8, "bold"))
         self.brand_label.pack(side="left")
-        tk.Label(head, text="  IN-GAME", bg=self.BG, fg=self.MUTED,
+        tk.Label(head, text="  HUD", bg=self.BG, fg=self.MUTED,
                  font=(self.FONT, 8, "bold")).pack(side="left")
         tk.Label(head, textvariable=self.time_var, bg=self.BG,
-                 fg=self.TEXT, font=(self.FONT, 11, "bold")).pack(
+                 fg=self.TEXT, font=(self.FONT, 16, "bold")).pack(
                      side="right")
 
-        tk.Frame(body, bg=self.BORDER, height=1).pack(
-            fill="x", padx=12, pady=(7, 0))
+        tk.Frame(content, bg=self.BORDER, height=1).pack(
+            fill="x", pady=(6, 8))
 
-        grid = tk.Frame(body, bg=self.BG)
-        grid.pack(fill="x", padx=12, pady=(6, 0))
-        for index in range(3):
-            grid.grid_columnconfigure(index, weight=1)
-        self._metric(grid, 0, "FPS", self.fps_var, self.fps_sub_var)
-        self._metric(grid, 1, "GPU", self.gpu_var, self.gpu_sub_var)
-        self._metric(grid, 2, "ПАМЯТЬ", self.ram_var, self.ram_sub_var)
+        grid = tk.Frame(content, bg=self.BG)
+        grid.pack(fill="x")
+        for column in range(2):
+            grid.grid_columnconfigure(column, weight=1, uniform="metric")
+        self._metric(grid, 0, 0, "FPS", self.fps_var, self.fps_sub_var)
+        self._metric(grid, 0, 1, "GPU", self.gpu_var, self.gpu_sub_var)
+        self._metric(grid, 1, 0, "ПАМЯТЬ", self.ram_var, self.ram_sub_var)
+        self._metric(grid, 1, 1, "AFK", self.afk_var, self.afk_sub_var)
 
-        foot = tk.Frame(body, bg=self.BG)
-        foot.pack(fill="x", padx=12, pady=(5, 8))
+        tk.Frame(content, bg=self.BORDER, height=1).pack(
+            fill="x", pady=(2, 0))
+        foot = tk.Frame(content, bg=self.BG)
+        foot.pack(fill="x", pady=(5, 0))
         tk.Label(foot, textvariable=self.hint_var, bg=self.BG,
                  fg=self.MUTED, font=(self.FONT, 7)).pack(side="left")
-        tk.Label(foot, textvariable=self.afk_var, bg=self.BG,
-                 fg=self.MUTED, font=(self.FONT, 7)).pack(side="right")
+        self.live_label = tk.Label(
+            foot, textvariable=self.live_var, bg=self.BG, fg=self._accent,
+            font=(self.FONT, 7, "bold"))
+        self.live_label.pack(side="right")
 
-    def _metric(self, parent, column, label, value_var, sub_var):
+    def _metric(self, parent, row, column, label, value_var, sub_var):
         cell = tk.Frame(parent, bg=self.BG)
-        cell.grid(row=0, column=column, sticky="w", padx=(0, 4))
+        cell.grid(row=row, column=column, sticky="w",
+                  padx=(0, 14), pady=(0, 6))
         tk.Label(cell, text=label, bg=self.BG, fg=self.MUTED,
                  font=(self.FONT, 7, "bold")).pack(anchor="w")
         self._value_labels = getattr(self, "_value_labels", [])
         value = tk.Label(cell, textvariable=value_var, bg=self.BG,
-                         fg=self._accent, font=(self.FONT, 15, "bold"),
-                         width=7, anchor="w")
+                         fg=self._accent, font=(self.FONT, 14, "bold"),
+                         anchor="w")
         value.pack(anchor="w")
         self._value_labels.append(value)
         tk.Label(cell, textvariable=sub_var, bg=self.BG, fg=self.MUTED,
-                 font=(self.FONT, 7), width=16, anchor="w").pack(anchor="w")
+                 font=(self.FONT, 7), anchor="w").pack(anchor="w")
 
     def _apply_style(self):
         if not IS_WINDOWS or not self._hwnd:
@@ -1154,10 +1360,12 @@ class Overlay:
         except (OSError, AttributeError):
             pass
 
-    def set_hotkey_ok(self, ok):
+    def set_hotkey_ok(self, ok, label=None):
         self._hotkey_ok = bool(ok)
-        self.hint_var.set("Shift+F1 скрыть" if ok
-                          else "Shift+F1 занят")
+        if label:
+            self._hotkey_label = str(label)
+        self.hint_var.set(f"{self._hotkey_label} скрыть" if ok
+                          else f"{self._hotkey_label} занят")
 
     def apply_config(self, cfg):
         self.cfg = cfg
@@ -1165,8 +1373,14 @@ class Overlay:
         if accent != self._accent:
             self._accent = accent
             self.brand_label.configure(fg=accent)
+            self.rail.configure(bg=accent)
+            self.live_label.configure(fg=accent)
             for label in getattr(self, "_value_labels", []):
                 label.configure(fg=accent)
+        self._hotkey_label = hotkey_label((cfg or {}).get("ingame_hotkey"))
+        self.hint_var.set(f"{self._hotkey_label} скрыть"
+                          if self._hotkey_ok
+                          else f"{self._hotkey_label} занят")
 
     @property
     def visible(self):
@@ -1221,7 +1435,17 @@ class Overlay:
         else:
             self.gpu_var.set("—")
             self.gpu_sub_var.set("нет датчика")
-        self.afk_var.set(afk_text or "")
+        raw = str(afk_text or "").strip()
+        if raw.startswith("AFK:"):
+            self.afk_var.set("—")
+            self.afk_sub_var.set(raw[4:].strip() or "пауза")
+        elif raw.startswith("AFK ") and raw != "AFK выкл.":
+            self.afk_var.set(raw[4:].strip())
+            self.afk_sub_var.set("до действия")
+        else:
+            self.afk_var.set("—")
+            self.afk_sub_var.set(
+                "выкл." if raw in ("", "AFK выкл.") else raw)
 
     def set_fps(self, value):
         if not self._fps_ok():
@@ -1651,7 +1875,8 @@ class InGameHelper:
         self.island = Island(root, self.cfg)
         self.media = None
         self.events = queue.Queue()
-        self.hotkey = HotkeyThread(self.events)
+        self.hotkey = HotkeyThread(self.events,
+                                   self.cfg.get("ingame_hotkey"))
         self._desired = bool(self.cfg.get("ingame_overlay_start"))
         self._hotkey_seen = False
         self._last_seen = 0.0
@@ -1677,7 +1902,7 @@ class InGameHelper:
     def start(self):
         hotkey_ok = self.hotkey.start()
         self._hotkey_seen = hotkey_ok
-        self.overlay.set_hotkey_ok(hotkey_ok)
+        self.overlay.set_hotkey_ok(hotkey_ok, self.hotkey.label)
         if not hotkey_ok:
             helper_log(f"hotkey: {self.hotkey.error}")
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
@@ -1713,6 +1938,8 @@ class InGameHelper:
             "island": bool(self.island.visible),
             "island_desired": bool(self._desired),
             "hotkey": bool(self.hotkey.ok),
+            "hotkey_spec": self.hotkey.spec,
+            "hotkey_label": self.hotkey.label,
             "hotkey_error": "" if self.hotkey.ok else self.hotkey.error,
             "afk": bool(self.cfg.get("ingame_afk")),
             "afk_mode": self.cfg.get("ingame_afk_mode") or "mouse",
@@ -1741,9 +1968,11 @@ class InGameHelper:
                     self._toggle()
             if self.hotkey.ok != self._hotkey_seen:
                 self._hotkey_seen = bool(self.hotkey.ok)
-                self.overlay.set_hotkey_ok(self._hotkey_seen)
-                helper_log("hotkey: Shift+F1 свободен" if self._hotkey_seen
-                           else f"hotkey: {self.hotkey.error}")
+                self.overlay.set_hotkey_ok(self._hotkey_seen,
+                                           self.hotkey.label)
+                helper_log(
+                    f"hotkey: {self.hotkey.label} свободен"
+                    if self._hotkey_seen else f"hotkey: {self.hotkey.error}")
             now = time.monotonic()
             if now >= self._next_poll:
                 self._next_poll = now + 0.5
@@ -1856,12 +2085,13 @@ class InGameHelper:
         changed = any(fresh.get(key) != self.cfg.get(key) for key in (
             "ingame_overlay", "ingame_island", "ingame_afk",
             "ingame_afk_mode", "ingame_afk_key", "ingame_afk_minutes",
-            "ingame_overlay_corner", "accent"))
+            "ingame_overlay_corner", "ingame_hotkey", "accent"))
         if (fresh.get("ingame_overlay_start")
                 and not self.cfg.get("ingame_overlay_start")):
             self._desired = True
         self.cfg = fresh
         self.overlay.apply_config(fresh)
+        self._reload_hotkey()
         if fresh.get("ingame_island"):
             self._ensure_media()
         else:
@@ -1880,6 +2110,19 @@ class InGameHelper:
                 and not fresh.get("ingame_afk")):
             helper_log("функции выключены — выход")
             self.shutdown()
+
+    def _reload_hotkey(self):
+        spec = normalize_hotkey(self.cfg.get("ingame_hotkey")) or DEFAULT_HOTKEY
+        if spec == self.hotkey.spec:
+            self.overlay.set_hotkey_ok(self.hotkey.ok, self.hotkey.label)
+            return
+        self.hotkey.stop()
+        self.hotkey = HotkeyThread(self.events, spec)
+        ok = self.hotkey.start()
+        self._hotkey_seen = bool(ok)
+        self.overlay.set_hotkey_ok(ok, self.hotkey.label)
+        helper_log(f"hotkey: {self.hotkey.label} "
+                   + ("свободен" if ok else self.hotkey.error))
 
     def _afk_text(self, now):
         if not self.cfg.get("ingame_afk"):

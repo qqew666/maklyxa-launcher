@@ -976,7 +976,9 @@ class App:
         self.ingame_roblox_var = tk.StringVar(value="Roblox: не запущен")
         self.ingame_overlay_state_var = tk.StringVar(value="Оверлей: выключен")
         self.ingame_fps_var = tk.StringVar(value="FPS: —")
-        self.ingame_hotkey_var = tk.StringVar(value="Shift+F1: не проверен")
+        self.ingame_hotkey_var = tk.StringVar(
+            value=f"{ingame_mod.hotkey_label(self.cfg.get('ingame_hotkey'))}: "
+                  "не проверен")
         self.ingame_afk_state_var = tk.StringVar(value="AFK: выключен")
         self.ingame_message_var = tk.StringVar(value="")
         self._ingame_busy = False
@@ -1766,6 +1768,8 @@ class App:
         page = self.pages.get(key)
         if page is None:
             return
+        if key != "ingame" and getattr(self, "_hotkey_capture_id", None):
+            self._ingame_hotkey_cancel()
         page.tkraise()
         self.current_page = key
         canvas = self.scroll_canvases.get(key)
@@ -6102,8 +6106,8 @@ class App:
         self._page_header(
             pad, "◳", "В игре",
             "Оверлей и островок с временем и музыкой поверх Roblox по "
-            "Shift+F1, плюс AFK-режим. Помощник — отдельный процесс: "
-            "не внедряется в клиент и не меняет его файлы.")
+            "своей горячей клавише, плюс AFK-режим. Помощник — отдельный "
+            "процесс: не внедряется в клиент и не меняет его файлы.")
 
         self.var_ingame_overlay = tk.BooleanVar(
             value=bool(self.cfg.get("ingame_overlay")))
@@ -6115,6 +6119,9 @@ class App:
             value=bool(self.cfg.get("ingame_auto")))
         self.var_ingame_afk = tk.BooleanVar(
             value=bool(self.cfg.get("ingame_afk")))
+        self.hotkey_button_var = tk.StringVar(
+            value=ingame_mod.hotkey_label(self.cfg.get("ingame_hotkey")))
+        self._hotkey_capture_id = None
         mode_key = self.cfg.get("ingame_afk_mode") or "mouse"
         self.var_ingame_mode = tk.StringVar(
             value=ingame_mod.AFK_MODE_LABELS.get(mode_key,
@@ -6137,7 +6144,7 @@ class App:
                      "сквозь него в игру",
             glyph="◳")
         self._checkbox(
-            inner, "Показывать оверлей поверх Roblox (Shift+F1)",
+            inner, "Показывать оверлей поверх Roblox",
             self.var_ingame_overlay,
             command=self._ingame_feature_toggle).pack(
                 anchor="w", pady=(6, 0))
@@ -6148,39 +6155,53 @@ class App:
 
         preview_row = tk.Frame(inner, bg=c["surface"])
         preview_row.pack(fill="x", pady=(12, 0))
-        preview = tk.Frame(preview_row, bg="#0b0f14", padx=12, pady=9,
-                           highlightthickness=1, highlightbackground="#243040")
+        preview = tk.Frame(preview_row, bg="#0b0f14",
+                           highlightthickness=1,
+                           highlightbackground="#243040")
         preview.pack(side="right", anchor="n")
-        head = tk.Frame(preview, bg="#0b0f14")
+        tk.Frame(preview, bg=self.accent, width=4).pack(
+            side="left", fill="y")
+        preview_box = tk.Frame(preview, bg="#0b0f14")
+        preview_box.pack(side="left", padx=(10, 13), pady=(9, 8))
+        head = tk.Frame(preview_box, bg="#0b0f14")
         head.pack(fill="x")
         tk.Label(head, text="MAKLYXA", bg="#0b0f14", fg=self.accent,
                  font=(UI_FONT, 8, "bold")).pack(side="left")
-        tk.Label(head, text="  IN-GAME", bg="#0b0f14", fg="#8fa3b8",
+        tk.Label(head, text="  HUD", bg="#0b0f14", fg="#8fa3b8",
                  font=(UI_FONT, 8, "bold")).pack(side="left")
         tk.Label(head, text="21:40:05", bg="#0b0f14", fg="#e7eef7",
-                 font=(UI_FONT, 10, "bold")).pack(side="right")
-        tk.Frame(preview, bg="#243040", height=1).pack(fill="x", pady=(6, 5))
-        metrics = tk.Frame(preview, bg="#0b0f14")
+                 font=(UI_FONT, 14, "bold")).pack(side="right")
+        tk.Frame(preview_box, bg="#243040", height=1).pack(
+            fill="x", pady=(6, 8))
+        metrics = tk.Frame(preview_box, bg="#0b0f14")
         metrics.pack(fill="x")
-        for title, value, sub in (
+        for column in range(2):
+            metrics.grid_columnconfigure(column, weight=1, uniform="prev")
+        for index, (title, value, sub) in enumerate((
                 ("FPS", "60", "кадры игры"),
-                ("GPU", "52°C", "1.2 ГБ"),
-                ("ПАМЯТЬ", "43%", "13.7 / 31.9 ГБ")):
+                ("GPU", "52°C", "52% · 1.2 ГБ"),
+                ("ПАМЯТЬ", "43%", "13.7 / 31.9 ГБ"),
+                ("AFK", "4:59", "до действия"))):
             cell = tk.Frame(metrics, bg="#0b0f14")
-            cell.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            cell.grid(row=index // 2, column=index % 2, sticky="w",
+                      padx=(0, 16), pady=(0, 6))
             tk.Label(cell, text=title, bg="#0b0f14", fg="#8fa3b8",
                      font=(UI_FONT, 7, "bold"), anchor="w").pack(fill="x")
             tk.Label(cell, text=value, bg="#0b0f14", fg=self.accent,
-                     font=(UI_FONT, 14, "bold"), anchor="w").pack(fill="x")
+                     font=(UI_FONT, 13, "bold"), anchor="w").pack(fill="x")
             tk.Label(cell, text=sub, bg="#0b0f14", fg="#8fa3b8",
                      font=(UI_FONT, 7), anchor="w").pack(fill="x")
-        foot = tk.Frame(preview, bg="#0b0f14")
-        foot.pack(fill="x", pady=(4, 0))
-        tk.Label(foot, text="Shift+F1 скрыть", bg="#0b0f14", fg="#8fa3b8",
+        tk.Frame(preview_box, bg="#243040", height=1).pack(
+            fill="x", pady=(2, 0))
+        foot = tk.Frame(preview_box, bg="#0b0f14")
+        foot.pack(fill="x", pady=(5, 0))
+        tk.Label(foot,
+                 text=f"{ingame_mod.hotkey_label(self.cfg.get('ingame_hotkey'))} скрыть",
+                 bg="#0b0f14", fg="#8fa3b8",
                  font=(UI_FONT, 7)).pack(side="left")
-        tk.Label(foot, text="AFK 4:59", bg="#0b0f14", fg="#8fa3b8",
-                 font=(UI_FONT, 7)).pack(side="right")
-        tk.Label(preview, text="пример оформления", bg="#0b0f14",
+        tk.Label(foot, text="● LIVE", bg="#0b0f14", fg=self.accent,
+                 font=(UI_FONT, 7, "bold")).pack(side="right")
+        tk.Label(preview_box, text="пример оформления", bg="#0b0f14",
                  fg="#5d7186", font=(UI_FONT, 7)).pack(anchor="e",
                                                       pady=(4, 0))
 
@@ -6191,12 +6212,14 @@ class App:
                  anchor="w").pack(fill="x")
         tk.Label(
             note,
-            text="FPS настоящий: помощник читает счётчик кадров Windows "
-                 "(WDDM) для процесса Roblox — без внедрения, без чтения "
-                 "памяти игры. Значение обновляется раз в полсекунды; «—» "
-                 "появится, только если драйвер не отдаёт статистику.\n"
-                 "Температура GPU — NVIDIA через NVML; RAM и время тоже "
-                 "настоящие.",
+            text="Сетка 2×2: FPS, GPU, память и AFK-таймер, сверху крупные "
+                 "часы с акцентной полосой. FPS настоящий: помощник читает "
+                 "счётчик кадров Windows (WDDM) для процесса Roblox — без "
+                 "внедрения, без чтения памяти игры. Значение обновляется "
+                 "раз в полсекунды; «—» появится, только если драйвер не "
+                 "отдаёт статистику.\n"
+                 "Температура GPU — NVIDIA через NVML; RAM, время и "
+                 "AFK-таймер тоже настоящие.",
             bg=c["surface"], fg=c["text"], font=(UI_FONT, 9),
             anchor="w", justify="left", wraplength=400).pack(
                 fill="x", pady=(6, 0))
@@ -6215,6 +6238,23 @@ class App:
                                       self._save_ingame_cfg)
         self.combo_ingame_corner.pack(side="left", padx=(12, 0))
 
+        row_bind = tk.Frame(inner, bg=c["surface"])
+        row_bind.pack(fill="x", pady=(10, 0))
+        tk.Label(row_bind, text="Горячая клавиша", bg=c["surface"],
+                 fg=c["text"], font=(UI_FONT, 10)).pack(side="left")
+        self.btn_ingame_hotkey = self._button(
+            row_bind, "", self._ingame_hotkey_capture, side="left", padx=12,
+            textvariable=self.hotkey_button_var)
+        self._button(row_bind, "Сброс", self._ingame_hotkey_reset,
+                     side="left")
+        self._hint(
+            inner,
+            "Нажми «Горячая клавиша», затем комбинацию с Ctrl, Alt, Shift "
+            "или Win — например Ctrl+Shift+H. Esc отменяет запись. "
+            "Комбинация действует глобально, пока работает помощник: "
+            "если её занял другой программой, помощник сообщит об этом.",
+            wrap=560)
+
         row_overlay = tk.Frame(inner, bg=c["surface"])
         row_overlay.pack(fill="x", pady=(10, 0))
         self.btn_ingame_overlay = self._button(
@@ -6224,8 +6264,9 @@ class App:
             inner,
             "Оверлей виден только когда окно Roblox активно. Помощник "
             "запускается автоматически, как только Roblox открывается; "
-            "Shift+F1 переключает оверлей глобально. Если комбинацию занял "
-            "другой программой — пользуйся кнопкой.", wrap=560)
+            "своя горячая клавиша переключает оверлей глобально. Если "
+            "комбинацию занял другой программой — пользуйся кнопкой.",
+            wrap=560)
 
         # -- островок
         island = self._card(
@@ -6234,7 +6275,7 @@ class App:
                      "музыка — название трека и обложка",
             glyph="◒")
         self._checkbox(
-            island, "Показывать островок (Shift+F1 вместе с оверлеем)",
+            island, "Показывать островок (вместе с оверлеем)",
             self.var_ingame_island,
             command=self._ingame_feature_toggle).pack(
                 anchor="w", pady=(6, 0))
@@ -6442,6 +6483,67 @@ class App:
         self._ingame_update_controls()
         self.log("In-game: настройки обновлены")
 
+    def _ingame_hotkey_capture(self):
+        if getattr(self, "_hotkey_capture_id", None):
+            self._ingame_hotkey_cancel()
+            self.ingame_message_var.set("Запись комбинации отменена")
+            return
+        try:
+            self._hotkey_capture_id = self.root.bind(
+                "<KeyPress>", self._ingame_hotkey_key, add="+")
+            self.root.focus_set()
+        except tk.TclError:
+            self._hotkey_capture_id = None
+            return
+        self.hotkey_button_var.set("Нажми комбинацию…")
+        self.ingame_message_var.set(
+            "Нажми Ctrl, Alt, Shift или Win вместе с клавишей. "
+            "Esc — отмена")
+
+    def _ingame_hotkey_cancel(self):
+        capture_id = getattr(self, "_hotkey_capture_id", None)
+        if capture_id:
+            try:
+                self.root.unbind("<KeyPress>", capture_id)
+            except tk.TclError:
+                pass
+        self._hotkey_capture_id = None
+        if hasattr(self, "hotkey_button_var"):
+            self.hotkey_button_var.set(
+                ingame_mod.hotkey_label(self.cfg.get("ingame_hotkey")))
+
+    def _ingame_hotkey_key(self, event):
+        if not getattr(self, "_hotkey_capture_id", None):
+            return None
+        if str(event.keysym or "").lower() == "escape":
+            self._ingame_hotkey_cancel()
+            self.ingame_message_var.set("Запись комбинации отменена")
+            return "break"
+        key = ingame_mod.key_from_keysym(event.keysym)
+        if key is None:
+            return "break"
+        mods = ingame_mod.pressed_hotkey_modifiers()
+        if not mods:
+            self.ingame_message_var.set(
+                "Нужен хотя бы один модификатор: Ctrl, Alt, Shift или Win")
+            return "break"
+        spec = ingame_mod.normalize_hotkey("+".join(mods + [key]))
+        if spec:
+            self._ingame_apply_hotkey(spec)
+        return "break"
+
+    def _ingame_hotkey_reset(self):
+        self._ingame_apply_hotkey(ingame_mod.DEFAULT_HOTKEY)
+
+    def _ingame_apply_hotkey(self, spec):
+        normalized = (ingame_mod.normalize_hotkey(spec)
+                      or ingame_mod.DEFAULT_HOTKEY)
+        self._ingame_hotkey_cancel()
+        self.cfg["ingame_hotkey"] = normalized
+        label = ingame_mod.hotkey_label(normalized)
+        self.hotkey_button_var.set(label)
+        self._save_ingame_cfg(message=f"Горячая клавиша: {label}")
+
     def _ingame_feature_toggle(self):
         if self.var_ingame_overlay.get() or self.var_ingame_island.get():
             self.var_ingame_start.set(True)
@@ -6512,6 +6614,9 @@ class App:
             running = False
         status = ingame_mod.read_status(max_age=6) if running else None
         self._ingame_last = status
+        hotkey_name = ingame_mod.hotkey_label(
+            (status or {}).get("hotkey_spec")
+            or self.cfg.get("ingame_hotkey"))
         if running:
             pid = (status or {}).get("pid")
             self.ingame_helper_var.set(
@@ -6524,7 +6629,7 @@ class App:
                 self.ingame_roblox_var.set("Roblox: нет ответа")
                 self.ingame_overlay_state_var.set("Оверлей: нет данных")
                 self.ingame_fps_var.set("FPS: нет данных")
-                self.ingame_hotkey_var.set("Shift+F1: нет данных")
+                self.ingame_hotkey_var.set(f"{hotkey_name}: нет данных")
                 self.ingame_afk_state_var.set("AFK: нет данных")
             else:
                 self.ingame_roblox_var.set("Roblox: не запущен")
@@ -6532,7 +6637,8 @@ class App:
                     "Оверлей: выключен" if not self.cfg.get("ingame_overlay")
                     else "Оверлей: помощник не запущен")
                 self.ingame_fps_var.set("FPS: —")
-                self.ingame_hotkey_var.set("Shift+F1: помощник не запущен")
+                self.ingame_hotkey_var.set(
+                    f"{hotkey_name}: помощник не запущен")
                 self.ingame_afk_state_var.set(
                     "AFK: выключен" if not self.cfg.get("ingame_afk")
                     else "AFK: помощник не запущен")
@@ -6551,15 +6657,15 @@ class App:
             elif status.get("overlay_desired"):
                 overlay = "Оверлей: ждёт Roblox в фокусе"
             else:
-                overlay = "Оверлей: скрыт (Shift+F1)"
+                overlay = f"Оверлей: скрыт ({hotkey_name})"
             self.ingame_overlay_state_var.set(overlay)
             fps_value = status.get("fps") if status.get("overlay") else None
             self.ingame_fps_var.set(
                 f"FPS: {int(fps_value)}" if isinstance(fps_value, int)
                 else "FPS: —")
             self.ingame_hotkey_var.set(
-                "Shift+F1: свободен" if status.get("hotkey")
-                else "Shift+F1: занят другой программой")
+                f"{hotkey_name}: свободен" if status.get("hotkey")
+                else f"{hotkey_name}: занят другой программой")
             if not self.cfg.get("ingame_afk"):
                 afk = "AFK: выключен"
             elif not status.get("roblox"):
@@ -9407,6 +9513,34 @@ def run_selftest():
                 failures.append(
                     f"format_countdown({seconds!r}): {got!r} != {want!r}")
 
+        hotkey_cases = [
+            ("Shift+F1", "shift+f1"),
+            ("Ctrl + Shift + H", "ctrl+shift+h"),
+            ("alt+ctrl+o", "ctrl+alt+o"),
+            ("win+space", "win+space"),
+            ("F12", "f12"),
+            ("shift", None),
+            ("ctrl+shift", None),
+            ("ctrl+nope", None),
+            ("", None),
+        ]
+        for raw, want in hotkey_cases:
+            got = ingame_module.normalize_hotkey(raw)
+            if got != want:
+                failures.append(
+                    f"normalize_hotkey({raw!r}): {got!r} != {want!r}")
+        if ingame_module.hotkey_label("ctrl+shift+h") != "Ctrl+Shift+H":
+            failures.append("hotkey_label: Ctrl+Shift+H")
+        if ingame_module.hotkey_parts("shift+f1") != (
+                ingame_module.MOD_SHIFT, 0x70):
+            failures.append("hotkey_parts: shift+f1")
+        if ingame_module.key_from_keysym("Prior") != "pageup":
+            failures.append("key_from_keysym: Prior")
+        if ingame_module.key_from_keysym("Control_L") is not None:
+            failures.append("key_from_keysym: модификатор не отброшен")
+        if not isinstance(ingame_module.pressed_hotkey_modifiers(), list):
+            failures.append("pressed_hotkey_modifiers: не список")
+
         if ingame_module.afk_interval_seconds(5, jitter=False) != 300:
             failures.append("afk_interval: 5 минут != 300 с")
         if ingame_module.afk_interval_seconds(1, jitter=False) != 60:
@@ -9644,7 +9778,8 @@ def run_selftest():
                      "combo_ingame_key", "combo_ingame_minutes",
                      "ingame_helper_var", "ingame_fps_var",
                      "btn_ingame_start", "btn_ingame_stop",
-                     "btn_ingame_overlay"):
+                     "btn_ingame_overlay", "btn_ingame_hotkey",
+                     "hotkey_button_var"):
             if not hasattr(app, attr):
                 failures.append(f"UI: нет поля «В игре» {attr}")
         if not app.ingame_fps_var.get().startswith("FPS:"):
@@ -9656,6 +9791,32 @@ def run_selftest():
         root.update()
         if not app.ingame_helper_var.get():
             failures.append("UI: пустой статус помощника")
+        original_hotkey = app.cfg.get("ingame_hotkey") or "shift+f1"
+        original_mods = ingame_mod.pressed_hotkey_modifiers
+        try:
+            ingame_mod.pressed_hotkey_modifiers = lambda: ["ctrl", "shift"]
+
+            class _FakeKey:
+                keysym = "h"
+
+            app._ingame_hotkey_capture()
+            app._ingame_hotkey_key(_FakeKey())
+            if app.cfg.get("ingame_hotkey") != "ctrl+shift+h":
+                failures.append(
+                    f"UI «В игре»: бинд {app.cfg.get('ingame_hotkey')!r}")
+            if app.hotkey_button_var.get() != "Ctrl+Shift+H":
+                failures.append(
+                    f"UI «В игре»: кнопка бинда "
+                    f"{app.hotkey_button_var.get()!r}")
+            if app._hotkey_capture_id:
+                failures.append("UI «В игре»: запись бинда не завершилась")
+        finally:
+            ingame_mod.pressed_hotkey_modifiers = original_mods
+            app._ingame_hotkey_cancel()
+            app.cfg["ingame_hotkey"] = original_hotkey
+            app.hotkey_button_var.set(
+                ingame_mod.hotkey_label(original_hotkey))
+            save_config(app.cfg)
         for combo, label in ((app.combo_ingame_mode, "режим"),
                              (app.combo_ingame_key, "клавиша"),
                              (app.combo_ingame_minutes, "интервал")):
