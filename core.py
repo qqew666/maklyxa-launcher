@@ -48,7 +48,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.9.3"
+VERSION = "1.9.4"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -225,6 +225,8 @@ DEFAULT_CONFIG = {
     "ingame_overlay_start": False,
     "ingame_overlay_corner": "tr",
     "ingame_hotkey": "shift+f1",
+    "ingame_clock": False,
+    "ingame_clock_hotkey": "shift+f3",
     "ingame_auto": True,
     "ingame_afk": False,
     "ingame_afk_mode": "mouse",
@@ -356,7 +358,7 @@ def load_config(path=None):
                  "apply_flags_on_launch", "use_custom_cursors",
                  "discord_rpc", "launch_sound", "error_sound",
                  "ingame_overlay", "ingame_island",
-                 "ingame_overlay_start",
+                 "ingame_overlay_start", "ingame_clock",
                  "ingame_auto", "ingame_afk"):
         cfg[flag] = bool(cfg.get(flag))
     corner = str(cfg.get("ingame_overlay_corner") or "").lower()
@@ -365,6 +367,13 @@ def load_config(path=None):
     hotkey = re.sub(r"\s+", "", str(cfg.get("ingame_hotkey") or "").lower())
     cfg["ingame_hotkey"] = (
         hotkey if re.fullmatch(r"[a-z0-9+]{3,48}", hotkey) else "shift+f1")
+    clock_hotkey = re.sub(
+        r"\s+", "", str(cfg.get("ingame_clock_hotkey") or "").lower())
+    cfg["ingame_clock_hotkey"] = (
+        clock_hotkey if re.fullmatch(r"[a-z0-9+]{3,48}", clock_hotkey)
+        else "shift+f3")
+    if cfg["ingame_clock_hotkey"] == cfg["ingame_hotkey"]:
+        cfg["ingame_clock_hotkey"] = "shift+f3"
     afk_mode = str(cfg.get("ingame_afk_mode") or "").lower()
     cfg["ingame_afk_mode"] = (
         afk_mode if afk_mode in ("mouse", "key") else "mouse")

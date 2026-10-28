@@ -1054,6 +1054,7 @@ class App:
             value=f"{ingame_mod.hotkey_label(self.cfg.get('ingame_hotkey'))}: "
                   "не проверен")
         self.ingame_afk_state_var = tk.StringVar(value="AFK: выключен")
+        self.ingame_clock_state_var = tk.StringVar(value="Часы: выключены")
         self.ingame_message_var = tk.StringVar(value="")
         self._ingame_busy = False
         self._ingame_last = None
@@ -6213,9 +6214,10 @@ class App:
 
         self._page_header(
             pad, "◳", "В игре",
-            "Оверлей и островок с временем и музыкой поверх Roblox по "
-            "своей горячей клавише, плюс AFK-режим. Помощник — отдельный "
-            "процесс: не внедряется в клиент и не меняет его файлы.")
+            "Оверлей, островок с музыкой и отдельные часы поверх Roblox "
+            "по своим горячим клавишам, плюс AFK-режим. Помощник — "
+            "отдельный процесс: не внедряется в клиент и не меняет его "
+            "файлы.")
 
         self.var_ingame_overlay = tk.BooleanVar(
             value=bool(self.cfg.get("ingame_overlay")))
@@ -6223,13 +6225,19 @@ class App:
             value=bool(self.cfg.get("ingame_island")))
         self.var_ingame_start = tk.BooleanVar(
             value=bool(self.cfg.get("ingame_overlay_start")))
+        self.var_ingame_clock = tk.BooleanVar(
+            value=bool(self.cfg.get("ingame_clock")))
         self.var_ingame_auto = tk.BooleanVar(
             value=bool(self.cfg.get("ingame_auto")))
         self.var_ingame_afk = tk.BooleanVar(
             value=bool(self.cfg.get("ingame_afk")))
         self.hotkey_button_var = tk.StringVar(
             value=ingame_mod.hotkey_label(self.cfg.get("ingame_hotkey")))
+        self.clock_hotkey_button_var = tk.StringVar(
+            value=ingame_mod.hotkey_label(
+                self.cfg.get("ingame_clock_hotkey")))
         self._hotkey_capture_id = None
+        self._hotkey_capture_target = None
         mode_key = self.cfg.get("ingame_afk_mode") or "mouse"
         self.var_ingame_mode = tk.StringVar(
             value=ingame_mod.AFK_MODE_LABELS.get(mode_key,
@@ -6376,17 +6384,35 @@ class App:
             "комбинацию занял другой программой — пользуйся кнопкой.",
             wrap=560)
 
-        # -- островок
+        # -- островок и часы
         island = self._card(
-            pad, title="Островок",
+            pad, title="Островок и часы",
             subtitle="Пилюля сверху по центру игры: время, а если играет "
-                     "музыка — название трека и обложка",
+                     "музыка — название трека и обложка. Часы можно "
+                     "показывать отдельно и со своим биндом",
             glyph="◒")
         self._checkbox(
             island, "Показывать островок (вместе с оверлеем)",
             self.var_ingame_island,
             command=self._ingame_feature_toggle).pack(
                 anchor="w", pady=(6, 0))
+        self._checkbox(
+            island, "Отдельные часы поверх Roblox",
+            self.var_ingame_clock,
+            command=self._ingame_feature_toggle).pack(
+                anchor="w", pady=(5, 0))
+
+        row_clock = tk.Frame(island, bg=c["surface"])
+        row_clock.pack(fill="x", pady=(10, 0))
+        tk.Label(row_clock, text="Бинд часов", bg=c["surface"],
+                 fg=c["text"], font=(UI_FONT, 10)).pack(side="left")
+        self.btn_ingame_clock_hotkey = self._button(
+            row_clock, "", lambda: self._ingame_hotkey_capture("clock"),
+            side="left", padx=12,
+            textvariable=self.clock_hotkey_button_var)
+        self._button(row_clock, "Сброс",
+                     lambda: self._ingame_hotkey_reset("clock"),
+                     side="left")
 
         preview = tk.Frame(island, bg=c["surface2"], padx=12, pady=12)
         preview.pack(fill="x", pady=(10, 0))
@@ -6418,7 +6444,10 @@ class App:
             "браузер, проигрыватель. Помощник не подключается к аккаунтам "
             "и не читает файлы музыки: только название, исполнитель и "
             "обложку, которые Windows и так показывает в оверлее громкости. "
-            "Когда музыка на паузе, островок показывает только время.",
+            "Когда музыка на паузе, островок показывает только время. "
+            "«Отдельные часы» — своя пилюля с секундами: включаются сразу "
+            "и переключаются только своим биндом, не трогая оверлей "
+            "и островок.",
             wrap=560)
 
         # -- AFK
@@ -6499,7 +6528,8 @@ class App:
                                      self.ingame_hotkey_var,
                                      self.ingame_roblox_var,
                                      self.ingame_overlay_state_var,
-                                     self.ingame_fps_var)):
+                                     self.ingame_fps_var,
+                                     self.ingame_clock_state_var)):
             tk.Label(state_grid, textvariable=var, bg=c["surface2"],
                      fg=c["text"], font=(UI_FONT, 9), anchor="w",
                      justify="left", wraplength=300).grid(
@@ -6562,6 +6592,7 @@ class App:
         self.cfg["ingame_overlay"] = bool(self.var_ingame_overlay.get())
         self.cfg["ingame_island"] = bool(self.var_ingame_island.get())
         self.cfg["ingame_overlay_start"] = bool(self.var_ingame_start.get())
+        self.cfg["ingame_clock"] = bool(self.var_ingame_clock.get())
         self.cfg["ingame_auto"] = bool(self.var_ingame_auto.get())
         self.cfg["ingame_afk"] = bool(self.var_ingame_afk.get())
         corner = ingame_mod.CORNER_BY_LABEL.get(
@@ -6591,7 +6622,7 @@ class App:
         self._ingame_update_controls()
         self.log("In-game: настройки обновлены")
 
-    def _ingame_hotkey_capture(self):
+    def _ingame_hotkey_capture(self, target="main"):
         if getattr(self, "_hotkey_capture_id", None):
             self._ingame_hotkey_cancel()
             self.ingame_message_var.set("Запись комбинации отменена")
@@ -6603,10 +6634,17 @@ class App:
         except tk.TclError:
             self._hotkey_capture_id = None
             return
-        self.hotkey_button_var.set("Нажми комбинацию…")
+        self._hotkey_capture_target = (
+            "clock" if target == "clock" else "main")
+        self._clock_or_main_button_var().set("Нажми комбинацию…")
         self.ingame_message_var.set(
             "Нажми Ctrl, Alt, Shift или Win вместе с клавишей. "
             "Esc — отмена")
+
+    def _clock_or_main_button_var(self):
+        if getattr(self, "_hotkey_capture_target", None) == "clock":
+            return self.clock_hotkey_button_var
+        return self.hotkey_button_var
 
     def _ingame_hotkey_cancel(self):
         capture_id = getattr(self, "_hotkey_capture_id", None)
@@ -6616,9 +6654,14 @@ class App:
             except tk.TclError:
                 pass
         self._hotkey_capture_id = None
+        self._hotkey_capture_target = None
         if hasattr(self, "hotkey_button_var"):
             self.hotkey_button_var.set(
                 ingame_mod.hotkey_label(self.cfg.get("ingame_hotkey")))
+        if hasattr(self, "clock_hotkey_button_var"):
+            self.clock_hotkey_button_var.set(
+                ingame_mod.hotkey_label(
+                    self.cfg.get("ingame_clock_hotkey")))
 
     def _ingame_hotkey_key(self, event):
         if not getattr(self, "_hotkey_capture_id", None):
@@ -6637,13 +6680,25 @@ class App:
             return "break"
         spec = ingame_mod.normalize_hotkey("+".join(mods + [key]))
         if spec:
-            self._ingame_apply_hotkey(spec)
+            self._ingame_apply_hotkey(
+                spec, self._hotkey_capture_target or "main")
         return "break"
 
-    def _ingame_hotkey_reset(self):
-        self._ingame_apply_hotkey(ingame_mod.DEFAULT_HOTKEY)
+    def _ingame_hotkey_reset(self, target="main"):
+        self._ingame_apply_hotkey(
+            ingame_mod.DEFAULT_CLOCK_HOTKEY if target == "clock"
+            else ingame_mod.DEFAULT_HOTKEY, target)
 
-    def _ingame_apply_hotkey(self, spec):
+    def _ingame_apply_hotkey(self, spec, target="main"):
+        if target == "clock":
+            normalized = (ingame_mod.normalize_hotkey(spec)
+                          or ingame_mod.DEFAULT_CLOCK_HOTKEY)
+            self._ingame_hotkey_cancel()
+            self.cfg["ingame_clock_hotkey"] = normalized
+            label = ingame_mod.hotkey_label(normalized)
+            self.clock_hotkey_button_var.set(label)
+            self._save_ingame_cfg(message=f"Бинд часов: {label}")
+            return
         normalized = (ingame_mod.normalize_hotkey(spec)
                       or ingame_mod.DEFAULT_HOTKEY)
         self._ingame_hotkey_cancel()
@@ -6653,10 +6708,12 @@ class App:
         self._save_ingame_cfg(message=f"Горячая клавиша: {label}")
 
     def _ingame_feature_toggle(self):
-        if self.var_ingame_overlay.get() or self.var_ingame_island.get():
+        if (self.var_ingame_overlay.get() or self.var_ingame_island.get()
+                or self.var_ingame_clock.get()):
             self.var_ingame_start.set(True)
         self._save_ingame_cfg()
         if (self.var_ingame_overlay.get() or self.var_ingame_island.get()
+                or self.var_ingame_clock.get()
                 or self.var_ingame_afk.get()):
             self._maybe_start_ingame_helper(force=True)
 
@@ -6665,6 +6722,7 @@ class App:
             return
         if not (self.cfg.get("ingame_overlay")
                 or self.cfg.get("ingame_island")
+                or self.cfg.get("ingame_clock")
                 or self.cfg.get("ingame_afk")):
             return
         if ingame_mod.helper_running():
@@ -6725,6 +6783,9 @@ class App:
         hotkey_name = ingame_mod.hotkey_label(
             (status or {}).get("hotkey_spec")
             or self.cfg.get("ingame_hotkey"))
+        clock_name = ingame_mod.hotkey_label(
+            (status or {}).get("clock_hotkey_spec")
+            or self.cfg.get("ingame_clock_hotkey"))
         if running:
             pid = (status or {}).get("pid")
             self.ingame_helper_var.set(
@@ -6739,6 +6800,7 @@ class App:
                 self.ingame_fps_var.set("FPS: нет данных")
                 self.ingame_hotkey_var.set(f"{hotkey_name}: нет данных")
                 self.ingame_afk_state_var.set("AFK: нет данных")
+                self.ingame_clock_state_var.set("Часы: нет данных")
             else:
                 self.ingame_roblox_var.set("Roblox: не запущен")
                 self.ingame_overlay_state_var.set(
@@ -6750,6 +6812,9 @@ class App:
                 self.ingame_afk_state_var.set(
                     "AFK: выключен" if not self.cfg.get("ingame_afk")
                     else "AFK: помощник не запущен")
+                self.ingame_clock_state_var.set(
+                    "Часы: выключены" if not self.cfg.get("ingame_clock")
+                    else "Часы: помощник не запущен")
         else:
             if status.get("foreground"):
                 roblox = "Roblox: в фокусе"
@@ -6786,6 +6851,15 @@ class App:
                 afk = ("AFK: действие через "
                        + ingame_mod.format_countdown(status["afk_next_in"]))
             self.ingame_afk_state_var.set(afk)
+            if not self.cfg.get("ingame_clock"):
+                clock = "Часы: выключены"
+            elif status.get("clock"):
+                clock = f"Часы: показаны ({clock_name})"
+            elif status.get("clock_desired"):
+                clock = "Часы: ждут Roblox в фокусе"
+            else:
+                clock = f"Часы: скрыты ({clock_name})"
+            self.ingame_clock_state_var.set(clock)
         self._ingame_update_controls()
 
     def _poll_ingame_status(self):
@@ -6795,6 +6869,8 @@ class App:
         if (self.interactive and not self._ingame_busy
                 and not self._ingame_user_stopped
                 and (self.cfg.get("ingame_overlay")
+                     or self.cfg.get("ingame_island")
+                     or self.cfg.get("ingame_clock")
                      or self.cfg.get("ingame_afk"))
                 and self.cfg.get("ingame_auto")
                 and not ingame_mod.helper_running()
@@ -6808,9 +6884,10 @@ class App:
             return
         if not (self.cfg.get("ingame_overlay")
                 or self.cfg.get("ingame_island")
+                or self.cfg.get("ingame_clock")
                 or self.cfg.get("ingame_afk")):
             self.ingame_message_var.set(
-                "Сначала включи оверлей, островок или AFK-режим")
+                "Сначала включи оверлей, островок, часы или AFK-режим")
             return
         self._ingame_user_stopped = False
         if ingame_mod.helper_running():
@@ -8789,6 +8866,7 @@ def run_selftest():
                 "ingame_afk_mode": "teleport",
                 "ingame_afk_key": "Space!!!",
                 "ingame_afk_minutes": 99,
+                "ingame_clock_hotkey": "Shift + F4",
             }), encoding="utf-8")
             ingame_cfg = load_config(path=ingame_path)
             expected_ingame = {
@@ -8798,6 +8876,8 @@ def run_selftest():
                 "ingame_afk_minutes": 15,
                 "ingame_overlay": True,
                 "ingame_afk": False,
+                "ingame_clock": False,
+                "ingame_clock_hotkey": "shift+f4",
             }
             for key, want in expected_ingame.items():
                 if ingame_cfg.get(key) != want:
@@ -8809,6 +8889,8 @@ def run_selftest():
                 "ingame_auto": None, "ingame_afk": "да",
                 "ingame_afk_minutes": "abc",
                 "ingame_overlay_corner": "BL",
+                "ingame_clock": 1,
+                "ingame_clock_hotkey": "!!",
             }), encoding="utf-8")
             ingame_cfg = load_config(path=ingame_path)
             if ingame_cfg["ingame_overlay"] or not ingame_cfg[
@@ -8817,6 +8899,12 @@ def run_selftest():
                     "config in-game: булевы флаги разобраны неверно "
                     f"{ingame_cfg['ingame_overlay']} / "
                     f"{ingame_cfg['ingame_overlay_start']}")
+            if not ingame_cfg["ingame_clock"]:
+                failures.append("config in-game: флаг часов потерялся")
+            if ingame_cfg["ingame_clock_hotkey"] != "shift+f3":
+                failures.append(
+                    "config in-game: битый бинд часов "
+                    f"{ingame_cfg['ingame_clock_hotkey']!r}")
             if ingame_cfg["ingame_afk_minutes"] != 5:
                 failures.append(
                     "config in-game: битые минуты "
@@ -10271,14 +10359,16 @@ def run_selftest():
             app.var_discord_rpc.set(bool(before_save["discord_rpc"]))
 
         for attr in ("var_ingame_overlay", "var_ingame_island",
-                     "var_ingame_start",
+                     "var_ingame_start", "var_ingame_clock",
                      "var_ingame_afk", "var_ingame_auto",
                      "combo_ingame_corner", "combo_ingame_mode",
                      "combo_ingame_key", "combo_ingame_minutes",
                      "ingame_helper_var", "ingame_fps_var",
+                     "ingame_clock_state_var",
                      "btn_ingame_start", "btn_ingame_stop",
                      "btn_ingame_overlay", "btn_ingame_hotkey",
-                     "hotkey_button_var"):
+                     "btn_ingame_clock_hotkey",
+                     "hotkey_button_var", "clock_hotkey_button_var"):
             if not hasattr(app, attr):
                 failures.append(f"UI: нет поля «В игре» {attr}")
         if not app.ingame_fps_var.get().startswith("FPS:"):
@@ -10291,6 +10381,8 @@ def run_selftest():
         if not app.ingame_helper_var.get():
             failures.append("UI: пустой статус помощника")
         original_hotkey = app.cfg.get("ingame_hotkey") or "shift+f1"
+        original_clock_hotkey = (app.cfg.get("ingame_clock_hotkey")
+                                 or "shift+f2")
         original_mods = ingame_mod.pressed_hotkey_modifiers
         try:
             ingame_mod.pressed_hotkey_modifiers = lambda: ["ctrl", "shift"]
@@ -10309,12 +10401,28 @@ def run_selftest():
                     f"{app.hotkey_button_var.get()!r}")
             if app._hotkey_capture_id:
                 failures.append("UI «В игре»: запись бинда не завершилась")
+            app._ingame_hotkey_capture("clock")
+            app._ingame_hotkey_key(_FakeKey())
+            if app.cfg.get("ingame_clock_hotkey") != "ctrl+shift+h":
+                failures.append(
+                    "UI «В игре»: бинд часов "
+                    f"{app.cfg.get('ingame_clock_hotkey')!r}")
+            if app.clock_hotkey_button_var.get() != "Ctrl+Shift+H":
+                failures.append(
+                    "UI «В игре»: кнопка бинда часов "
+                    f"{app.clock_hotkey_button_var.get()!r}")
+            if app.cfg.get("ingame_hotkey") != "ctrl+shift+h":
+                failures.append(
+                    "UI «В игре»: бинд часов испортил бинд оверлея")
         finally:
             ingame_mod.pressed_hotkey_modifiers = original_mods
             app._ingame_hotkey_cancel()
             app.cfg["ingame_hotkey"] = original_hotkey
+            app.cfg["ingame_clock_hotkey"] = original_clock_hotkey
             app.hotkey_button_var.set(
                 ingame_mod.hotkey_label(original_hotkey))
+            app.clock_hotkey_button_var.set(
+                ingame_mod.hotkey_label(original_clock_hotkey))
             save_config(app.cfg)
         for combo, label in ((app.combo_ingame_mode, "режим"),
                              (app.combo_ingame_key, "клавиша"),
@@ -10328,6 +10436,7 @@ def run_selftest():
         app.var_ingame_overlay.set(True)
         app.var_ingame_island.set(True)
         app.var_ingame_start.set(True)
+        app.var_ingame_clock.set(True)
         app.var_ingame_afk.set(True)
         app.var_ingame_auto.set(True)
         app.combo_ingame_corner.set("Слева снизу")
@@ -10339,7 +10448,7 @@ def run_selftest():
         saved_ingame = load_config()
         expected_saved = {
             "ingame_overlay": True, "ingame_island": True,
-            "ingame_overlay_start": True,
+            "ingame_overlay_start": True, "ingame_clock": True,
             "ingame_afk": True, "ingame_auto": True,
             "ingame_overlay_corner": "bl", "ingame_afk_mode": "key",
             "ingame_afk_key": "x", "ingame_afk_minutes": 7,

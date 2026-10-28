@@ -49,6 +49,7 @@ IS_WINDOWS = os.name == "nt"
 STOP_EVENT = r"Local\MaklyxaLauncherInGameStop_v1"
 TOGGLE_EVENT = r"Local\MaklyxaLauncherInGameToggle_v1"
 HOTKEY_ID = 0xB10
+HOTKEY_ID_CLOCK = 0xB11
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
@@ -110,6 +111,7 @@ AFK_MODE_LABELS = {
 AFK_MODE_BY_LABEL = {label: key for key, label in AFK_MODE_LABELS.items()}
 
 DEFAULT_HOTKEY = "shift+f1"
+DEFAULT_CLOCK_HOTKEY = "shift+f3"
 HOTKEY_MOD_ORDER = ("ctrl", "alt", "shift", "win")
 HOTKEY_MODS = {
     "ctrl": MOD_CONTROL,
@@ -1100,9 +1102,12 @@ def send_micro_action(mode="mouse", key="space"):
 
 
 class HotkeyThread:
-    def __init__(self, events, spec=DEFAULT_HOTKEY):
+    def __init__(self, events, spec=DEFAULT_HOTKEY, hotkey_id=HOTKEY_ID,
+                 event="toggle"):
         self.events = events
         self.spec = normalize_hotkey(spec) or DEFAULT_HOTKEY
+        self.hotkey_id = int(hotkey_id)
+        self.event = str(event)
         self.ok = False
         self.error = ""
         self._thread = None
@@ -1134,7 +1139,7 @@ class HotkeyThread:
         mods, key = parsed
         try:
             return bool(user32.RegisterHotKey(
-                None, HOTKEY_ID, mods | MOD_NOREPEAT, key))
+                None, self.hotkey_id, mods | MOD_NOREPEAT, key))
         except (OSError, AttributeError):
             return False
 
@@ -1161,12 +1166,12 @@ class HotkeyThread:
             result = int(user32.GetMessageW(ctypes.byref(msg), None, 0, 0))
             if result <= 0:
                 break
-            if msg.message == WM_HOTKEY and int(msg.wParam) == HOTKEY_ID:
-                self.events.put("toggle")
+            if msg.message == WM_HOTKEY and int(msg.wParam) == self.hotkey_id:
+                self.events.put(self.event)
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
         try:
-            user32.UnregisterHotKey(None, HOTKEY_ID)
+            user32.UnregisterHotKey(None, self.hotkey_id)
         except (OSError, AttributeError):
             pass
         self._registered = False
@@ -1394,7 +1399,6 @@ class Overlay:
         height = max(1, self.top.winfo_reqheight())
         corner = str(self.cfg.get("ingame_overlay_corner") or "tr")
         x, y = overlay_origin(rect, (width, height), corner)
-        self.top.geometry(f"{x:+d}{y:+d}")
         previous = (user32.GetForegroundWindow() if IS_WINDOWS else None)
         if not self._visible:
             self.top.deiconify()
@@ -1403,6 +1407,8 @@ class Overlay:
             self._visible = True
         else:
             self.top.lift()
+        # lift() откатывает ещё не применённую геометрию — ставим её после
+        self.top.geometry(f"{x:+d}{y:+d}")
         if (IS_WINDOWS and previous
                 and user32.GetForegroundWindow() != previous):
             user32.SetForegroundWindow(previous)
@@ -1840,7 +1846,6 @@ class Island:
         else:
             left, top, right = rect[0], rect[1], rect[2]
         self._rect = (left, top, right)
-        self._place()
         previous = user32.GetForegroundWindow() if IS_WINDOWS else None
         if not self._visible:
             self.top.deiconify()
@@ -1849,6 +1854,196 @@ class Island:
             self._visible = True
         else:
             self.top.lift()
+        # lift() откатывает ещё не применённую геометрию — ставим её после
+        self._place()
+        if (IS_WINDOWS and previous
+                and user32.GetForegroundWindow() != previous):
+            user32.SetForegroundWindow(previous)
+
+    def hide(self):
+        if self._visible:
+            self.top.withdraw()
+            self._visible = False
+
+    def destroy(self):
+        try:
+            self.top.destroy()
+        except tk.TclError:
+            pass
+
+
+class Clock:
+    """Отдельные часы: только время, своё окно и свой бинд."""
+
+    BG = "#0e131b"
+    BORDER = "#2c3a4c"
+    TEXT = ISLAND_TEXT
+
+    def __init__(self, root, cfg):
+        self.root = root
+        self.cfg = cfg
+        self.FONT = overlay_font(root, cfg)
+        self.clock_font = tkfont.Font(root=root, family=self.FONT,
+                                      size=15, weight="bold")
+        self.top = tk.Toplevel(root)
+        self.top.withdraw()
+        self.top.overrideredirect(True)
+        self._key_ok = False
+        try:
+            self.top.attributes("-topmost", True)
+            self.top.attributes("-alpha", 0.95)
+            self.top.attributes("-toolwindow", True)
+            self.top.attributes("-transparentcolor", ISLAND_KEY)
+            self._key_ok = True
+        except tk.TclError:
+            pass
+        self.canvas = tk.Canvas(
+            self.top, bg=ISLAND_KEY if self._key_ok else self.BG,
+            highlightthickness=0, bd=0)
+        self.canvas.pack()
+        self._visible = False
+        self._hwnd = None
+        self._root_hwnd = None
+        self._bg_photo = None
+        self._size = (0, 0)
+        self._rect = None
+        self._offset = 0
+        self._clock = ""
+        self._accent = Overlay._accent_color(cfg)
+        self._paint()
+        self.top.update_idletasks()
+        self._hwnd = int(self.top.winfo_id())
+        self._root_hwnd = int(
+            user32.GetAncestor(self._hwnd, 2) or self._hwnd) if IS_WINDOWS \
+            else self._hwnd
+        self._apply_style()
+
+    # -- отрисовка -----------------------------------------------------------
+
+    def _measure(self):
+        clock_w = self.clock_font.measure(self._clock or "00:00:00")
+        return int(clock_w) + 50, ISLAND_H
+
+    def _rounded_bg(self, width, height):
+        if Image is None or ImageTk is None:
+            return None
+        scale = 4
+        try:
+            image = Image.new("RGBA", (width * scale, height * scale),
+                              (0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            draw.rounded_rectangle(
+                (scale, scale, width * scale - scale - 1,
+                 height * scale - scale - 1),
+                radius=height * scale / 2, fill=ISLAND_BG,
+                outline=ISLAND_BORDER, width=scale)
+            base = Image.new("RGB", image.size,
+                             ISLAND_KEY if self._key_ok else self.BG)
+            base.paste(image, (0, 0), image)
+            base = base.resize((width, height), _pil_lanczos())
+            return ImageTk.PhotoImage(base)
+        except Exception:
+            return None
+
+    def _paint(self):
+        self._clock = time.strftime("%H:%M:%S")
+        width, height = self._measure()
+        self._size = (width, height)
+        self.canvas.configure(width=width, height=height)
+        self.canvas.delete("all")
+        self._bg_photo = self._rounded_bg(width, height)
+        if self._bg_photo is not None:
+            self.canvas.create_image(0, 0, anchor="nw",
+                                     image=self._bg_photo)
+        else:
+            self.canvas.create_rectangle(
+                1, 1, width - 1, height - 1, fill=self.BG,
+                outline=self.BORDER)
+        centre = height / 2
+        self.canvas.create_oval(16, centre - 3, 22, centre + 3,
+                                fill=self._accent, outline="")
+        self.canvas.create_text(32, centre, text=self._clock, anchor="w",
+                                fill=self.TEXT, font=self.clock_font)
+        if self._visible:
+            self._place()
+
+    def _place(self):
+        if not self._rect:
+            return
+        width, height = self._size
+        left, top, right = self._rect
+        x = int(left) + max(0, (int(right) - int(left) - width) // 2)
+        y = int(top) + ISLAND_TOP_MARGIN + int(self._offset)
+        self.top.geometry(f"{width}x{height}+{x}+{y}")
+
+    # -- данные --------------------------------------------------------------
+
+    def set_clock(self):
+        if time.strftime("%H:%M:%S") == self._clock:
+            return
+        self._paint()
+
+    def apply_config(self, cfg):
+        self.cfg = cfg
+        accent = Overlay._accent_color(cfg)
+        if accent != self._accent:
+            self._accent = accent
+            self._paint()
+
+    # -- окно ----------------------------------------------------------------
+
+    def _apply_style(self):
+        if not IS_WINDOWS or not self._hwnd:
+            return
+        try:
+            if ctypes.sizeof(ctypes.c_void_p) == 8:
+                get_long = user32.GetWindowLongPtrW
+                set_long = user32.SetWindowLongPtrW
+            else:
+                get_long = user32.GetWindowLongW
+                set_long = user32.SetWindowLongW
+            get_long.argtypes = [wintypes.HWND, ctypes.c_int]
+            get_long.restype = ctypes.c_ssize_t
+            set_long.argtypes = [wintypes.HWND, ctypes.c_int,
+                                 ctypes.c_ssize_t]
+            set_long.restype = ctypes.c_ssize_t
+            for hwnd in {self._hwnd, self._root_hwnd}:
+                if not hwnd:
+                    continue
+                style = int(get_long(hwnd, -20))
+                # прозрачен для кликов, не активируется, без кнопки в панели
+                style |= 0x00000020 | 0x08000000 | 0x00000080
+                set_long(hwnd, -20, style)
+            user32.SetWindowPos(
+                self._root_hwnd, ctypes.c_void_p(-1), 0, 0, 0, 0,
+                0x0001 | 0x0002 | 0x0010 | 0x0020)
+        except (OSError, AttributeError):
+            pass
+
+    @property
+    def visible(self):
+        return self._visible
+
+    def show(self, rect, offset=0):
+        if not rect:
+            return
+        if isinstance(rect, dict):
+            left, top = rect.get("left", 0), rect.get("top", 0)
+            right = rect.get("right", left)
+        else:
+            left, top, right = rect[0], rect[1], rect[2]
+        self._rect = (left, top, right)
+        self._offset = int(offset)
+        previous = user32.GetForegroundWindow() if IS_WINDOWS else None
+        if not self._visible:
+            self.top.deiconify()
+            self.top.attributes("-topmost", True)
+            self._apply_style()
+            self._visible = True
+        else:
+            self.top.lift()
+        # lift() откатывает ещё не применённую геометрию — ставим её после
+        self._place()
         if (IS_WINDOWS and previous
                 and user32.GetForegroundWindow() != previous):
             user32.SetForegroundWindow(previous)
@@ -1873,12 +2068,19 @@ class InGameHelper:
         self.cfg = core.load_config() if core is not None else {}
         self.overlay = Overlay(root, self.cfg)
         self.island = Island(root, self.cfg)
+        self.clock = Clock(root, self.cfg)
         self.media = None
         self.events = queue.Queue()
         self.hotkey = HotkeyThread(self.events,
                                    self.cfg.get("ingame_hotkey"))
+        self.clock_hotkey = HotkeyThread(
+            self.events, self.cfg.get("ingame_clock_hotkey"),
+            hotkey_id=HOTKEY_ID_CLOCK, event="clock")
         self._desired = bool(self.cfg.get("ingame_overlay_start"))
+        self._clock_desired = bool(self.cfg.get("ingame_clock"))
+        self._clock_hotkey_on = False
         self._hotkey_seen = False
+        self._clock_hotkey_seen = False
         self._last_seen = 0.0
         self._seen = False
         self._win = None
@@ -1905,10 +2107,17 @@ class InGameHelper:
         self.overlay.set_hotkey_ok(hotkey_ok, self.hotkey.label)
         if not hotkey_ok:
             helper_log(f"hotkey: {self.hotkey.error}")
+        if self.cfg.get("ingame_clock"):
+            clock_ok = self.clock_hotkey.start()
+            self._clock_hotkey_on = True
+            self._clock_hotkey_seen = clock_ok
+            if not clock_ok:
+                helper_log(f"hotkey часов: {self.clock_hotkey.error}")
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
         self._initialized = True
         if (not self.cfg.get("ingame_overlay")
                 and not self.cfg.get("ingame_island")
+                and not self.cfg.get("ingame_clock")
                 and not self.cfg.get("ingame_afk")):
             helper_log("нет включённых функций — выход")
             self._write_status()
@@ -1937,6 +2146,13 @@ class InGameHelper:
             "overlay_desired": bool(self._desired),
             "island": bool(self.island.visible),
             "island_desired": bool(self._desired),
+            "clock": bool(self.clock.visible),
+            "clock_desired": bool(self._clock_desired),
+            "clock_hotkey": bool(self.clock_hotkey.ok),
+            "clock_hotkey_spec": self.clock_hotkey.spec,
+            "clock_hotkey_label": self.clock_hotkey.label,
+            "clock_hotkey_error": "" if self.clock_hotkey.ok
+            else self.clock_hotkey.error,
             "hotkey": bool(self.hotkey.ok),
             "hotkey_spec": self.hotkey.spec,
             "hotkey_label": self.hotkey.label,
@@ -1966,6 +2182,8 @@ class InGameHelper:
                     break
                 if event == "toggle":
                     self._toggle()
+                elif event == "clock":
+                    self._toggle_clock()
             if self.hotkey.ok != self._hotkey_seen:
                 self._hotkey_seen = bool(self.hotkey.ok)
                 self.overlay.set_hotkey_ok(self._hotkey_seen,
@@ -1973,6 +2191,12 @@ class InGameHelper:
                 helper_log(
                     f"hotkey: {self.hotkey.label} свободен"
                     if self._hotkey_seen else f"hotkey: {self.hotkey.error}")
+            if self.clock_hotkey.ok != self._clock_hotkey_seen:
+                self._clock_hotkey_seen = bool(self.clock_hotkey.ok)
+                helper_log(
+                    f"hotkey часов: {self.clock_hotkey.label} свободен"
+                    if self._clock_hotkey_seen
+                    else f"hotkey часов: {self.clock_hotkey.error}")
             now = time.monotonic()
             if now >= self._next_poll:
                 self._next_poll = now + 0.5
@@ -2000,6 +2224,8 @@ class InGameHelper:
                     afk_text = self._afk_text(now)
                     self.overlay.update_stats(memory_snapshot(), self._gpu,
                                               afk_text)
+                if self.clock.visible:
+                    self.clock.set_clock()
             if self.overlay.visible and self._win:
                 if now >= self._next_fps:
                     self._next_fps = now + FPS_INTERVAL
@@ -2040,6 +2266,7 @@ class InGameHelper:
         else:
             self.overlay.hide()
         self._apply_island()
+        self._apply_clock()
 
     def _apply_island(self):
         enabled = bool(self.cfg.get("ingame_island"))
@@ -2054,6 +2281,17 @@ class InGameHelper:
             self.island.show(self._win.get("rect"))
         else:
             self.island.hide()
+
+    def _apply_clock(self):
+        enabled = bool(self.cfg.get("ingame_clock"))
+        show = (enabled and self._clock_desired and self._win
+                and self._win.get("foreground"))
+        if show:
+            self.clock.set_clock()
+            offset = (ISLAND_H + 8) if self.island.visible else 0
+            self.clock.show(self._win.get("rect"), offset)
+        else:
+            self.clock.hide()
 
     def _ensure_media(self):
         if self.media is not None or not IS_WINDOWS:
@@ -2076,6 +2314,15 @@ class InGameHelper:
         self._write_status()
         helper_log(f"HUD: {'показан' if self._desired else 'скрыт'}")
 
+    def _toggle_clock(self):
+        if not self.cfg.get("ingame_clock"):
+            return
+        self._clock_desired = not self._clock_desired
+        self._apply_clock()
+        self._write_status()
+        helper_log(
+            f"Часы: {'показаны' if self._clock_desired else 'скрыты'}")
+
     def _reload_config(self):
         if core is None:
             return
@@ -2083,14 +2330,18 @@ class InGameHelper:
         if not isinstance(fresh, dict):
             return
         changed = any(fresh.get(key) != self.cfg.get(key) for key in (
-            "ingame_overlay", "ingame_island", "ingame_afk",
+            "ingame_overlay", "ingame_island", "ingame_clock", "ingame_afk",
             "ingame_afk_mode", "ingame_afk_key", "ingame_afk_minutes",
-            "ingame_overlay_corner", "ingame_hotkey", "accent"))
+            "ingame_overlay_corner", "ingame_hotkey",
+            "ingame_clock_hotkey", "accent"))
         if (fresh.get("ingame_overlay_start")
                 and not self.cfg.get("ingame_overlay_start")):
             self._desired = True
+        if fresh.get("ingame_clock") and not self.cfg.get("ingame_clock"):
+            self._clock_desired = True
         self.cfg = fresh
         self.overlay.apply_config(fresh)
+        self.clock.apply_config(fresh)
         self._reload_hotkey()
         if fresh.get("ingame_island"):
             self._ensure_media()
@@ -2107,6 +2358,7 @@ class InGameHelper:
         if changed:
             helper_log("настройки обновлены")
         if (not fresh.get("ingame_overlay") and not fresh.get("ingame_island")
+                and not fresh.get("ingame_clock")
                 and not fresh.get("ingame_afk")):
             helper_log("функции выключены — выход")
             self.shutdown()
@@ -2115,14 +2367,43 @@ class InGameHelper:
         spec = normalize_hotkey(self.cfg.get("ingame_hotkey")) or DEFAULT_HOTKEY
         if spec == self.hotkey.spec:
             self.overlay.set_hotkey_ok(self.hotkey.ok, self.hotkey.label)
-            return
-        self.hotkey.stop()
-        self.hotkey = HotkeyThread(self.events, spec)
-        ok = self.hotkey.start()
-        self._hotkey_seen = bool(ok)
-        self.overlay.set_hotkey_ok(ok, self.hotkey.label)
-        helper_log(f"hotkey: {self.hotkey.label} "
-                   + ("свободен" if ok else self.hotkey.error))
+        else:
+            self.hotkey.stop()
+            self.hotkey = HotkeyThread(self.events, spec)
+            ok = self.hotkey.start()
+            self._hotkey_seen = bool(ok)
+            self.overlay.set_hotkey_ok(ok, self.hotkey.label)
+            helper_log(f"hotkey: {self.hotkey.label} "
+                       + ("свободен" if ok else self.hotkey.error))
+        clock_spec = (normalize_hotkey(self.cfg.get("ingame_clock_hotkey"))
+                      or DEFAULT_CLOCK_HOTKEY)
+        clock_wanted = bool(self.cfg.get("ingame_clock"))
+        if not clock_wanted:
+            if self._clock_hotkey_on:
+                self.clock_hotkey.stop()
+                self.clock_hotkey = HotkeyThread(
+                    self.events, clock_spec, hotkey_id=HOTKEY_ID_CLOCK,
+                    event="clock")
+                self._clock_hotkey_on = False
+                self._clock_hotkey_seen = False
+        elif not self._clock_hotkey_on:
+            self.clock_hotkey = HotkeyThread(
+                self.events, clock_spec, hotkey_id=HOTKEY_ID_CLOCK,
+                event="clock")
+            ok = self.clock_hotkey.start()
+            self._clock_hotkey_on = True
+            self._clock_hotkey_seen = bool(ok)
+            helper_log(f"hotkey часов: {self.clock_hotkey.label} "
+                       + ("свободен" if ok else self.clock_hotkey.error))
+        elif clock_spec != self.clock_hotkey.spec:
+            self.clock_hotkey.stop()
+            self.clock_hotkey = HotkeyThread(
+                self.events, clock_spec, hotkey_id=HOTKEY_ID_CLOCK,
+                event="clock")
+            ok = self.clock_hotkey.start()
+            self._clock_hotkey_seen = bool(ok)
+            helper_log(f"hotkey часов: {self.clock_hotkey.label} "
+                       + ("свободен" if ok else self.clock_hotkey.error))
 
     def _afk_text(self, now):
         if not self.cfg.get("ingame_afk"):
@@ -2174,11 +2455,16 @@ class InGameHelper:
         except Exception:  # noqa: BLE001
             pass
         self.hotkey.stop()
+        self.clock_hotkey.stop()
         self.fps.close()
         self._drop_media()
         self.overlay.destroy()
         try:
             self.island.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.clock.destroy()
         except Exception:  # noqa: BLE001
             pass
         try:
