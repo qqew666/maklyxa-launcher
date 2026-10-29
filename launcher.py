@@ -27,6 +27,7 @@ import ctypes
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -985,6 +986,7 @@ class App:
         self.discord_status_var = tk.StringVar(value="")
         self.update_status_var = tk.StringVar(
             value="Проверка ещё не выполнялась")
+        self.mascot_state_var = tk.StringVar(value="Сейчас: роблоксер")
         self._update_busy = False
         self._upd_asset = None
         self._upd_file = None
@@ -1402,8 +1404,10 @@ class App:
         self.mascot = mascot_mod.Mascot(
             self.root, enabled=bool(self.cfg.get("mascot", True)),
             is_maximized=lambda: bool(
-                getattr(self.frameless, "maximized", False)))
+                getattr(self.frameless, "maximized", False)),
+            custom_path=str(self.cfg.get("mascot_image") or ""))
         self._sync_mascot_button()
+        self._sync_mascot_state()
 
     def _build_sidebar(self, sidebar):
         c = self.c
@@ -1523,6 +1527,79 @@ class App:
                                 else "Питомец выключен")
         except AttributeError:
             pass
+        self._sync_mascot_state()
+
+    def choose_mascot_image(self):
+        path = filedialog.askopenfilename(
+            parent=self.root, title="Картинка питомца",
+            filetypes=[("Картинки", "*.png *.gif *.jpg *.jpeg *.webp *.bmp"),
+                       ("Все файлы", "*.*")])
+        if not path:
+            return
+        mascot = getattr(self, "mascot", None)
+        if mascot is None:
+            messagebox.showerror(APP_NAME, "Окно питомца недоступно",
+                                 parent=self.root)
+            return
+        stored = self._store_mascot_image(path)
+        ok, err = mascot.load_custom(stored)
+        if not ok:
+            messagebox.showerror(APP_NAME, err, parent=self.root)
+            self.status_var.set("Не удалось загрузить питомца")
+            self.log(f"Питомец: {err.splitlines()[0]}")
+            self._sync_mascot_state()
+            return
+        self.cfg["mascot_image"] = str(stored)
+        if not mascot.enabled:
+            mascot.set_enabled(True)
+            self.cfg["mascot"] = True
+        save_config(self.cfg)
+        self._sync_mascot_button()
+        self._sync_mascot_state()
+        self.status_var.set("Питомец обновлён")
+        self.log(f"Питомец: своя картинка {Path(str(stored)).name}")
+
+    def reset_mascot_image(self):
+        mascot = getattr(self, "mascot", None)
+        if mascot is not None:
+            mascot.clear_custom()
+        self.cfg["mascot_image"] = ""
+        save_config(self.cfg)
+        self._sync_mascot_state()
+        self.status_var.set("Питомец снова роблоксер")
+
+    def _store_mascot_image(self, path):
+        """Копирует картинку в папку настроек, чтобы она не пропала."""
+        src = Path(path)
+        try:
+            folder = CONFIG_DIR / "pet"
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / src.name
+            if src.resolve() != target.resolve():
+                shutil.copyfile(src, target)
+            return target
+        except (OSError, ValueError):
+            return src
+
+    def _sync_mascot_state(self):
+        var = getattr(self, "mascot_state_var", None)
+        if var is None:
+            return
+        mascot = getattr(self, "mascot", None)
+        name = ""
+        path = str(self.cfg.get("mascot_image") or "")
+        if path:
+            name = Path(path).name
+        if mascot is None or not mascot._supported:
+            var.set("Питомец недоступен в этом окне")
+        elif not mascot.enabled:
+            var.set("Питомец выключен — включи кнопкой «☺ Питомец» в шапке")
+        elif mascot.custom and name:
+            var.set(f"Сейчас: своя картинка — {name}")
+        elif name:
+            var.set(f"Сейчас: роблоксер (картинка {name} не загрузилась)")
+        else:
+            var.set("Сейчас: роблоксер")
 
     def _sync_mascot_button(self):
         btn = getattr(self, "mascot_btn", None)
@@ -7256,6 +7333,30 @@ class App:
         self._hint(inner4, "macOS — цветные кружки слева, Windows — "
                     "кнопки свернуть, развернуть и закрыть справа.", wrap=540)
 
+        # питомец
+        inner_pet = self._card(
+            pad, title="Питомец",
+            subtitle="Роблоксер на верхней кромке окна или своя картинка",
+            glyph="☺")
+        tk.Label(inner_pet, textvariable=self.mascot_state_var,
+                 bg=c["surface"], fg=c["text"], font=(UI_FONT, 10),
+                 anchor="w", wraplength=520, justify="left").pack(
+                     fill="x", pady=(6, 0))
+        pet_row = tk.Frame(inner_pet, bg=c["surface"])
+        pet_row.pack(fill="x", pady=(10, 0))
+        self.btn_mascot_load = self._button(
+            pet_row, "Загрузить картинку…", self.choose_mascot_image,
+            kind="primary", side="left")
+        self.btn_mascot_reset = self._button(
+            pet_row, "Вернуть роблоксера", self.reset_mascot_image,
+            side="left", padx=8)
+        self._hint(
+            inner_pet,
+            "PNG, GIF, JPG или WEBP. Прозрачный фон и анимация GIF "
+            "поддерживаются: картинка подгоняется под размер питомца и так "
+            "же покачивается, а по клику подпрыгивает. Файл копируется "
+            "в папку настроек.", wrap=540)
+
         # обновления
         inner_upd = self._card(
             pad, title="Обновления",
@@ -10570,6 +10671,23 @@ def run_selftest():
                 failures.append(f"питомец: контур {len(contour)} точек")
             if contour == turned:
                 failures.append("питомец: поворот не применяется")
+            if HAVE_PIL:
+                pet_tmp = Path(tempfile.mkdtemp(prefix="mascot-"))
+                probe = pet_tmp / "pet.png"
+                Image.new("RGBA", (64, 64), (255, 120, 0, 255)).save(probe)
+                ok, err = pet.load_custom(probe)
+                root.update()
+                if not ok or not pet.custom:
+                    failures.append(f"питомец: картинка не загрузилась ({err})")
+                elif pet._photo is None:
+                    failures.append("питомец: картинка не отрисована")
+                pet.clear_custom()
+                if pet.custom:
+                    failures.append("питомец: картинка не сбросилась")
+                ok_bad, _ = pet.load_custom(str(pet_tmp / "nope.png"))
+                if ok_bad:
+                    failures.append("питомец: битый файл принят")
+                shutil.rmtree(pet_tmp, ignore_errors=True)
         if not hasattr(app, "launch_icon_status_var"):
             failures.append("UI: нет статуса иконки запуска")
         if not hasattr(app, "var_launch_sound"):

@@ -4,16 +4,25 @@
 
 Отдельное прозрачное окно без рамки, которое держится над шапкой лаунчера:
 роблоксер свесил ноги через кромку, покачивается, моргает и подпрыгивает
-на клик. Включается и выключается кнопкой в верхней панели.
+на клик. Вместо роблоксера можно загрузить свою картинку или GIF — она
+так же качается и подпрыгивает.
 """
 
 import ctypes
 import math
 import random
+import sys
 import time
 import tkinter as tk
 
+try:
+    from PIL import Image, ImageSequence, ImageTk
+    HAVE_PIL = True
+except Exception:  # noqa: BLE001 — без Pillow остаётся роблоксер
+    HAVE_PIL = False
+
 KEY_COLOR = "#010203"          # цвет-ключ прозрачности окна
+KEY_RGB = (1, 2, 3)
 YELLOW = "#f5cd30"
 BLUE = "#0d69ac"
 GREEN = "#4b974b"
@@ -29,6 +38,12 @@ SWAY_SPEED = 0.075
 BODY_PIVOT = (76.0, 130.0)
 HIP = (76.0, 104.0)
 SHOULDER_Y = 74.0
+
+CUSTOM_BOX = 128               # максимум для своей картинки по стороне
+CUSTOM_BOTTOM = 146            # нижняя кромка картинки в окне питомца
+MAX_CUSTOM_FRAMES = 48
+SW_SHOWNOACTIVATE = 4
+SW_HIDE = 0
 
 
 def _rotate(x, y, angle, pivot):
@@ -84,7 +99,7 @@ def _our_window_foreground():
 class Mascot:
     """Окно-питомец поверх верхней кромки окна лаунчера."""
 
-    def __init__(self, root, enabled=True, is_maximized=None):
+    def __init__(self, root, enabled=True, is_maximized=None, custom_path=""):
         self.root = root
         self.is_maximized = is_maximized or (lambda: False)
         self.enabled = False
@@ -97,13 +112,26 @@ class Mascot:
         self._kick = 0.0
         self._pos = None
         self._shown = False
+        self._visible = False
+        self._hwnd = None
         self._topmost = None
         self._topmost_ts = 0.0
         self._blink_at = time.monotonic() + 3.0
         self._blink_until = 0.0
         self._destroyed = False
+        self._errors = 0
+        self._custom = False
+        self._frames = []
+        self._durations = []
+        self._frame_idx = 0
+        self._frame_age = 0.0
+        self._photo_cache = {}
+        self._photo = None
         self._build()
+        self._map_window()
         self.set_enabled(bool(enabled))
+        if custom_path:
+            self.load_custom(custom_path)
 
     # -- создание ---------------------------------------------------------------
 
@@ -150,8 +178,39 @@ class Mascot:
                                         capstyle="round", smooth=True),
             "brand": canvas.create_line(0, 0, 0, 0, fill=WHITE, width=3,
                                         capstyle="round", joinstyle="round"),
+            "pet_image": canvas.create_image(
+                WIDTH // 2, HEIGHT // 2, anchor="center", state="hidden"),
         }
         self._paint()
+
+    def _map_window(self):
+        """Окно создаётся и отображается один раз, дальше им правит WinAPI.
+
+        Tk плохо переносит withdraw/deiconify у overrideredirect-окон, а
+        Windows сам прячет дочерние окна вместе со свёрнутым родителем.
+        Поэтому окно всегда «показано» для Tk, а видимость и прозрачность
+        выставляются атрибутом alpha и ShowWindow.
+        """
+        if not self._supported or self.win is None:
+            return
+        vx, vy, _vw, _vh = _virtual_screen()
+        try:
+            self.win.geometry(f"{WIDTH}x{HEIGHT}+{vx - WIDTH - 80}+{vy}")
+            self.win.attributes("-alpha", 0.0)
+            self.win.deiconify()
+            self._hwnd = self._top_hwnd()
+        except tk.TclError:
+            self._supported = False
+
+    def _top_hwnd(self):
+        """Актуальный HWND окна: Tk пересоздаёт его при смене атрибутов."""
+        try:
+            hwnd = int(self.win.winfo_id())
+            top = ctypes.windll.user32.GetAncestor(
+                ctypes.c_void_p(hwnd), 2) or hwnd  # GA_ROOT
+            return int(top)
+        except Exception:  # noqa: BLE001
+            return None
 
     # -- включение и выключение ----------------------------------------------------
 
@@ -187,6 +246,89 @@ class Mascot:
                 pass
             self._job = None
 
+    # -- свой питомец ----------------------------------------------------------------
+
+    @property
+    def custom(self):
+        return self._custom
+
+    def load_custom(self, path):
+        """Ставит свою картинку вместо роблоксера. Возвращает (ok, ошибка)."""
+        if not HAVE_PIL:
+            return False, "Для своей картинки нужен Pillow"
+        try:
+            frames, durations = [], []
+            with Image.open(str(path)) as src:
+                for frame in ImageSequence.Iterator(src):
+                    rgba = frame.convert("RGBA")
+                    rgba.thumbnail((CUSTOM_BOX, CUSTOM_BOX), Image.LANCZOS)
+                    frames.append(rgba)
+                    durations.append(
+                        max(60, int(frame.info.get("duration") or 100)))
+                    if len(frames) >= MAX_CUSTOM_FRAMES:
+                        break
+        except Exception as exc:  # noqa: BLE001 — битый файл
+            return False, f"Не удалось прочитать картинку:\n{exc}"
+        if not frames:
+            return False, "В файле нет картинки"
+        if not self._supported or self.canvas is None:
+            return False, "Окно питомца недоступно"
+        self._frames = frames
+        self._durations = durations
+        self._frame_idx = 0
+        self._frame_age = 0.0
+        self._photo_cache = {}
+        self._photo = None
+        self._custom = True
+        self._set_body_visible(False)
+        self._paint()
+        return True, ""
+
+    def clear_custom(self):
+        if not self._custom:
+            return
+        self._custom = False
+        self._frames = []
+        self._durations = []
+        self._photo_cache = {}
+        self._photo = None
+        if self.canvas is not None:
+            self._set_body_visible(True)
+            self._paint()
+
+    def _set_body_visible(self, visible):
+        body = "normal" if visible else "hidden"
+        image = "hidden" if visible else "normal"
+        for key, item in self._items.items():
+            state = image if key == "pet_image" else body
+            try:
+                self.canvas.itemconfigure(item, state=state)
+            except tk.TclError:
+                pass
+
+    def _custom_photo(self):
+        if not self._frames:
+            return None
+        sway = 0.075 * math.sin(self._phase)
+        lift = 1.5 * math.sin(self._phase * 2.0) - 7.0 * self._kick
+        angle = round(math.degrees(sway * 1.3), 1)
+        lift_px = int(round(lift))
+        key = (self._frame_idx, angle, lift_px)
+        photo = self._photo_cache.get(key)
+        if photo is not None:
+            return photo
+        frame = self._frames[self._frame_idx]
+        turned = frame.rotate(angle, resample=Image.BICUBIC, expand=True)
+        board = Image.new("RGB", (WIDTH, HEIGHT), KEY_RGB)
+        board.paste(turned, ((WIDTH - turned.width) // 2,
+                             CUSTOM_BOTTOM - turned.height - lift_px),
+                    turned)
+        photo = ImageTk.PhotoImage(board)
+        if len(self._photo_cache) > 96:
+            self._photo_cache.clear()
+        self._photo_cache[key] = photo
+        return photo
+
     # -- цикл ---------------------------------------------------------------------------
 
     def _tick(self):
@@ -198,7 +340,11 @@ class Mascot:
             if self._shown:
                 self._animate()
         except tk.TclError:
-            return
+            pass
+        except Exception as exc:  # noqa: BLE001 — цикл не должен умирать молча
+            if self._errors < 4:
+                print(f"mascot: {type(exc).__name__}: {exc}", file=sys.stderr)
+            self._errors += 1
         if not self._destroyed:
             try:
                 self._job = self.root.after(TICK_MS, self._tick)
@@ -210,7 +356,15 @@ class Mascot:
         if self._kick > 0:
             self._kick = max(0.0, self._kick - 0.05)
         now = time.monotonic()
-        if now >= self._blink_at:
+        if self._custom:
+            if len(self._frames) > 1:
+                self._frame_age += TICK_MS / 1000.0
+                delay = self._durations[self._frame_idx] / 1000.0
+                while self._frame_age >= delay:
+                    self._frame_age -= delay
+                    self._frame_idx = (self._frame_idx + 1) % len(self._frames)
+                    delay = self._durations[self._frame_idx] / 1000.0
+        elif now >= self._blink_at:
             self._blink_until = now + 0.11
             self._blink_at = now + random.uniform(2.4, 5.2)
         self._paint()
@@ -234,29 +388,53 @@ class Mascot:
         vx, vy, vw, vh = _virtual_screen()
         x = max(vx, min(x, vx + vw - WIDTH))
         y = max(vy, min(y, vy + vh - HEIGHT))
+        self._show(x, y)
+        self._sync_topmost(force=force_show)
+
+    def _show(self, x, y):
+        if (x, y) != self._pos:
+            try:
+                self.win.geometry(f"{WIDTH}x{HEIGHT}+{x}+{y}")
+            except tk.TclError:
+                return
+            self._pos = (x, y)
+        try:
+            if not self._visible:
+                self.win.attributes("-alpha", 1.0)
+                self._visible = True
+        except tk.TclError:
+            return
         if not self._shown:
-            self.win.geometry(f"{WIDTH}x{HEIGHT}+{x}+{y}")
-            self.win.deiconify()
+            self._shown = True
             try:
                 self.win.lift()
             except tk.TclError:
                 pass
-            self._shown = True
-            self._pos = (x, y)
             self._sync_topmost(force=True)
             self._paint()
-            return
-        if (x, y) != self._pos:
-            self.win.geometry(f"+{x}+{y}")
-            self._pos = (x, y)
-        self._sync_topmost(force=force_show)
+        self._ensure_visible()
+
+    def _ensure_visible(self):
+        """Возвращает окно, если его спрятала Windows вместе с родителем."""
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = self._top_hwnd()
+            if hwnd and not user32.IsWindowVisible(ctypes.c_void_p(hwnd)):
+                user32.ShowWindow(ctypes.c_void_p(hwnd), SW_SHOWNOACTIVATE)
+                self.win.lift()
+        except Exception:  # noqa: BLE001 — WinAPI не обязательно
+            pass
 
     def _hide(self):
-        if not self._shown or self.win is None:
-            return
         self._shown = False
+        self._pos = None
+        if not self._visible or self.win is None:
+            return
+        self._visible = False
         try:
-            self.win.withdraw()
+            self.win.attributes("-alpha", 0.0)
+            vx, vy, _vw, _vh = _virtual_screen()
+            self.win.geometry(f"{WIDTH}x{HEIGHT}+{vx - WIDTH - 80}+{vy}")
         except tk.TclError:
             pass
 
@@ -298,6 +476,16 @@ class Mascot:
 
     def _paint(self):
         if self.canvas is None:
+            return
+        if self._custom:
+            photo = self._custom_photo()
+            if photo is not None:
+                self._photo = photo
+                try:
+                    self.canvas.itemconfigure(self._items["pet_image"],
+                                              image=photo)
+                except tk.TclError:
+                    pass
             return
         c = self.canvas
         phase = self._phase

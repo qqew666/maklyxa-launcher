@@ -48,7 +48,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.9.7"
+VERSION = "1.9.8"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -234,6 +234,7 @@ DEFAULT_CONFIG = {
     "ingame_afk_key": "space",
     "ingame_afk_minutes": 5,
     "mascot": True,
+    "mascot_image": "",
 }
 
 # ---- FastFlags и бутстраперы -----------------------------------------------
@@ -344,6 +345,7 @@ def load_config(path=None):
         value = str(cfg.get(key) or "")
         cfg[key] = value if value.isdigit() else ""
     cfg["roblox_version"] = str(cfg.get("roblox_version") or "").strip()[:260]
+    cfg["mascot_image"] = str(cfg.get("mascot_image") or "").strip()[:260]
     cfg["cursor_set"] = str(cfg.get("cursor_set") or "")
 
     for key in ("favorites", "history"):
