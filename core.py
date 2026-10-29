@@ -48,7 +48,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.9.6"
+VERSION = "1.9.7"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -233,6 +233,7 @@ DEFAULT_CONFIG = {
     "ingame_afk_mode": "mouse",
     "ingame_afk_key": "space",
     "ingame_afk_minutes": 5,
+    "mascot": True,
 }
 
 # ---- FastFlags и бутстраперы -----------------------------------------------
@@ -361,7 +362,7 @@ def load_config(path=None):
                  "discord_rpc", "launch_sound", "error_sound",
                  "ingame_overlay", "ingame_island",
                  "ingame_overlay_start", "ingame_clock",
-                 "ingame_auto", "ingame_afk"):
+                 "ingame_auto", "ingame_afk", "mascot"):
         cfg[flag] = bool(cfg.get(flag))
     corner = str(cfg.get("ingame_overlay_corner") or "").lower()
     cfg["ingame_overlay_corner"] = (

@@ -47,6 +47,7 @@ except Exception:  # Pillow не обязателен для запуска
     HAVE_PIL = False
 
 import ingame as ingame_mod
+import mascot as mascot_mod
 
 import core
 
@@ -1336,9 +1337,20 @@ class App:
             activeforeground=c["on_accent"], bd=0, font=(UI_FONT, 9))
         self.account_switch_btn.configure(menu=self.account_menu)
         self.account_switch_btn.pack(side="right", padx=(0, 8))
+
+        self.mascot_btn = tk.Button(
+            titlebar, text="☺  Питомец", relief="flat", bd=0,
+            font=(UI_FONT, 9), cursor="hand2", takefocus=False,
+            bg=c["surface2"], fg=c["muted"],
+            activebackground=c["hover"], activeforeground=c["text"],
+            highlightthickness=0, padx=12, command=self._toggle_mascot)
+        self.mascot_btn.pack(side="right", padx=(0, 8))
+        self._bind_hover(self.mascot_btn, "ghost")
+
         self.frameless.excluded = {min_btn, max_btn, close_btn,
                                    self.theme_cycle_btn,
-                                   self.account_switch_btn}
+                                   self.account_switch_btn,
+                                   self.mascot_btn}
 
         body = tk.Frame(root, bg=c["bg"])
         body.pack(fill="both", expand=True)
@@ -1383,6 +1395,15 @@ class App:
         if not getattr(self, "_root_configure_bound", False):
             root.bind("<Configure>", self._on_root_configure, add="+")
             self._root_configure_bound = True
+
+        if getattr(self, "mascot", None) is not None:
+            self.mascot.destroy()
+            self.mascot = None
+        self.mascot = mascot_mod.Mascot(
+            self.root, enabled=bool(self.cfg.get("mascot", True)),
+            is_maximized=lambda: bool(
+                getattr(self.frameless, "maximized", False)))
+        self._sync_mascot_button()
 
     def _build_sidebar(self, sidebar):
         c = self.c
@@ -1487,6 +1508,32 @@ class App:
             self.set_theme("custom", custom_name=custom_name)
         else:
             self.set_theme(target)
+
+    def _toggle_mascot(self):
+        mascot = getattr(self, "mascot", None)
+        if mascot is None:
+            return
+        enabled = not mascot.enabled
+        mascot.set_enabled(enabled)
+        self.cfg["mascot"] = enabled
+        save_config(self.cfg)
+        self._sync_mascot_button()
+        try:
+            self.status_var.set("Питомец включён" if enabled
+                                else "Питомец выключен")
+        except AttributeError:
+            pass
+
+    def _sync_mascot_button(self):
+        btn = getattr(self, "mascot_btn", None)
+        if btn is None:
+            return
+        mascot = getattr(self, "mascot", None)
+        on = bool(mascot is not None and mascot.enabled)
+        try:
+            btn.configure(fg=self.accent if on else self.c["muted"])
+        except tk.TclError:
+            pass
 
     def _custom_theme_available(self):
         name = str(self.cfg.get("custom_theme") or "")
@@ -7873,6 +7920,10 @@ class App:
         except tk.TclError:
             pass
         save_config(self.cfg)
+        mascot = getattr(self, "mascot", None)
+        if mascot is not None:
+            mascot.destroy()
+            self.mascot = None
         try:
             self.root.destroy()
         except tk.TclError:
@@ -8925,6 +8976,7 @@ class App:
                 dot.configure(fg=color)
             except tk.TclError:
                 pass
+        self._sync_mascot_button()
         self._refresh_sidebar_status()
         name_lbl = getattr(self, "accent_name_label", None)
         if name_lbl is not None:
@@ -10491,6 +10543,33 @@ def run_selftest():
             app._roblox_version_pick()
             if app.cfg.get("roblox_version"):
                 failures.append("UI: авто-версия записала путь")
+
+        # питомец на верхней кромке: окно, кнопка и сохранение флага
+        if not hasattr(app, "mascot_btn"):
+            failures.append("UI: нет кнопки питомца")
+        pet = getattr(app, "mascot", None)
+        if pet is None or not pet._supported:
+            failures.append("питомец: прозрачное окно не создано")
+        else:
+            was_on = bool(pet.enabled)
+            app._toggle_mascot()
+            root.update()
+            if app.cfg.get("mascot") != (not was_on):
+                failures.append("питомец: флаг не сохранился в конфиг")
+            if load_config().get("mascot") != (not was_on):
+                failures.append("питомец: флаг не записан на диск")
+            app._toggle_mascot()
+            root.update()
+            if app.cfg.get("mascot") != was_on:
+                failures.append("питомец: повторное переключение не сработало")
+            if not pet._items or len(pet._items) < 8:
+                failures.append("питомец: фигура не собрана")
+            contour = mascot_mod.rounded_box(0, 0, 20, 20, 4)
+            turned = mascot_mod.rounded_box(0, 0, 20, 20, 4, 0.3, (0, 0))
+            if len(contour) != 20:
+                failures.append(f"питомец: контур {len(contour)} точек")
+            if contour == turned:
+                failures.append("питомец: поворот не применяется")
         if not hasattr(app, "launch_icon_status_var"):
             failures.append("UI: нет статуса иконки запуска")
         if not hasattr(app, "var_launch_sound"):
