@@ -376,7 +376,8 @@ class Mascot:
         if not root.winfo_exists():
             return
         if (root.winfo_width() < 320 or not root.winfo_ismapped()
-                or self._iconic() or self.is_maximized()):
+                or self._iconic() or self.is_maximized()
+                or not _our_window_foreground()):
             self._hide()
             return
         rx, ry = root.winfo_rootx(), root.winfo_rooty()

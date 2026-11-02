@@ -82,6 +82,7 @@ ENTRY_TRAVEL = 9.0
 
 SPLASH_R = 18.0
 SPLASH_THICK = 3.0
+SPLASH_SPIN_Y = 50.0
 SPIN_SEGS = 90
 SPIN_SPEED = 17.0
 SPIN_FADE = 0.75 * 2.0 * math.pi
@@ -458,7 +459,7 @@ class LoaderScreen:
             self._draw()
 
     def _zone(self, x, y):
-        for item in self._hit:
+        for item in reversed(self._hit):
             if item[0] <= x <= item[2] and item[1] <= y <= item[3]:
                 return item
         return None
@@ -882,9 +883,9 @@ class LoaderScreen:
             t1 = i / float(SPIN_SEGS)
             a0, a1 = ang - t0 * SPIN_FADE, ang - t1 * SPIN_FADE
             cv.create_line(cx + math.cos(a0) * SPLASH_R,
-                           cy + 34 + math.sin(a0) * SPLASH_R,
+                           cy + SPLASH_SPIN_Y + math.sin(a0) * SPLASH_R,
                            cx + math.cos(a1) * SPLASH_R,
-                           cy + 34 + math.sin(a1) * SPLASH_R,
+                           cy + SPLASH_SPIN_Y + math.sin(a1) * SPLASH_R,
                            fill=mix(pal["accent"], pal["bg"],
                                     a * (1.0 - t1)),
                            width=SPLASH_THICK, capstyle="round")
@@ -938,6 +939,10 @@ class LoaderScreen:
         for key, label in self.links:
             hv = self.link_hover.get(key, 0.0)
             pr = self.link_press.get(key, 0.0)
+            if hv > 0.004:
+                self._soft_rect(cv, LINK_X - 8, y - 4, LINK_X + 128,
+                                y + LINK_H + 2, 6, bg, 0.22 * hv * ca,
+                                fill=pal["hover"], feather=FEATHER_SOFT)
             col = mix(mix(pal["dim"], bg, ca), mix(pal["text"], bg, ca), hv)
             x = LINK_X + 1.5 * hv - 1.0 * pr
             cv.create_text(x, y, text=label, anchor="nw",
@@ -947,7 +952,7 @@ class LoaderScreen:
                 self._soft_rect(cv, x, y + LINK_H - 3, x + tw,
                                 y + LINK_H - 2, 0.5, bg, hv * ca * 0.75,
                                 fill=pal["accent"], feather=FEATHER_SOFT)
-            self._hit.append((LINK_X, y, LINK_X + 120, y + LINK_H,
+            self._hit.append((LINK_X, y, LINK_X + 136, y + LINK_H,
                               "link", key))
             y += LINK_STEP
 
@@ -1023,7 +1028,11 @@ class LoaderScreen:
                            text=icon, anchor="c", font=self._f("small"),
                            fill=mix(pal["accent"], bg, vis))
         if enabled:
-            self._hit.append((x, y, x + cw, y + CARD_H, "card", meta["key"]))
+            hit_top = max(y, CARDS_Y)
+            hit_bottom = min(y + CARD_H, self.win_h - FOOTER_H)
+            if hit_bottom > hit_top:
+                self._hit.append((x, hit_top, x + cw, hit_bottom,
+                                  "card", meta["key"]))
 
     def _draw_scrollbar(self, cv, pal, start_x, card_w, area_h, content_h,
                         max_scroll, ca):
@@ -1042,13 +1051,14 @@ class LoaderScreen:
     def _draw_footer(self, cv, pal, w, h, ca):
         bg = pal["bg"]
         img = self.avatar
+        account_cy = h - FOOTER_H / 2.0 - 10
         cy = h - FOOTER_H / 2.0
         if img is not None:
-            cv.create_image(LOOK_X0, cy, image=img, anchor="w")
+            cv.create_image(LOOK_X0, account_cy, image=img, anchor="w")
             nx = LOOK_X0 + img.width() + 10
         else:
             nx = LOOK_X0
-        cv.create_text(nx, cy, text=self.nick, anchor="w",
+        cv.create_text(nx, account_cy, text=self.nick, anchor="w",
                        font=self._f("body"),
                        fill=mix(pal["text"], bg, 0.9 * ca))
         lx = w - 20 - LOOK_R

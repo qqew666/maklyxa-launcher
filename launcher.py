@@ -504,6 +504,7 @@ class FramelessWindow:
         if self._in_titlebar(event) and not self.maximized:
             self._mode, self._zone = "move", ""
             self._start = (event.x_root, event.y_root) + self._frame()
+            self._set_cursor("")
 
     def _on_drag(self, event):
         if self._mode is None or self._start is None:
@@ -526,10 +527,19 @@ class FramelessWindow:
         ny = max(ay, min(ny, ay + ah - self.title_h))
         self.root.geometry(f"+{nx}+{ny}")
 
-    def _on_release(self, _event):
+    def _on_release(self, event):
         self._mode = None
         self._zone = ""
         self._start = None
+        self._on_hover(event)
+
+    def _set_cursor(self, cursor):
+        if cursor != self._cursor:
+            self._cursor = cursor
+            try:
+                self.root.configure(cursor=cursor)
+            except tk.TclError:
+                pass
 
     def _on_hover(self, event):
         if self._mode is not None:
@@ -540,12 +550,7 @@ class FramelessWindow:
             cursor = "fleur"
         else:
             cursor = CURSORS.get(zone, "")
-        if cursor != self._cursor:
-            self._cursor = cursor
-            try:
-                self.root.configure(cursor=cursor)
-            except tk.TclError:
-                pass
+        self._set_cursor(cursor)
 
     def _on_double(self, event):
         if event.widget in self.excluded:
@@ -1085,7 +1090,10 @@ class _LoaderApi:
         return trunc(text or "—", 56)
 
     def links(self):
-        return App.LOADER_LINKS
+        pet_on = bool(getattr(self.app.mascot, "enabled", False))
+        return [(key, f"Персонаж: {'вкл' if pet_on else 'выкл'}"
+                 if key == "mascot" else label)
+                for key, label in App.LOADER_LINKS]
 
     def looks(self):
         return [(theme, label, accent)
@@ -1397,8 +1405,8 @@ class App:
     # -- стартовый экран-лоадер ------------------------------------------------
 
     LOADER_CARDS = [
-        ("settings", "Настройки", "⚙"),
         ("game", "Play", "▶"),
+        ("settings", "Настройки", "⚙"),
         ("log", "Последнее обновление", "↻"),
         ("scripts", "Скрипты", "λ"),
     ]
@@ -1406,6 +1414,7 @@ class App:
         ("accounts", "Аккаунты"),
         ("favorites", "Избранное"),
         ("gallery", "Галерея"),
+        ("mascot", "Персонаж"),
     ]
     LOADER_MIN = (420, 340)
     def hub_rect(self):
@@ -1502,6 +1511,15 @@ class App:
             self._loader_play_favorite()
         elif key == "gallery":
             self._loader_open_gallery()
+        elif key == "mascot":
+            pet = getattr(self, "mascot", None)
+            if pet is None or not pet._supported:
+                self.loader_note("Персонаж недоступен в этом окне")
+            else:
+                self._toggle_mascot()
+                self.loader_note(
+                    "Персонаж включён" if pet.enabled
+                    else "Персонаж выключен")
 
     def _loader_update_flow(self):
         """Карточка «Последнее обновление»: одно нажатие — один шаг.
