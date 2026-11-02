@@ -48,7 +48,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -58,6 +58,8 @@ GITHUB_REPO = "qqew666/maklyxa-launcher"
 RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
 RELEASES_API = (f"https://api.github.com/repos/{GITHUB_REPO}"
                 "/releases?per_page=15")
+RELEASE_TAG_API = (f"https://api.github.com/repos/{GITHUB_REPO}"
+                   "/releases/tags/")
 
 CONFIG_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / APP_NAME
 CONFIG_PATH = CONFIG_DIR / "config.json"
@@ -1041,6 +1043,26 @@ def release_asset(item):
         "size": size,
         "sha256": digest,
     }
+
+
+def installer_asset(version="", timeout=8):
+    """MSI-установщик релиза этой версии: имя, ссылка, размер и sha256."""
+    want = str(version or VERSION)
+    try:
+        release = _get_json(RELEASE_TAG_API + want, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 — 404, сеть, лимит API
+        return {"error": str(exc) or type(exc).__name__}
+    if not isinstance(release, dict):
+        return {"error": "GitHub вернул неожиданный ответ"}
+    for item in release.get("assets") or []:
+        if not isinstance(item, dict):
+            continue
+        if not str(item.get("name") or "").lower().endswith(".msi"):
+            continue
+        info = release_asset(item)
+        if info:
+            return info
+    return {"error": f"В релизе {want} нет MSI-файла"}
 
 
 def sha256_file(path, chunk=1048576):

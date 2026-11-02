@@ -92,8 +92,9 @@ from core import (
     gallery_cache_save, gallery_seed_places, gallery_stats,
     gallery_thumb_path, game_launch_url, hit_test, import_cursor_set,
     import_launch_icon, import_launch_sound, import_theme_set,
-    import_ui_font, inspect_ui_font, launch_game, launch_game_as,
-    launch_icon_state, launch_sound_path, list_cursor_sets, list_scripts,
+    import_ui_font, inspect_ui_font, installer_asset, launch_game,
+    launch_game_as, launch_icon_state, launch_sound_path, list_cursor_sets,
+    list_scripts,
     list_theme_sets, load_config, load_private_font, load_theme_palette, mb,
     merge_flags_into,
     migrate_old_config, parse_place_id, png_info, player_pids,
@@ -1177,7 +1178,13 @@ class App:
         self._upd_busy = False
         self._upd_cancel = threading.Event()
         self._upd_install_busy = False
+        self._upd_note_pct = 0.0
         self._upd_helper_stop_sent = False
+        self._inst_asset = None
+        self._inst_file = None
+        self._inst_busy = False
+        self._inst_cancel = threading.Event()
+        self.app_install_status_var = tk.StringVar(value="")
         self.account_name_var = tk.StringVar(value="Не выбран")
         self.account_user_var = tk.StringVar(value="Войти в аккаунт")
         self.game_account_var = tk.StringVar(value="Аккаунт не выбран")
@@ -1458,6 +1465,9 @@ class App:
         self._note_text = trunc(str(text or ""), 60)
         self._note_at = time.monotonic()
         if self.loader is not None and self.loader.visible:
+            # ответ приходит из фонового потока, когда экран уже спокойный:
+            # один кадр сразу, второй — когда строка должна погаснуть
+            self.loader.refresh()
             try:
                 self.root.after(int(self.LOADER_NOTE_SEC * 1000) + 400,
                                 self.loader.refresh)
@@ -1483,11 +1493,7 @@ class App:
                 self.loader_note("Запускаю Roblox…")
                 self.launch_client()
         elif key == "log":
-            if self._update_busy:
-                self.loader_note("Проверка обновления уже идёт…")
-            else:
-                self.loader_note("Спрашиваю GitHub о релизах…")
-                self.check_updates()
+            self._loader_update_flow()
         elif key == "scripts":
             self._loader_run_last_script()
         elif key == "accounts":
@@ -1496,6 +1502,35 @@ class App:
             self._loader_play_favorite()
         elif key == "gallery":
             self._loader_open_gallery()
+
+    def _loader_update_flow(self):
+        """Карточка «Последнее обновление»: одно нажатие — один шаг.
+
+        Проверка релиза, затем скачивание, затем установка с перезапуском —
+        всё со маленького экрана, без большого меню.
+        """
+        if self._update_busy:
+            self.loader_note("Проверка обновлений уже идёт…")
+            return
+        if self._upd_install_busy:
+            self.loader_note("Установка обновления уже идёт…")
+            return
+        if self._upd_busy:
+            self.loader_note("Скачивание идёт — дождись конца")
+            return
+        path = self._upd_file
+        if path is not None and Path(path).is_file():
+            self.loader_note(
+                f"Устанавливаю {self._upd_version or 'обновление'}…")
+            self.install_update()
+            return
+        asset = self._upd_asset
+        if isinstance(asset, dict) and asset.get("url"):
+            self.loader_note(f"Скачиваю {self._upd_version}…")
+            self.start_update_download()
+            return
+        self.loader_note("Спрашиваю GitHub о релизах…")
+        self.check_updates()
 
     def _loader_open_gallery(self):
         """Скриншоты Roblox — в проводнике, без большого меню."""
@@ -8509,6 +8544,32 @@ end
         if self._upd_file is not None and Path(self._upd_file).is_file():
             self._show_update_install()
 
+        # эта сборка: портативный exe можно установить как программу
+        inner_inst = self._card(pad, title="Эта сборка", glyph="▣")
+        tk.Label(inner_inst, textvariable=self.app_install_status_var,
+                 bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
+                 anchor="w", wraplength=540, justify="left").pack(
+                     fill="x", pady=(8, 0))
+        inst_row = tk.Frame(inner_inst, bg=c["surface"])
+        inst_row.pack(fill="x", pady=(10, 0))
+        self.btn_app_install = self._button(
+            inst_row, "Установить как программу", self.install_app,
+            kind="primary", side="left")
+        self.btn_app_install_cancel = self._button(
+            inst_row, "Отмена", self.cancel_app_install,
+            side="left", padx=(8, 0))
+        self.btn_app_install_cancel.pack_forget()
+        self.app_install_bar = ttk.Progressbar(
+            inner_inst, maximum=100, style="green.Horizontal.TProgressbar")
+        self._hint(
+            inner_inst,
+            "Кнопка есть у портативного exe: лаунчер скачает MSI своей "
+            "версии с GitHub, проверит размер и контрольную сумму и "
+            "запустит установщик — появятся ярлыки и запись в «Параметры → "
+            "Приложения». Настройки и аккаунты общие, папка с exe остаётся "
+            "обычной файловой копией.", wrap=540)
+        self._sync_app_install_ui()
+
         # о программе
         inner5 = self._card(pad, title="О программе", glyph="ⓘ")
         tk.Label(
@@ -8797,6 +8858,7 @@ end
             self.btn_update_get.pack_forget()
             self.log(f"Проверка обновлений: {error}")
             self.status_var.set("Не удалось проверить обновления")
+            self.loader_note("GitHub недоступен — проверь подключение")
             return
         latest = result.get("latest") or "?"
         if result.get("is_newer"):
@@ -8822,6 +8884,17 @@ end
                     self._show_update_install()
             self.log(f"Проверка обновлений: доступна версия {latest}")
             self.status_var.set(f"Доступна версия {latest}")
+            if self._upd_file is not None:
+                self.loader_note(
+                    f"{latest} уже скачана — жми ещё раз для установки")
+            elif asset is None:
+                self.loader_note(
+                    f"Доступна {latest} — файла нет, открой «Журнал»")
+            else:
+                size = mb(asset.get("size") or 0) if asset.get("size") else ""
+                self.loader_note(
+                    f"Доступна {latest}" + (f" · {size} МБ" if size else "") +
+                    " — жми ещё раз, скачаю")
             return
         self._upd_asset = None
         self._upd_file = None
@@ -8833,6 +8906,7 @@ end
         self.log(f"Проверка обновлений: установлена последняя версия "
                  f"{VERSION}")
         self.status_var.set("Обновлений нет")
+        self.loader_note(f"Обновлений нет — стоит {VERSION}")
 
     def _hide_update_install(self):
         self.btn_update_install.pack_forget()
@@ -8902,6 +8976,7 @@ end
             self._upd_error(exc)
             return
         self._upd_busy = True
+        self._upd_note_pct = 0.0
         self._upd_cancel.clear()
         self._btn_state(self.btn_update, "ghost", False)
         self.btn_update_get.pack_forget()
@@ -8947,6 +9022,11 @@ end
                 self.upd_bar["value"] = pct
                 self.upd_label.configure(
                     text=f"{mb(done)} из {mb(total)} МБ · {pct:.0f}%")
+                step = float(int(pct // 25) * 25)
+                if step > self._upd_note_pct:
+                    # на маленьком экране полосы нет — показываем процент
+                    self._upd_note_pct = step
+                    self.loader_note(f"{self._upd_version}: {step:.0f}%")
             else:
                 self.upd_label.configure(text=f"{mb(done)} МБ")
         except tk.TclError:
@@ -8974,6 +9054,12 @@ end
         self._show_update_install()
         self.log(f"Обновление скачано: {self._upd_file} ({mb(size)} МБ)")
         self.status_var.set("Обновление скачано")
+        if self._upd_version:
+            self.loader_note(
+                f"Версия {self._upd_version} скачана — "
+                "жми ещё раз для установки")
+        else:
+            self.loader_note("Обновление скачано — жми ещё раз для установки")
 
     def _upd_cancelled_update(self):
         self._upd_reset_progress()
@@ -8984,6 +9070,7 @@ end
         self.update_status_var.set("Скачивание обновления отменено")
         self.status_var.set("Скачивание отменено")
         self.log("Скачивание обновления отменено")
+        self.loader_note("Скачивание обновления отменено")
 
     def _upd_error(self, exc):
         self._upd_reset_progress()
@@ -8995,6 +9082,7 @@ end
             "Не удалось скачать обновление — попробуй ещё раз")
         self.status_var.set("Ошибка скачивания обновления")
         self.log(f"Ошибка скачивания обновления: {exc}")
+        self.loader_note("Скачать не удалось — попробуй ещё раз")
         if self.interactive:
             messagebox.showerror(
                 APP_NAME,
@@ -9010,12 +9098,15 @@ end
             self._upd_file = None
             self.update_status_var.set(
                 "Файл обновления не найден — скачай его заново")
+            self.loader_note("Файл обновления пропал — жми ещё раз, скачаю")
             return
         path = Path(path)
         exe = self._launcher_exe()
         kind = (self._upd_asset or {}).get("kind") or (
             "msi" if path.suffix.lower() == ".msi" else "exe")
         if exe is None:
+            self.loader_note(
+                f"Из исходников не ставлю: {path.name} — запусти exe")
             if self.interactive:
                 messagebox.showinfo(
                     APP_NAME,
@@ -9100,6 +9191,211 @@ end
         self.log(f"Установка обновления: {path}")
         self.status_var.set("Лаунчер перезапустится с новой версией")
         self.root.after(150, self.close)
+
+    # -- установка портативной копии ------------------------------------------
+
+    def _portable_build(self):
+        """Один exe, запущенный не из Program Files."""
+        return self._launcher_exe() is not None and not (
+            self._installed_build())
+
+    def install_app_state(self):
+        """Как сейчас запущен лаунчер — для подписи блока установки."""
+        exe = self._launcher_exe()
+        if exe is None:
+            return "Запуск из исходников: установка не нужна"
+        if self._installed_build():
+            return f"Установлен: {exe}"
+        return "Портативный файл — можно установить как программу"
+
+    def _sync_app_install_ui(self):
+        """Кнопка установки нужна только портативной сборке."""
+        try:
+            if not self.btn_app_install.winfo_exists():
+                return
+            self.app_install_status_var.set(self.install_app_state())
+            if self._portable_build():
+                if not self.btn_app_install.winfo_manager():
+                    self.btn_app_install.pack(side="left")
+            else:
+                self.btn_app_install.pack_forget()
+                self.btn_app_install_cancel.pack_forget()
+                self.app_install_bar.pack_forget()
+        except (AttributeError, tk.TclError):
+            pass
+
+    def install_app(self):
+        """Портативный exe ставит себя сам: MSI этой версии с GitHub.
+
+        Одно нажатие: поиск ассета, скачивание с проверкой суммы, запуск
+        установщика и закрытие лаунчера.
+        """
+        if self._inst_busy:
+            self.app_install_status_var.set("Скачивание уже идёт…")
+            return
+        if not self._portable_build():
+            self._sync_app_install_ui()
+            return
+        path = self._inst_file
+        if path is not None and Path(path).is_file():
+            self.run_app_installer(path)
+            return
+        asset = self._inst_asset
+        if isinstance(asset, dict) and asset.get("url"):
+            target = self._update_target_path(asset)
+            if update_file_valid(target, asset):
+                self._inst_file = target
+                self.run_app_installer(target)
+                return
+            self._download_app_installer(asset)
+            return
+        self.app_install_status_var.set(f"Ищу MSI версии {VERSION}…")
+        self._btn_state(self.btn_app_install, "primary", False,
+                        text="Ищу MSI…")
+
+        def worker():
+            info = installer_asset(VERSION)
+            self.q.put(lambda: self._on_installer_asset(info))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_installer_asset(self, info):
+        self._btn_state(self.btn_app_install, "primary", True,
+                        text="Установить как программу")
+        if self._closing:
+            return
+        error = str(info.get("error") or "")
+        if error:
+            self.app_install_status_var.set(f"MSI не найден: {error}")
+            self.log(f"Поиск установщика: {error}")
+            return
+        asset = dict(info, kind="msi")
+        self._inst_asset = asset
+        target = self._update_target_path(asset)
+        if update_file_valid(target, asset):
+            self._inst_file = target
+            self.run_app_installer(target)
+            return
+        self._download_app_installer(asset)
+
+    def _download_app_installer(self, asset):
+        target = self._update_target_path(asset)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.app_install_status_var.set(f"Папка недоступна: {exc}")
+            return
+        self._inst_busy = True
+        self._inst_cancel.clear()
+        self.btn_app_install.pack_forget()
+        if not self.btn_app_install_cancel.winfo_manager():
+            self.btn_app_install_cancel.pack(side="left", padx=(8, 0))
+        self.app_install_bar["value"] = 0
+        self.app_install_bar.pack(fill="x", pady=(8, 0))
+        self.app_install_status_var.set(
+            f"Скачиваю установщик {VERSION} с GitHub…")
+        self.log(f"Скачивание установщика: {asset.get('url')}")
+
+        def worker():
+            try:
+                download_update(
+                    asset["url"], target,
+                    size=asset.get("size") or 0,
+                    sha256=asset.get("sha256") or "",
+                    progress=lambda done, total: self.q.put(
+                        lambda d=done, t=total: self._inst_progress(d, t)),
+                    cancel=self._inst_cancel)
+                self.q.put(lambda: self._inst_finished(target))
+            except UpdateCancelled:
+                self.q.put(self._inst_cancelled)
+            except Exception as exc:  # noqa: BLE001
+                self.q.put(lambda e=exc: self._inst_error(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cancel_app_install(self):
+        if self._inst_busy:
+            self._inst_cancel.set()
+            self.app_install_status_var.set("Отменяю скачивание…")
+
+    def _inst_progress(self, done, total):
+        if self._closing:
+            return
+        try:
+            if total > 0:
+                pct = min(100.0, done * 100.0 / total)
+                self.app_install_bar["value"] = pct
+                self.app_install_status_var.set(
+                    f"Скачиваю установщик: {mb(done)} из {mb(total)} МБ"
+                    f" · {pct:.0f}%")
+            else:
+                self.app_install_status_var.set(
+                    f"Скачиваю установщик: {mb(done)} МБ")
+        except tk.TclError:
+            pass
+
+    def _inst_reset(self):
+        self._inst_busy = False
+        try:
+            self.app_install_bar.pack_forget()
+            self.btn_app_install_cancel.pack_forget()
+            if self._portable_build():
+                self.btn_app_install.pack(side="left")
+        except tk.TclError:
+            pass
+
+    def _inst_finished(self, target):
+        self._inst_reset()
+        if self._closing:
+            return
+        self._inst_file = Path(target)
+        try:
+            size = self._inst_file.stat().st_size
+        except OSError:
+            size = 0
+        self.log(f"Установщик скачан: {self._inst_file} ({mb(size)} МБ)")
+        self.run_app_installer(self._inst_file)
+
+    def _inst_cancelled(self):
+        self._inst_reset()
+        if self._closing:
+            return
+        self.app_install_status_var.set("Скачивание установщика отменено")
+        self.log("Скачивание установщика отменено")
+
+    def _inst_error(self, exc):
+        self._inst_reset()
+        if self._closing:
+            return
+        self.app_install_status_var.set(
+            f"Не удалось скачать установщик: {trunc(str(exc), 52)}")
+        self.log(f"Ошибка скачивания установщика: {exc}")
+        if self.interactive:
+            messagebox.showerror(
+                APP_NAME, f"Не удалось скачать установщик:\n{exc}",
+                parent=self.root)
+
+    def run_app_installer(self, path):
+        """Запустить MSI и закрыться: дальше ставит установщик WiX."""
+        if self.interactive and not messagebox.askyesno(
+                APP_NAME,
+                "Установщик MaklyxaLauncher готов. Он запросит права "
+                "администратора, а лаунчер закроется.\nПродолжить?",
+                parent=self.root):
+            self.app_install_status_var.set(
+                "Отменено — MSI лежит в папке настроек, жми ещё раз")
+            return
+        try:
+            os.startfile(str(path))  # noqa: S110 — Windows: открыть MSI
+        except (OSError, AttributeError) as exc:
+            self.app_install_status_var.set(
+                f"Не удалось запустить установщик: {trunc(str(exc), 48)}")
+            self.log(f"Ошибка запуска установщика: {exc}")
+            return
+        self.log(f"Запускаю установщик: {path}")
+        self.app_install_status_var.set("Установщик запущен…")
+        if self.interactive:
+            self.root.after(150, self.close)
 
     def _close_on_alt_tab(self):
         """Alt+Tab в другое окно закрывает лаунчер, а не оставляет его висеть."""
@@ -10486,6 +10782,29 @@ def run_selftest():
             if not check_launcher_update().get("error"):
                 failures.append(
                     "check_launcher_update: ошибка сети не поймана")
+
+            # поиск MSI своей версии для установки портативного exe
+            core_module._get_json = lambda url, timeout=8: {
+                "tag_name": "99.0.0",
+                "assets": [
+                    {"name": "MaklyxaLauncher.exe",
+                     "browser_download_url": "https://x/app.exe",
+                     "size": 10},
+                    {"name": "MaklyxaLauncher-99.0.0-x64.msi",
+                     "browser_download_url": "https://x/app.msi",
+                     "size": 20, "digest": "sha256:" + "b" * 64}]}
+            msi = core_module.installer_asset("99.0.0")
+            if not str(msi.get("name") or "").endswith(".msi"):
+                failures.append(f"installer_asset: не MSI — {msi}")
+            if msi.get("sha256") != "b" * 64 or msi.get("size") != 20:
+                failures.append(f"installer_asset: детали потеряны — {msi}")
+            core_module._get_json = lambda url, timeout=8: {
+                "tag_name": "99.0.0", "assets": []}
+            if "error" not in core_module.installer_asset("99.0.0"):
+                failures.append("installer_asset: пустой список не ошибка")
+            core_module._get_json = offline
+            if "error" not in core_module.installer_asset("99.0.0"):
+                failures.append("installer_asset: ошибка сети не поймана")
         finally:
             core_module._get_json = original_get
 

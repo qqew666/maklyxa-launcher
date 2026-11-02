@@ -285,6 +285,7 @@ class LoaderScreen:
         self.look_key = ""
         self.note_text = ""
         self.note_amount = 0.0
+        self.note_live = False
         self.prev_active = None
         self._meta_cache = (0.0, [], "", None, [])
         self._mouse = (0, 0)
@@ -564,6 +565,7 @@ class LoaderScreen:
         self.looks = self.api.looks()
         self.look_key = self.api.look_key()
         text, _life = self.api.note()
+        self.note_live = bool(text)
         if text or self.note_amount <= 0.01:
             # текст держим до конца гашения, иначе строка исчезнет мгновенно
             self.note_text = text
@@ -660,7 +662,10 @@ class LoaderScreen:
                 return True
         if self.content_alpha < 0.999:
             return True
-        if self.note_amount > 0.004 and not self.note_text:
+        if self.note_amount > 0.004:
+            # гаснем до нуля независимо от того, жив ли ещё текст строки
+            return True
+        if self.note_live and self.note_amount < 0.996:
             return True
         return False
 
@@ -698,8 +703,10 @@ class LoaderScreen:
             self.window_alpha = ease_in_out_cubic(self.boot_t)
             self._apply_alpha()
 
-        want = 1.0 if self.note_text else 0.0
+        want = 1.0 if self.note_live else 0.0
         self.note_amount = approach(self.note_amount, want, dt, NOTE_SPEED)
+        if not self.note_live and self.note_amount <= 0.01:
+            self.note_text = ""
 
         if self.phase == self.SPLASH:
             self.splash_t = clamp01(self.splash_t + dt / SPLASH_SEC)
