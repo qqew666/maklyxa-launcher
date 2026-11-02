@@ -48,7 +48,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -228,8 +228,41 @@ THEMES = {
         "titlebar": "#04050a",
         "alpha": 1.0,
     },
+    "white": {
+        "label": "Белый",
+        "bg": "#0a0a0c",
+        "panel": "#101013",
+        "surface": "#16161a",
+        "surface2": "#1e1e24",
+        "hover": "#2a2a32",
+        "entry": "#14141a",
+        "list": "#0d0d11",
+        "border": "#2b2b33",
+        "text": "#ffffff",
+        "muted": "#9a9aa4",
+        "on_accent": "#0a0a0c",
+        "titlebar": "#08080a",
+        "alpha": 1.0,
+    },
+    "black": {
+        "label": "Чёрный",
+        "bg": "#f2f3f6",
+        "panel": "#ffffff",
+        "surface": "#ffffff",
+        "surface2": "#eceef2",
+        "hover": "#e0e3ea",
+        "entry": "#f7f8fa",
+        "list": "#f0f1f5",
+        "border": "#d5d9e2",
+        "text": "#12141a",
+        "muted": "#666d7c",
+        "on_accent": "#ffffff",
+        "titlebar": "#ffffff",
+        "alpha": 1.0,
+    },
 }
-THEME_ORDER = ["dark", "night", "graphite", "neon", "glass", "light"]
+THEME_ORDER = ["dark", "night", "graphite", "neon", "glass", "white",
+               "black", "light"]
 DEFAULT_THEME = "dark"
 
 ACCENT_PRESETS = [
@@ -247,7 +280,16 @@ LOOK_PRESETS = [
     ("neon", "#ff2d95", "Неон · розовый"),
     ("dark", "#00c48c", "Тёмная · изумруд"),
     ("glass", "#00d9e5", "Стекло · циан"),
+    ("white", "#ffffff", "Белый · моно"),
+    ("black", "#0b0c0e", "Чёрный · моно"),
     ("light", "#3b9eff", "Светлая · синяя"),
+]
+
+# Образы стартового экрана-лоадера: тема + акцент одним нажатием.
+LOADER_LOOKS = [
+    ("glass", "#8fd7ff", "Стекло"),
+    ("white", "#ffffff", "Белый"),
+    ("black", "#0b0c0e", "Чёрный"),
 ]
 
 SPLASH_STYLES = ("off", "minimal", "card")
@@ -271,6 +313,7 @@ DEFAULT_CONFIG = {
     "theme": DEFAULT_THEME,
     "custom_theme": "",
     "sidebar_compact": False,
+    "loader_screen": True,
     "scripts_last": "",
     "window_geometry": "",
     "window_buttons": "mac",

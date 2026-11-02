@@ -12,7 +12,9 @@ UI v4 (меню-хаб):
   * раздел «Скрипты»: редактор Lua с подсветкой, библиотека файлов и
     запуск в изолированном интерпретаторе (без доступа к файлам,
     сети и процессу Roblox);
-  * палитра из шести тем и готовые образы (тема + акцент) в один клик;
+  * палитра из восьми тем и готовые образы (тема + акцент) в один клик;
+  * стартовый экран-лоадер 500×400: карточки разделов, пружинная
+    прокрутка и образы «Стекло»/«Белый»/«Чёрный» в один клик;
   * заголовки страниц-«героев», карточки с акцентной чертой,
     кнопки с плавной анимацией цвета при наведении.
 
@@ -20,7 +22,8 @@ UI v4 (меню-хаб):
 Запуск: python launcher.py [--page game|accounts|favorites|gallery|
                                    scripts|ingame|flags|cursors|themes|
                                    launchstyle|settings|log]
-                            [--theme dark|night|graphite|neon|glass|light]
+                            [--theme dark|night|graphite|neon|glass|
+                                     white|black|light]
                             [--ingame]
         --ingame — служебный режим внутриигрового помощника (оверлей и AFK).
 """
@@ -52,6 +55,7 @@ except Exception:  # Pillow не обязателен для запуска
     HAVE_PIL = False
 
 import ingame as ingame_mod
+import loader_ui
 import luax
 import mascot as mascot_mod
 
@@ -64,7 +68,8 @@ from core import (
     DEFAULT_CONFIG, DEFAULT_THEME,
     DISCORD_PORTAL_URL, DISCOVER_URL, FPS_CHOICES, FLAG_API, FLAG_FPS, FLAG_QUALITY,
     GRAPHICS_MODES, HTTP_HEADERS, INSTALLER_URL,
-    IMAGE_ONLY_ACCENT, IMAGE_ONLY_PALETTE, LAUNCH_DIR, LOOK_PRESETS,
+    IMAGE_ONLY_ACCENT, IMAGE_ONLY_PALETTE, LAUNCH_DIR, LOADER_LOOKS,
+    LOOK_PRESETS,
     RELEASES_URL, SCRIPTS_DIR,
     THEMES, THEME_ORDER, UPDATE_DIR, VERSION, WINDOW_TITLE,
     ROBLOX_APP_THEMES,
@@ -982,6 +987,121 @@ class LaunchSplash:
                 pass
 
 
+class _LoaderApi:
+    """Данные и команды стартового экрана-лоадера (см. loader_ui)."""
+
+    font_family = UI_FONT
+
+    def __init__(self, app):
+        self.app = app
+        self._icon = False
+
+    def palette(self):
+        c = self.app.c
+        return {
+            "bg": c["bg"],
+            "card": c["surface"],
+            "card_line": c["border"],
+            "surface": c["surface2"],
+            "hover": c["hover"],
+            "text": c["text"],
+            "muted": c["muted"],
+            "dim": loader_ui.mix(c["text"], c["bg"], 0.7),
+            "accent": self.app.accent,
+            "alpha": c.get("alpha", 1.0),
+        }
+
+    def title(self):
+        return APP_NAME
+
+    def brand(self):
+        return "M"
+
+    def subtitle(self):
+        ver = (self.app.cfg.get("roblox_version") or "").strip()
+        return f"Версия {VERSION}" + (f" · Roblox {ver}" if ver else "")
+
+    def screen_rect(self):
+        return work_area()
+
+    def _icon_image(self):
+        if self._icon is False:
+            self._icon = None
+            if ICON_PNG.exists():
+                try:
+                    self._icon = tk.PhotoImage(
+                        file=str(ICON_PNG)).subsample(6, 6)
+                except tk.TclError:
+                    self._icon = None
+        return self._icon
+
+    def logo(self):
+        return self._icon_image()
+
+    def logo_small(self):
+        return self._icon_image()
+
+    def avatar(self):
+        return self._icon_image()
+
+    def nick(self):
+        name = (self.app.account_name_var.get() or "").strip()
+        if not name or name == "Не выбран":
+            return "Maklyxa"
+        return trunc(name, 14)
+
+    def cards(self):
+        return [{"key": key, "title": title, "icon": icon,
+                 "status": self._status(key), "enabled": True}
+                for key, title, icon in App.LOADER_CARDS]
+
+    def _status(self, key):
+        app = self.app
+        if key == "game":
+            text = app.proto_var.get()
+        elif key == "settings":
+            text = (f"Тема: {app.c['label']} · аккаунтов "
+                    f"{len(app._accounts.get('accounts') or [])}")
+        elif key == "log":
+            text = app.update_status_var.get()
+        else:
+            try:
+                text = f"{len(list_scripts())} файлов в песочнице"
+            except OSError:
+                text = "Песочница недоступна"
+        return trunc(text or "—", 42)
+
+    def links(self):
+        return App.LOADER_LINKS
+
+    def looks(self):
+        return [(theme, label, accent)
+                for theme, accent, label in LOADER_LOOKS]
+
+    def look_key(self):
+        return self.app.theme_name
+
+    def active_key(self):
+        page = self.app.current_page
+        return page if any(k == page for k, _t, _i in
+                           App.LOADER_CARDS) else ""
+
+    def open_page(self, key):
+        self.app._open_from_loader(key)
+
+    def set_look(self, key):
+        for theme, accent, label in LOADER_LOOKS:
+            if theme == key:
+                self.app.apply_look(theme, accent, label)
+                return
+
+    def minimize(self):
+        self.app.frameless.minimize()
+
+    def close(self):
+        self.app.close()
+
+
 class App:
     def __init__(self, root, interactive=True, start_page=None):
         self.root = root
@@ -1012,6 +1132,7 @@ class App:
         self.log_lines = []
         self.nav_buttons = {}
         self.pages = {}
+        self.loader = None
         self.scroll_canvases = {}
         self.primary_buttons = []
         self.accent_bgs = []          # виджеты с фоном акцентного цвета
@@ -1137,6 +1258,8 @@ class App:
             self._poll_discord_status()
             self._ingame_poll_job = self.root.after(
                 1600, self._poll_ingame_status)
+            if self.cfg.get("loader_screen", True) and not start_page:
+                self.root.after(80, lambda: self._show_loader(boot=True))
 
     # -- сборка / пересборка ----------------------------------------------------
 
@@ -1169,6 +1292,10 @@ class App:
     def _rebuild(self):
         """Полная пересборка UI (смена темы)."""
         keep = self.current_page
+        loader_was = self.loader is not None and self.loader.visible
+        if self.loader is not None:
+            self.loader.destroy()
+            self.loader = None
         for job in list(self._page_layout_jobs.values()):
             try:
                 self.root.after_cancel(job)
@@ -1211,6 +1338,8 @@ class App:
         self._gallery_tiles = []
         self._gallery_photo_cache.clear()
         self._build(keep_page=keep)
+        if loader_was:
+            self._show_loader(boot=False)
 
     def _configure_window(self):
         root = self.root
@@ -1233,6 +1362,64 @@ class App:
                 self._icon_ref = icon
             except tk.TclError:
                 pass
+
+    # -- стартовый экран-лоадер ------------------------------------------------
+
+    LOADER_CARDS = [
+        ("settings", "Настройки", "⚙"),
+        ("game", "Play", "▶"),
+        ("log", "Последнее обновление", "↻"),
+        ("scripts", "Скрипты", "λ"),
+    ]
+    LOADER_LINKS = [
+        ("accounts", "Аккаунты"),
+        ("favorites", "Избранное"),
+        ("gallery", "Галерея"),
+    ]
+    LOADER_MIN = (420, 340)
+    def hub_rect(self):
+        """Прямоугольник окна хаба, в который разворачивается экран."""
+        geom = self.cfg.get("window_geometry") or ""
+        if not valid_geometry(geom):
+            ax, ay, aw, ah = work_area()
+            gw = min(DEFAULT_SIZE[0], aw - 40)
+            gh = min(DEFAULT_SIZE[1], ah - 80)
+            geom = (f"{gw}x{gh}+{ax + (aw - gw) // 2}"
+                    f"+{ay + (ah - gh) // 2}")
+        parts = re.match(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", geom)
+        if not parts:
+            return None
+        w, h, x, y = (int(v) for v in parts.groups())
+        return x, y, w, h
+
+    def _ensure_loader(self):
+        if self.loader is None:
+            self.loader = loader_ui.LoaderScreen(self.root,
+                                                 _LoaderApi(self))
+        return self.loader
+
+    def _show_loader(self, boot=True):
+        if self._closing:
+            return
+        self.root.minsize(loader_ui.SPLASH_SIZE, loader_ui.SPLASH_SIZE)
+        self.frameless.min_w, self.frameless.min_h = self.LOADER_MIN
+        self._ensure_loader().show(boot=boot)
+
+    def _to_loader(self):
+        if self._closing:
+            return
+        self.root.minsize(loader_ui.SPLASH_SIZE, loader_ui.SPLASH_SIZE)
+        self.frameless.min_w, self.frameless.min_h = self.LOADER_MIN
+        self._ensure_loader().enter()
+
+    def _open_from_loader(self, key):
+        self.show_page(key if key in self.pages else "game")
+        rect = self.hub_rect()
+        if rect is None or self.loader is None:
+            return
+        self.frameless.min_w, self.frameless.min_h = MIN_W, MIN_H
+        self.loader.collapse_to_hub(
+            *rect, done=lambda: self.root.minsize(MIN_W, MIN_H))
 
     # -- стили -----------------------------------------------------------------
 
@@ -1388,10 +1575,26 @@ class App:
         self.mascot_btn.pack(side="right", padx=(0, 8))
         self._bind_hover(self.mascot_btn, "ghost")
 
-        self.frameless.excluded = {min_btn, max_btn, close_btn,
-                                   self.theme_cycle_btn,
-                                   self.account_switch_btn,
-                                   self.mascot_btn}
+        self.loader_btn = tk.Button(
+            titlebar, text="⌂  Меню", relief="flat", bd=0,
+            font=(UI_FONT, 9), cursor="hand2", takefocus=False,
+            bg=c["surface2"], fg=c["muted"],
+            activebackground=c["hover"], activeforeground=c["text"],
+            highlightthickness=0, padx=12, command=self._to_loader)
+        no_loader = not (self.cfg.get("loader_screen", True)
+                         and self.interactive)
+        excluded = {min_btn, max_btn, close_btn,
+                    self.theme_cycle_btn,
+                    self.account_switch_btn,
+                    self.mascot_btn}
+        if no_loader:
+            self.loader_btn.destroy()
+        else:
+            self.loader_btn.pack(side="right", padx=(0, 8))
+            self._bind_hover(self.loader_btn, "ghost")
+            excluded.add(self.loader_btn)
+
+        self.frameless.excluded = excluded
 
         body = tk.Frame(root, bg=c["bg"])
         body.pack(fill="both", expand=True)
@@ -7910,12 +8113,15 @@ end
         self.var_auto_close = tk.BooleanVar(value=self.cfg["auto_close"])
         self.var_save_history = tk.BooleanVar(value=self.cfg["save_history"])
         self.var_remember = tk.BooleanVar(value=self.cfg["remember_last"])
+        self.var_loader_screen = tk.BooleanVar(
+            value=bool(self.cfg.get("loader_screen", True)))
         for text, var in (
             ("Закрывать лаунчер через 1.5 с после запуска игры",
              self.var_auto_close),
             ("Запоминать запущенные игры (история)", self.var_save_history),
             ("Открывать лаунчер с последней запущенной игрой",
              self.var_remember),
+            ("Показывать меню-лоадер при запуске", self.var_loader_screen),
         ):
             self._checkbox(inner, text, var,
                            command=self._save_settings).pack(
@@ -8211,6 +8417,7 @@ end
         self.cfg["auto_close"] = bool(self.var_auto_close.get())
         self.cfg["save_history"] = bool(self.var_save_history.get())
         self.cfg["remember_last"] = bool(self.var_remember.get())
+        self.cfg["loader_screen"] = bool(self.var_loader_screen.get())
         save_config(self.cfg)
         self.status_var.set("Настройки сохранены")
 
@@ -8230,6 +8437,7 @@ end
             self.cfg["auto_close"] = bool(self.var_auto_close.get())
             self.cfg["save_history"] = bool(self.var_save_history.get())
             self.cfg["remember_last"] = bool(self.var_remember.get())
+            self.cfg["loader_screen"] = bool(self.var_loader_screen.get())
             raw = self.var_default.get().strip()
             if raw:
                 pid = parse_place_id(raw)
@@ -8738,7 +8946,13 @@ end
         if self._loaded_font_path is not None:
             unload_private_font(self._loaded_font_path)
         try:
-            self.cfg["window_geometry"] = self.root.geometry()
+            if self.loader is not None and self.loader.visible:
+                rect = self.hub_rect()
+                if rect is not None:
+                    x, y, w, h = rect
+                    self.cfg["window_geometry"] = f"{w}x{h}+{x}+{y}"
+            else:
+                self.cfg["window_geometry"] = self.root.geometry()
         except tk.TclError:
             pass
         save_config(self.cfg)
