@@ -453,6 +453,16 @@ class FramelessWindow:
         else:
             round_window_corners(hwnd, 12)
 
+    def refresh_shape(self):
+        """Перестричь углы сразу: нужно при покадровом изменении размера."""
+        if self._region_job is not None:
+            try:
+                self.root.after_cancel(self._region_job)
+            except tk.TclError:
+                pass
+            self._region_job = None
+        self._apply_region()
+
     def _on_configure(self, event):
         if self.root is None or event.widget is not self.root:
             return
@@ -1060,16 +1070,18 @@ class _LoaderApi:
         if key == "game":
             text = app.proto_var.get()
         elif key == "settings":
-            text = (f"Тема: {app.c['label']} · аккаунтов "
+            text = (f"Большое меню · тема {app.c['label']}, аккаунтов "
                     f"{len(app._accounts.get('accounts') or [])}")
         elif key == "log":
             text = app.update_status_var.get()
         else:
-            try:
-                text = f"{len(list_scripts())} файлов в песочнице"
-            except OSError:
-                text = "Песочница недоступна"
-        return trunc(text or "—", 42)
+            newest = app.loader_newest_script()
+            total = len(list_scripts())
+            if newest:
+                text = f"{total} в песочнице · последний «{newest}»"
+            else:
+                text = "Песочница пуста"
+        return trunc(text or "—", 56)
 
     def links(self):
         return App.LOADER_LINKS
@@ -1082,9 +1094,19 @@ class _LoaderApi:
         return self.app.theme_name
 
     def active_key(self):
+        if self.app.loader is not None and self.app.loader.visible:
+            # на маленьком экране порядок карточек не должен прыгать
+            return ""
         page = self.app.current_page
         return page if any(k == page for k, _t, _i in
                            App.LOADER_CARDS) else ""
+
+    def note(self):
+        return self.app.loader_note_state()
+
+    def refresh_shape(self):
+        """Углы безрамочного окна стрижёт регион — обновляем каждый кадр."""
+        self.app.frameless.refresh_shape()
 
     def open_page(self, key):
         self.app._open_from_loader(key)
@@ -1133,6 +1155,8 @@ class App:
         self.nav_buttons = {}
         self.pages = {}
         self.loader = None
+        self._note_text = ""
+        self._note_at = 0.0
         self.scroll_canvases = {}
         self.primary_buttons = []
         self.accent_bgs = []          # виджеты с фоном акцентного цвета
@@ -1413,13 +1437,166 @@ class App:
         self._ensure_loader().enter()
 
     def _open_from_loader(self, key):
-        self.show_page(key if key in self.pages else "game")
+        """Большое меню раскрывается только из карточки «Настройки»."""
+        if key != "settings":
+            self._loader_quick(key)
+            return
+        self.show_page(key)
         rect = self.hub_rect()
         if rect is None or self.loader is None:
             return
         self.frameless.min_w, self.frameless.min_h = MIN_W, MIN_H
         self.loader.collapse_to_hub(
             *rect, done=lambda: self.root.minsize(MIN_W, MIN_H))
+
+    # -- быстрые действия на экране-лоадере -----------------------------------
+
+    LOADER_NOTE_SEC = 5.0
+
+    def loader_note(self, text):
+        """Строка-отклик внизу экрана: живёт LOADER_NOTE_SEC и гаснет."""
+        self._note_text = trunc(str(text or ""), 60)
+        self._note_at = time.monotonic()
+        if self.loader is not None and self.loader.visible:
+            try:
+                self.root.after(int(self.LOADER_NOTE_SEC * 1000) + 400,
+                                self.loader.refresh)
+            except tk.TclError:
+                pass
+
+    def loader_note_state(self):
+        """(текст, остаток 1..0) для отрисовки на экране-лоадере."""
+        if not self._note_text:
+            return "", 0.0
+        left = self._note_at + self.LOADER_NOTE_SEC - time.monotonic()
+        if left <= 0.0:
+            self._note_text = ""
+            return "", 0.0
+        return self._note_text, min(1.0, left / 0.9)
+
+    def _loader_quick(self, key):
+        """Действие прямо на маленьком экране — размер окна не меняется."""
+        if key == "game":
+            if self._client_busy:
+                self.loader_note("Roblox уже запускается…")
+            else:
+                self.loader_note("Запускаю Roblox…")
+                self.launch_client()
+        elif key == "log":
+            if self._update_busy:
+                self.loader_note("Проверка обновления уже идёт…")
+            else:
+                self.loader_note("Спрашиваю GitHub о релизах…")
+                self.check_updates()
+        elif key == "scripts":
+            self._loader_run_last_script()
+        elif key == "accounts":
+            self._loader_cycle_account()
+        elif key == "favorites":
+            self._loader_play_favorite()
+        elif key == "gallery":
+            self._loader_open_gallery()
+
+    def _loader_open_gallery(self):
+        """Скриншоты Roblox — в проводнике, без большого меню."""
+        folder = screenshots_dir()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(folder))  # noqa: S110 - Windows-открыть
+            self.loader_note("Открыл папку со снимками")
+        except (OSError, AttributeError) as exc:
+            self.loader_note(f"Папка недоступна: {exc}")
+
+    def _loader_cycle_account(self):
+        """Быстрая смена аккаунта: следующий в списке, без большого меню."""
+        try:
+            self._accounts = accounts_state()
+        except Exception:
+            self._accounts = {"active": "", "accounts": []}
+        items = self._accounts.get("accounts") or []
+        if not items:
+            self.loader_note("Аккаунтов нет — добавь их в большом меню")
+            return
+        ids = [str(item.get("id") or "") for item in items]
+        before = str(self._accounts.get("active") or "")
+        try:
+            nxt = ids[(ids.index(before) + 1) % len(ids)]
+        except ValueError:
+            nxt = ids[0]
+        self._choose_account(nxt)
+        try:
+            after = str(accounts_state().get("active") or "")
+        except Exception:
+            after = ""
+        if after != before:
+            self._accounts = accounts_state()
+        active = self._active_account()
+        self.loader_note(
+            "Аккаунт: " + (self._account_label(active) if active else "—"))
+
+    def _loader_play_favorite(self):
+        """Запуск следующего избранного плейса прямо с экрана."""
+        items = self.cfg.get("favorites") or []
+        if not items:
+            self.loader_note("Избранного нет — добавь на странице «Игра»")
+            return
+        index = (int(getattr(self, "_fav_index", -1)) + 1) % len(items)
+        self._fav_index = index
+        item = items[index]
+        pid = str(item.get("place_id") or "")
+        name = trunc(item.get("name") or f"Place {pid}", 34)
+        self.loader_note(f"Запускаю «{name}»")
+        self.play(pid)
+
+    def loader_newest_script(self):
+        """Имя последнего по правке скрипта; '' в песочнице пусто."""
+        names = list_scripts()
+        if not names:
+            return ""
+        try:
+            return max(names,
+                       key=lambda name: (SCRIPTS_DIR / name).stat().st_mtime)
+        except OSError:
+            return names[0]
+
+    def _loader_run_last_script(self):
+        """Прогон последнего по времени скрипта в песочнице."""
+        newest = self.loader_newest_script()
+        if not newest:
+            self.loader_note("Скриптов нет — создай их в большом меню")
+            return
+        source, error = read_script(newest)
+        if error:
+            self.loader_note(f"«{newest}»: {trunc(error, 44)}")
+            return
+        if not source.strip():
+            self.loader_note(f"«{newest}» пустой")
+            return
+        self.loader_note(f"Выполняю «{newest}»…")
+        threading.Thread(target=self._loader_script_worker,
+                         args=(newest, source), daemon=True).start()
+
+    def _loader_script_worker(self, name, source):
+        started = time.time()
+        lines = []
+        error = luax.run_script(
+            source, on_print=lambda text: lines.append(str(text)),
+            steps=luax.LIMITS["steps"])
+        ms = (time.time() - started) * 1000
+
+        def finish():
+            if self._closing:
+                return
+            if error:
+                self.loader_note(f"«{name}»: {trunc(error, 44)}")
+                self.log(f"Экран-лоадер: «{name}» — {error}")
+                return
+            tail = trunc(lines[-1], 30) if lines else "без вывода"
+            self.loader_note(f"«{name}»: {tail} · {ms:.0f} мс")
+            for line in lines:
+                self.log(f"Скрипт «{name}»: {line}")
+
+        self.q.put(finish)
 
     # -- стили -----------------------------------------------------------------
 

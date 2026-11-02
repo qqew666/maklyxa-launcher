@@ -2,6 +2,8 @@
 
 Экран рисуется целиком на canvas: окно раскрывается из плитки 200×200,
 карточки разделов прокручиваются на пружине с затухающей полосой.
+Края фигур сглаживаются полупрозрачными обводами, все переходы считаются
+от реально прошедшего времени, поэтому анимация одинакова при любых кадрах.
 Оформление, тексты и разделы берутся из лаунчера.
 """
 
@@ -12,44 +14,45 @@ from tkinter import font as tkfont
 
 SPLASH_SIZE = 200
 SPLASH_SEC = 2.00
-EXPAND_SEC = 0.32
-CONTENT_FADE = 0.40
-BOOT_FADE = 0.20
-EXIT_FADE = 0.28
-FADE_OUT = 0.18
+EXPAND_SEC = 0.36
+CONTENT_FADE = 0.44
+BOOT_FADE = 0.24
+EXIT_FADE = 0.30
+FADE_OUT = 0.20
 
 WIN_W = 500
 WIN_H = 400
-CORNER = 15
+FOOTER_H = 56.0
 
 LOGO_X = 18
 LOGO_Y = 15
 LOGO_SIZE = 38
-TITLE_Y = 20
-SUB_Y = 45
+TITLE_Y = 19
+SUB_Y = 48
 HEADER_RIGHT_PAD = 50
 
 LINK_X = 20
-LINK_Y = 100
-LINK_STEP = 35
-LINK_H = 20
+LINK_Y = 82
+LINK_STEP = 30
+LINK_H = 22
 
-CARDS_Y = 100
-CARD_H = 80
+CARDS_Y = 80
+CARD_H = 76
 CARD_GAP = 10
-CARD_ROUND = 10
+CARD_ROUND = 11
 CARD_BORDER = 1.5
 CARD_PADX = 15
-CARD_TITLE_Y = 10
-CARD_STATUS_Y = 35
-CARD_ICON = 20
-CARD_ICON_PAD = 10
-CARD_ICON_ROUND = 5
+CARD_TITLE_Y = 15
+CARD_STATUS_Y = 40
+CARD_ICON = 22
+CARD_ICON_PAD = 12
+CARD_ICON_ROUND = 6
 CARD_DOT_X = 15
 CARD_TEXT_SHIFT = 12
+CARD_BAR_W = 3.0
 
 INACTIVE_DIM = 0.5
-DIM_SPEED = 2.0
+DIM_SPEED = 6.5
 CONTAINER_ANIM_SEC = 0.5
 
 WHEEL_SPEED = 60.0
@@ -62,21 +65,28 @@ REST_VEL = 0.01
 SCROLL_IDLE = 0.60
 BAR_SPEED = 10.0
 BAR_W = 4.0
-BAR_MARGIN = 2.0
 BAR_MIN = 24.0
-BAR_ROUND = 2.0
 
 HOVER_SPEED = 10.0
+PRESS_SPEED = 13.0
+NOTE_SPEED = 9.0
 SOON_ALPHA = 180.0 / 255.0
+
+# Tk не сглаживает края полигонов: снаружи заливаем полупрозрачными обводами,
+# лесенка пикселей уходит в эту мягкую кромку.
+SPLINE_STEPS = 24
+FEATHER = ((0.6, 0.62), (1.6, 0.30), (2.6, 0.13))
+FEATHER_SOFT = ((0.6, 0.45), (1.6, 0.18))
+ENTRY_STAGGER = 0.07
+ENTRY_TRAVEL = 9.0
 
 SPLASH_R = 18.0
 SPLASH_THICK = 3.0
-SPIN_SEGS = 64
+SPIN_SEGS = 90
 SPIN_SPEED = 17.0
 SPIN_FADE = 0.75 * 2.0 * math.pi
 
 LOOK_X0 = 20
-LOOK_Y_OFF = 62
 LOOK_R = 7.0
 LOOK_GAP = 26.0
 
@@ -151,6 +161,11 @@ def mix(fg, bg, alpha):
         int(f[i] * a + b[i] * (1.0 - a) + 0.5) for i in range(3))
 
 
+def approach(cur, target, dt, speed):
+    """Сглаживание, не зависящее от частоты кадров."""
+    return cur + (target - cur) * (1.0 - math.exp(-speed * dt))
+
+
 def smooth_scroll(cur, tgt, vel, dt, k=SPRING_K, d=SPRING_D):
     diff = tgt - cur
     if abs(diff) < SNAP_DIST and abs(vel) < SNAP_VEL:
@@ -217,6 +232,7 @@ class Card:
         self.active = active
         self.dim = dim
         self.hover = 0.0
+        self.press = 0.0
 
 
 class LoaderScreen:
@@ -261,11 +277,14 @@ class LoaderScreen:
         self.card_meta = []
         self.links = []
         self.link_hover = {}
+        self.link_press = {}
         self.close_hover = 0.0
         self.min_hover = 0.0
         self.look_hover = {}
         self.looks = []
         self.look_key = ""
+        self.note_text = ""
+        self.note_amount = 0.0
         self.prev_active = None
         self._meta_cache = (0.0, [], "", None, [])
         self._mouse = (0, 0)
@@ -357,6 +376,13 @@ class LoaderScreen:
         self._last = time.monotonic()
         self._schedule()
 
+    def refresh(self):
+        """Один кадр по запросу ядра: строка-отклик показалась или истекла."""
+        if not self.visible:
+            return
+        self._sync_meta(force=True)
+        self._schedule()
+
     def hide(self):
         if not self.visible:
             return
@@ -398,6 +424,9 @@ class LoaderScreen:
         except tk.TclError:
             pass
         self.win_w, self.win_h = w, h
+        # регион окна обновляют с задержкой, а во время раскрытия углы
+        # должны следовать за размером каждый кадр
+        self.api.refresh_shape()
 
     def _set_size(self, w, h):
         x, y, cw, ch = self._geom()
@@ -440,6 +469,13 @@ class LoaderScreen:
     def _on_press(self, event):
         item = self._zone(event.x, event.y)
         self._pressed = item[4] if item else None
+        if item is None or self.phase != self.READY:
+            return
+        if item[4] == "card":
+            self.press_card(item[5])
+        elif item[4] == "link":
+            self.link_press[item[5]] = 1.0
+            self._schedule()
 
     def _on_release(self, event):
         item = self._zone(event.x, event.y)
@@ -458,6 +494,13 @@ class LoaderScreen:
             self.api.open_page(item[5])
         elif kind == "look":
             self.api.set_look(item[5])
+
+    def press_card(self, key):
+        """Короткая пружина отклика: карточка проминается под нажатием."""
+        for card in self.cards:
+            if card.key == key:
+                card.press = 1.0
+        self._schedule()
 
     def _on_wheel(self, event):
         self._wheel(event.delta)
@@ -520,6 +563,10 @@ class LoaderScreen:
         self.avatar = self._meta_cache[3]
         self.looks = self.api.looks()
         self.look_key = self.api.look_key()
+        text, _life = self.api.note()
+        if text or self.note_amount <= 0.01:
+            # текст держим до конца гашения, иначе строка исчезнет мгновенно
+            self.note_text = text
         self._rebuild_cards()
 
     def _rebuild_cards(self):
@@ -561,7 +608,8 @@ class LoaderScreen:
         tw = self._f("title").measure(title)
         start_x = (w - tw - HEADER_RIGHT_PAD) / 2.0
         card_w = w - start_x - 20.0
-        area_h = self.win_h - CARDS_Y
+        # низ отдан аккаунту и образам: карточки под полосу не заезжают
+        area_h = max(60.0, self.win_h - CARDS_Y - FOOTER_H)
         content_h = len(self.cards) * (CARD_H + CARD_GAP)
         max_scroll = max(0.0, content_h - area_h)
         return start_x, card_w, area_h, content_h, max_scroll
@@ -605,11 +653,14 @@ class LoaderScreen:
             if abs(card.dim - target) > 0.004:
                 return True
         for value in (self.close_hover, self.min_hover, *self.link_hover.values(),
-                      *self.look_hover.values(),
-                      *[c.hover for c in self.cards]):
+                      *self.look_hover.values(), *self.link_press.values(),
+                      *[c.hover for c in self.cards],
+                      *[c.press for c in self.cards]):
             if value > 0.004:
                 return True
         if self.content_alpha < 0.999:
+            return True
+        if self.note_amount > 0.004 and not self.note_text:
             return True
         return False
 
@@ -647,6 +698,9 @@ class LoaderScreen:
             self.window_alpha = ease_in_out_cubic(self.boot_t)
             self._apply_alpha()
 
+        want = 1.0 if self.note_text else 0.0
+        self.note_amount = approach(self.note_amount, want, dt, NOTE_SPEED)
+
         if self.phase == self.SPLASH:
             self.splash_t = clamp01(self.splash_t + dt / SPLASH_SEC)
             if self.splash_t >= 1.0:
@@ -669,25 +723,32 @@ class LoaderScreen:
             self.out_t = clamp01(self.out_t + dt / FADE_OUT)
             self.content_alpha = 1.0 - ease_in_out_cubic(self.out_t)
 
-        self._tick_geom()
+        self._tick_geom(dt)
         self._tick_cards(dt)
         mouse = getattr(self, "_mouse", (0, 0))
         hover = self._zone(mouse[0], mouse[1])
         tag = hover[4] if hover else ""
         payload = hover[5] if (hover and len(hover) > 5) else None
-        self.close_hover = self._lerp(self.close_hover, tag == "close", dt)
-        self.min_hover = self._lerp(self.min_hover, tag == "min", dt)
+        self.close_hover = approach(
+            self.close_hover, 1.0 if tag == "close" else 0.0, dt, HOVER_SPEED)
+        self.min_hover = approach(
+            self.min_hover, 1.0 if tag == "min" else 0.0, dt, HOVER_SPEED)
         for key in [k for k, _l in self.links]:
-            self.link_hover[key] = self._lerp(
-                self.link_hover.get(key, 0.0), tag == "link" and payload == key,
-                dt)
+            want = 1.0 if tag == "link" and payload == key else 0.0
+            self.link_hover[key] = approach(self.link_hover.get(key, 0.0),
+                                            want, dt, HOVER_SPEED)
+            self.link_press[key] = approach(
+                self.link_press.get(key, 0.0), 0.0, dt, PRESS_SPEED)
         for look, _l, _c in self.looks:
-            self.look_hover[look] = self._lerp(
-                self.look_hover.get(look, 0.0), tag == "look" and payload == look,
-                dt)
+            want = 1.0 if tag == "look" and payload == look else 0.0
+            self.look_hover[look] = approach(
+                self.look_hover.get(look, 0.0), want, dt, HOVER_SPEED)
         for card in self.cards:
-            card.hover = self._lerp(
-                card.hover, tag == "card" and payload == card.key, dt)
+            card.hover = approach(
+                card.hover,
+                1.0 if tag == "card" and payload == card.key else 0.0,
+                dt, HOVER_SPEED)
+            card.press = approach(card.press, 0.0, dt, PRESS_SPEED)
         settled = self.scroll.tick(self._max_scroll(), 0.0, False, dt, now)
         if settled and self.phase == self.READY:
             pass
@@ -698,10 +759,10 @@ class LoaderScreen:
             self.loader_alpha = 0.0
             self.win_w, self.win_h = WIN_W, WIN_H
 
-    def _tick_geom(self):
+    def _tick_geom(self, dt):
         if not self._size_anim:
             return
-        self._geom_t = clamp01(self._geom_t + self._root_dt())
+        self._geom_t = clamp01(self._geom_t + dt / max(self._geom_dur, 0.02))
         t = getattr(self, "_curve", ease_out_expand)(self._geom_t)
         frm, to = self._geom_from, self._geom_to
         self._set_rect(*[frm[i] + (to[i] - frm[i]) * t for i in range(4)])
@@ -710,9 +771,6 @@ class LoaderScreen:
             done, self._on_geom_done = self._on_geom_done, None
             if callable(done):
                 done()
-
-    def _root_dt(self):
-        return 0.016 / max(self._geom_dur, 0.02)
 
     def _tick_cards(self, dt):
         for card in self.cards:
@@ -725,13 +783,8 @@ class LoaderScreen:
             else:
                 card.current_y = card.target_y
             target = 1.0 if card.active else INACTIVE_DIM
-            card.dim += (target - card.dim) * DIM_SPEED * dt
-            card.dim = min(max(card.dim, INACTIVE_DIM), 1.0)
-
-    @staticmethod
-    def _lerp(value, hovered, dt, speed=HOVER_SPEED):
-        value = value + (speed * dt if hovered else -speed * dt)
-        return clamp01(value)
+            card.dim = min(max(approach(card.dim, target, dt, DIM_SPEED),
+                               INACTIVE_DIM), 1.0)
 
     def _apply_alpha(self):
         try:
@@ -749,7 +802,49 @@ class LoaderScreen:
                x2, y1 + r, x2, my, x2, y2 - r,
                x2 - r, y2, mx, y2, x1 + r, y2,
                x1, y2 - r, x1, my, x1, y1 + r]
-        cv.create_polygon(pts, smooth=True, **kw)
+        cv.create_polygon(pts, smooth=True, splinesteps=SPLINE_STEPS, **kw)
+
+    def _feather(self, cv, x1, y1, x2, y2, r, color, bg, alpha,
+                 feather=FEATHER):
+        """Наружные полупрозрачные обводы: гасят лесенку на границе фигуры."""
+        if alpha <= 0.03:
+            return
+        for off, strength in feather:
+            a = alpha * strength
+            if a < 0.02:
+                continue
+            self._rrect(cv, x1 - off, y1 - off, x2 + off, y2 + off, r + off,
+                        fill="", outline=mix(color, bg, a), width=1)
+
+    def _soft_rect(self, cv, x1, y1, x2, y2, r, bg, alpha, fill=None,
+                   edge=None, edge_width=None, feather=FEATHER):
+        """Заливка и/или обводка со смягчёнными краями."""
+        if alpha <= 0.008:
+            return
+        if fill is not None:
+            self._rrect(cv, x1, y1, x2, y2, r, fill=mix(fill, bg, alpha),
+                        outline="")
+            self._feather(cv, x1, y1, x2, y2, r, fill, bg, alpha, feather)
+        if edge is not None:
+            self._rrect(cv, x1, y1, x2, y2, r, fill="",
+                        outline=mix(edge, bg, alpha),
+                        width=CARD_BORDER if edge_width is None else edge_width)
+            self._feather(cv, x1, y1, x2, y2, r, edge, bg, alpha, feather)
+
+    def _soft_circle(self, cv, cx, cy, radius, color, bg, alpha, ring=False):
+        """Круг (или ободок) с мягкой кромкой."""
+        if alpha <= 0.008 or radius <= 0.4:
+            return
+        box = (cx - radius, cy - radius, cx + radius, cy + radius)
+        cv.create_oval(*box, fill="" if ring else mix(color, bg, alpha),
+                       outline=mix(color, bg, alpha) if ring else "")
+        for off, strength in FEATHER:
+            a = alpha * strength
+            if a < 0.02:
+                continue
+            rr = radius + off
+            cv.create_oval(cx - rr, cy - rr, cx + rr, cy + rr, fill="",
+                           outline=mix(color, bg, a), width=1)
 
     def _draw(self):
         cv = self.canvas
@@ -785,7 +880,7 @@ class LoaderScreen:
                            cy + 34 + math.sin(a1) * SPLASH_R,
                            fill=mix(pal["accent"], pal["bg"],
                                     a * (1.0 - t1)),
-                           width=SPLASH_THICK)
+                           width=SPLASH_THICK, capstyle="round")
 
     def _draw_panel(self, cv, pal, w, h):
         ca = clamp01(self.content_alpha)
@@ -809,13 +904,15 @@ class LoaderScreen:
                             fill=pal["bg"], outline="")
 
     def _draw_header(self, cv, pal, w, ca):
+        bg = pal["bg"]
         logo = self.api.logo_small()
         if logo is not None:
-            self._rrect(cv, LOGO_X + 2, LOGO_Y + 2, LOGO_X + 2 + LOGO_SIZE,
-                        LOGO_Y + 2 + LOGO_SIZE, 8,
-                        fill=mix(pal["accent"], pal["bg"], 0.55 * ca),
-                        outline="")
-            cv.create_image(LOGO_X, LOGO_Y, image=logo, anchor="nw")
+            self._soft_rect(cv, LOGO_X - 1, LOGO_Y - 1,
+                            LOGO_X + 1 + LOGO_SIZE, LOGO_Y + 1 + LOGO_SIZE,
+                            9, bg, 0.5 * ca, fill=pal["accent"],
+                            feather=FEATHER_SOFT)
+            cv.create_image(LOGO_X + LOGO_SIZE / 2.0,
+                            LOGO_Y + LOGO_SIZE / 2.0, image=logo, anchor="c")
         else:
             self._hit.append((LOGO_X, LOGO_Y, LOGO_X + LOGO_SIZE,
                               LOGO_Y + LOGO_SIZE, "brand"))
@@ -823,19 +920,26 @@ class LoaderScreen:
         tx = (w - self._f("title").measure(title) - HEADER_RIGHT_PAD) / 2.0
         cv.create_text(tx, TITLE_Y, text=title, anchor="nw",
                        font=self._f("title"),
-                       fill=mix(pal["text"], pal["bg"], 0.9 * ca))
+                       fill=mix(pal["text"], bg, 0.9 * ca))
         cv.create_text(tx, SUB_Y, text=self.api.subtitle(), anchor="nw",
-                       font=self._f("body"),
-                       fill=mix(pal["muted"], pal["bg"], ca))
+                       font=self._f("small"),
+                       fill=mix(pal["muted"], bg, ca))
 
     def _draw_links(self, cv, pal, ca):
+        bg = pal["bg"]
         y = LINK_Y
         for key, label in self.links:
             hv = self.link_hover.get(key, 0.0)
-            col = mix(mix(pal["dim"], pal["bg"], ca),
-                      mix(pal["text"], pal["bg"], ca), hv)
-            cv.create_text(LINK_X, y, text=label, anchor="nw",
+            pr = self.link_press.get(key, 0.0)
+            col = mix(mix(pal["dim"], bg, ca), mix(pal["text"], bg, ca), hv)
+            x = LINK_X + 1.5 * hv - 1.0 * pr
+            cv.create_text(x, y, text=label, anchor="nw",
                            font=self._f("body"), fill=col)
+            if hv > 0.02:
+                tw = self._f("body").measure(label)
+                self._soft_rect(cv, x, y + LINK_H - 3, x + tw,
+                                y + LINK_H - 2, 0.5, bg, hv * ca * 0.75,
+                                fill=pal["accent"], feather=FEATHER_SOFT)
             self._hit.append((LINK_X, y, LINK_X + 120, y + LINK_H,
                               "link", key))
             y += LINK_STEP
@@ -853,53 +957,64 @@ class LoaderScreen:
             self._draw_card(cv, pal, meta, card, start_x, y, card_w, ca)
 
     def _draw_card(self, cv, pal, meta, card, x, y, cw, ca):
-        vis = ca * card.dim
         enabled = meta.get("enabled", True)
+        bg = pal["bg"]
+        # карточки встают по очереди, а не все одним пластом
+        if self.phase in (self.EXPAND, self.READY):
+            entry = clamp01((ca - card.index * ENTRY_STAGGER) / 0.55)
+        else:
+            entry = 1.0
+        ease = ease_in_out_cubic(entry)
+        hv, pr = card.hover, card.press
+        grow = 2.2 * hv - 1.6 * pr
+        x1 = x - grow / 2.0
+        y1 = y + (1.0 - ease) * ENTRY_TRAVEL - grow / 2.0
+        x2 = x + cw + grow / 2.0
+        y2 = y1 + CARD_H + grow
+        vis = ca * card.dim * ease
         if not enabled:
             vis *= SOON_ALPHA
-        self._rrect(cv, x, y, x + cw, y + CARD_H, CARD_ROUND,
-                    fill=mix(pal["card"], pal["bg"], vis), outline="")
-        self._rrect(cv, x, y, x + cw, y + CARD_H, CARD_ROUND,
-                    fill="", outline=mix(pal["card_line"], pal["bg"],
-                                         vis * 0.9),
-                    width=CARD_BORDER)
-        hv = card.hover
-        if hv > 0.004 and enabled:
-            self._rrect(cv, x, y, x + cw, y + CARD_H, CARD_ROUND,
-                        fill=mix(pal["hover"], pal["bg"], 0.14 * hv * ca),
-                        outline="")
 
-        tx = x + CARD_PADX
-        ty = y + CARD_TITLE_Y
+        self._soft_rect(cv, x1, y1, x2, y2, CARD_ROUND, bg, vis,
+                        fill=pal["card"])
+        self._soft_rect(cv, x1, y1, x2, y2, CARD_ROUND, bg,
+                        min(1.0, vis * (0.85 + 0.55 * hv - 0.3 * pr)),
+                        edge=pal["card_line"])
+        if hv > 0.004 and enabled:
+            self._soft_rect(cv, x1, y1, x2, y2, CARD_ROUND, bg,
+                            0.13 * hv * ca, fill=pal["hover"],
+                            feather=FEATHER_SOFT)
+        if card.active:
+            self._soft_rect(cv, x1 + 3.0, y1 + 12, x1 + 3.0 + CARD_BAR_W,
+                            y2 - 12, CARD_BAR_W / 2.0, bg, vis,
+                            fill=pal["accent"], feather=FEATHER_SOFT)
+
+        tx = x1 + CARD_PADX
+        ty = y1 + CARD_TITLE_Y
         if not card.active:
-            cx = x + CARD_DOT_X
-            cy = ty + self._f("body").metrics("linespace") * 0.5 + 2
-            for radius, alpha in ((7.5, 0.15), (5.0, 0.35), (3.0, 1.0)):
-                cv.create_oval(cx - radius, cy - radius, cx + radius,
-                               cy + radius,
-                               fill=mix(pal["accent"], pal["bg"],
-                                        alpha * vis),
-                               outline="")
+            cx = x1 + CARD_DOT_X
+            cy = ty + self._f("body").metrics("linespace") * 0.5 + 1
+            self._soft_circle(cv, cx, cy, 6.5, pal["accent"], bg, vis * 0.14)
+            self._soft_circle(cv, cx, cy, 3.0, pal["accent"], bg, vis)
             tx += CARD_TEXT_SHIFT
 
         cv.create_text(tx, ty, text=meta["title"], anchor="nw",
                        font=self._f("body"),
-                       fill=mix(pal["text"], pal["bg"], vis))
-        cv.create_text(x + CARD_PADX, y + CARD_STATUS_Y,
+                       fill=mix(pal["text"], bg, vis))
+        cv.create_text(x1 + CARD_PADX, y1 + CARD_STATUS_Y,
                        text=meta["status"], anchor="nw",
-                       font=self._f("body"),
-                       fill=mix(pal["muted"], pal["bg"], vis))
+                       font=self._f("small"),
+                       fill=mix(pal["muted"], bg, vis))
 
         icon = meta.get("icon")
         if icon:
-            ix = x + cw - CARD_ICON - CARD_ICON_PAD
-            iy = y + CARD_ICON_PAD
-            self._rrect(cv, ix, iy, ix + CARD_ICON, iy + CARD_ICON,
-                        CARD_ICON_ROUND,
-                        fill=mix(pal["surface"], pal["bg"], vis), outline="")
+            ix = x2 - CARD_ICON - CARD_ICON_PAD
+            iy = y1 + (CARD_H - CARD_ICON) / 2.0
+            self._soft_rect(cv, ix, iy, ix + CARD_ICON, iy + CARD_ICON,
+                            CARD_ICON_ROUND, bg, vis, fill=pal["surface"])
             cv.create_text(ix + CARD_ICON / 2.0, iy + CARD_ICON / 2.0,
                            text=icon, anchor="c", font=self._f("small"),
-                           fill=mix(pal["accent"], pal["bg"], vis))
+                           fill=mix(pal["accent"], bg, vis))
         if enabled:
             self._hit.append((x, y, x + cw, y + CARD_H, "card", meta["key"]))
 
@@ -910,43 +1025,68 @@ class LoaderScreen:
             return
         thumb = min(max(BAR_MIN, area_h * (area_h / content_h)), area_h)
         ratio = clamp01(self.scroll.current / max_scroll)
-        x = start_x + card_w - BAR_W - BAR_MARGIN + 2
+        # полоса живёт в правом поле, а не поверх карточек
+        x = start_x + card_w + 7.0
         y = CARDS_Y + ratio * (area_h - thumb)
-        self._rrect(cv, x, y, x + BAR_W, y + thumb, BAR_ROUND,
-                    fill=mix(pal["accent"], pal["bg"], alpha), outline="")
+        self._soft_rect(cv, x, y, x + BAR_W, y + thumb, BAR_W / 2.0,
+                        pal["bg"], alpha, fill=pal["accent"],
+                        feather=FEATHER_SOFT)
 
     def _draw_footer(self, cv, pal, w, h, ca):
+        bg = pal["bg"]
         img = self.avatar
-        y = h - 40 - 25
+        cy = h - FOOTER_H / 2.0
         if img is not None:
-            cv.create_image(LOOK_X0, y, image=img, anchor="nw")
-            cv.create_text(LOOK_X0 + 50, y + 20, text=self.nick, anchor="w",
-                           font=self._f("body"),
-                           fill=mix(pal["text"], pal["bg"], 0.9 * ca))
+            cv.create_image(LOOK_X0, cy, image=img, anchor="w")
+            nx = LOOK_X0 + img.width() + 10
         else:
-            cv.create_text(LOOK_X0, y + 8, text=self.nick, anchor="w",
-                           font=self._f("body"),
-                           fill=mix(pal["text"], pal["bg"], 0.9 * ca))
-        lx = w - 20
-        for look, label, color in reversed(self.looks):
+            nx = LOOK_X0
+        cv.create_text(nx, cy, text=self.nick, anchor="w",
+                       font=self._f("body"),
+                       fill=mix(pal["text"], bg, 0.9 * ca))
+        lx = w - 20 - LOOK_R
+        for look, _label, color in reversed(self.looks):
             hv = self.look_hover.get(look, 0.0)
-            r = LOOK_R + (1.5 * hv)
-            ring = 1.0 if look == self.look_key else 0.35 + 0.45 * hv
-            cv.create_oval(lx - r, y + 20 - r, lx + r, y + 20 + r,
-                           fill=mix(color, pal["bg"], ca * ring),
-                           outline=mix(pal["text"], pal["bg"],
-                                       ca * (0.25 + 0.5 * hv)))
-            self._hit.append((lx - r - 4, y + 20 - r - 4, lx + r + 4,
-                              y + 20 + r + 4, "look", look))
+            r = LOOK_R + 1.2 * hv
+            if look == self.look_key:
+                self._soft_circle(cv, lx, cy, r + 3.2, pal["text"], bg,
+                                  ca * 0.5, ring=True)
+            self._soft_circle(cv, lx, cy, r, color, bg,
+                              ca * (1.0 if look == self.look_key
+                                     else 0.35 + 0.5 * hv))
+            self._hit.append((lx - r - 4, cy - r - 4, lx + r + 4,
+                              cy + r + 4, "look", look))
             lx -= LOOK_GAP
+        if self.note_amount > 0.01 and self.note_text:
+            cv.create_text(LOOK_X0, h - 14, text=self.note_text, anchor="w",
+                           font=self._f("small"),
+                           fill=mix(pal["muted"], bg,
+                                    ca * self.note_amount))
+
+    def _soft_line(self, cv, x1, y1, x2, y2, color, bg, alpha, width=2.0):
+        """Отрезок с мягкой кромкой: под ним широкие полупрозрачные слои."""
+        if alpha <= 0.02:
+            return
+        for extra, strength in ((2.0, 0.20), (1.0, 0.42)):
+            col = mix(color, bg, alpha * strength)
+            cv.create_line(x1, y1, x2, y2, fill=col, width=width + extra,
+                           capstyle="round")
+        cv.create_line(x1, y1, x2, y2, fill=mix(color, bg, alpha),
+                       width=width, capstyle="round")
 
     def _draw_chrome(self, cv, pal, w, ca):
-        col = mix(mix(pal["dim"], pal["bg"], ca),
-                  mix(pal["text"], pal["bg"], ca), self.close_hover)
-        cv.create_line(w - 30, 25, w - 20, 35, fill=col, width=2)
-        cv.create_line(w - 30, 35, w - 20, 25, fill=col, width=2)
+        bg = pal["bg"]
+
+        def tone(hover):
+            return mix(mix(pal["dim"], bg, ca), mix(pal["text"], bg, ca),
+                       hover)
+
+        pull = 1.0 - 0.6 * self.close_hover
+        self._soft_line(cv, w - 30 + pull, 25 + pull, w - 20 - pull,
+                        35 - pull, tone(self.close_hover), bg, ca)
+        self._soft_line(cv, w - 30 + pull, 35 - pull, w - 20 - pull,
+                        25 + pull, tone(self.close_hover), bg, ca)
         self._hit.append((w - 35, 20, w - 15, 40, "close"))
-        col = mix(mix(pal["dim"], pal["bg"], ca),
-                  mix(pal["text"], pal["bg"], ca), self.min_hover)
-        cv.create_line(w - 55, 30, w - 43, 30, fill=col, width=2)
+        self._soft_line(cv, w - 55, 30, w - 43, 30, tone(self.min_hover),
+                        bg, ca)
         self._hit.append((w - 65, 20, w - 38, 40, "min"))
