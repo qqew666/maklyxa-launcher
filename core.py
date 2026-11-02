@@ -48,7 +48,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "1.9.8"
+VERSION = "2.0.0"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -88,6 +88,8 @@ GALLERY_DIR = CONFIG_DIR / "Gallery"
 GALLERY_CACHE_PATH = GALLERY_DIR / "cache.json"
 GALLERY_THUMBS_DIR = GALLERY_DIR / "Thumbnails"
 SCREENSHOT_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+SCRIPTS_DIR = CONFIG_DIR / "Scripts"
+SCRIPT_MAX_BYTES = 256 * 1024
 CURSOR_SLOTS = (
     {"key": "shiftlock", "file": "MouseLockedCursor.png",
      "label": "ShiftLock",
@@ -178,8 +180,56 @@ THEMES = {
         "titlebar": "#0a1018",
         "alpha": 0.92,
     },
+    "night": {
+        "label": "Ночь",
+        "bg": "#080b16",
+        "panel": "#0d1224",
+        "surface": "#141b32",
+        "surface2": "#1b2440",
+        "hover": "#243055",
+        "entry": "#111a31",
+        "list": "#0a1022",
+        "border": "#283357",
+        "text": "#e8ecff",
+        "muted": "#8a94bd",
+        "on_accent": "#060a18",
+        "titlebar": "#070a14",
+        "alpha": 1.0,
+    },
+    "graphite": {
+        "label": "Графит",
+        "bg": "#121316",
+        "panel": "#17191d",
+        "surface": "#1e2126",
+        "surface2": "#262a31",
+        "hover": "#31363f",
+        "entry": "#1a1d22",
+        "list": "#131519",
+        "border": "#333842",
+        "text": "#f0f2f5",
+        "muted": "#8b919c",
+        "on_accent": "#101215",
+        "titlebar": "#101114",
+        "alpha": 1.0,
+    },
+    "neon": {
+        "label": "Неон",
+        "bg": "#05060b",
+        "panel": "#080a12",
+        "surface": "#0d1120",
+        "surface2": "#141a2e",
+        "hover": "#1d2542",
+        "entry": "#0a0e1c",
+        "list": "#060810",
+        "border": "#2a1f4d",
+        "text": "#f2eaff",
+        "muted": "#9b8cc4",
+        "on_accent": "#0b0413",
+        "titlebar": "#04050a",
+        "alpha": 1.0,
+    },
 }
-THEME_ORDER = ["dark", "light", "glass"]
+THEME_ORDER = ["dark", "night", "graphite", "neon", "glass", "light"]
 DEFAULT_THEME = "dark"
 
 ACCENT_PRESETS = [
@@ -188,6 +238,16 @@ ACCENT_PRESETS = [
     ("#a06bff", "Фиолетовый"),
     ("#ff9f43", "Оранжевый"),
     ("#ff5f9e", "Розовый"),
+]
+
+# Готовые образы: тема + акцент одним нажатием.
+LOOK_PRESETS = [
+    ("night", "#6c8cff", "Ночь · индиго"),
+    ("graphite", "#8f9bab", "Графит · сталь"),
+    ("neon", "#ff2d95", "Неон · розовый"),
+    ("dark", "#00c48c", "Тёмная · изумруд"),
+    ("glass", "#00d9e5", "Стекло · циан"),
+    ("light", "#3b9eff", "Светлая · синяя"),
 ]
 
 SPLASH_STYLES = ("off", "minimal", "card")
@@ -210,6 +270,8 @@ DEFAULT_CONFIG = {
     "accent": "#00c48c",
     "theme": DEFAULT_THEME,
     "custom_theme": "",
+    "sidebar_compact": False,
+    "scripts_last": "",
     "window_geometry": "",
     "window_buttons": "mac",
     "discord_rpc": True,
@@ -305,6 +367,58 @@ def valid_geometry(text):
         str(text or "")))
 
 
+# ---- пользовательские скрипты -----------------------------------------------
+
+
+def safe_script_name(name):
+    """Чистое имя .lua-файла без пути; пустая строка, если имя недопустимо."""
+    text = str(name or "").strip().replace("\\", "/")
+    text = os.path.basename(text)
+    if not text.lower().endswith(".lua"):
+        text += ".lua"
+    text = re.sub(r"[^\w. -]", "", text, flags=re.UNICODE).strip(" .")
+    if not text or len(text) > 60:
+        return ""
+    return text
+
+
+def list_scripts():
+    """Имена скриптов в папке Scripts (по алфавиту)."""
+    try:
+        SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+        return sorted((p.name for p in SCRIPTS_DIR.glob("*.lua")),
+                      key=str.lower)
+    except OSError:
+        return []
+
+
+def read_script(name):
+    """(текст, ошибка). Чтение скрипта из папки Scripts."""
+    fname = safe_script_name(name)
+    if not fname:
+        return "", "недопустимое имя скрипта"
+    try:
+        return (SCRIPTS_DIR / fname).read_text(
+            encoding="utf-8")[:SCRIPT_MAX_BYTES], ""
+    except OSError:
+        return "", "файл не найден"
+
+
+def write_script(name, text):
+    """(имя, ошибка). Запись скрипта строго внутрь папки Scripts."""
+    fname = safe_script_name(name)
+    if not fname:
+        return "", "недопустимое имя скрипта"
+    try:
+        SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = SCRIPTS_DIR / (fname + ".tmp")
+        tmp.write_text(str(text or "")[:SCRIPT_MAX_BYTES], encoding="utf-8")
+        os.replace(tmp, SCRIPTS_DIR / fname)
+        return fname, ""
+    except OSError as exc:
+        return "", str(exc)
+
+
 # ---- конфигурация -----------------------------------------------------------
 
 
@@ -364,7 +478,8 @@ def load_config(path=None):
                  "discord_rpc", "launch_sound", "error_sound",
                  "ingame_overlay", "ingame_island",
                  "ingame_overlay_start", "ingame_clock",
-                 "ingame_auto", "ingame_afk", "mascot"):
+                 "ingame_auto", "ingame_afk", "mascot",
+                 "sidebar_compact"):
         cfg[flag] = bool(cfg.get(flag))
     corner = str(cfg.get("ingame_overlay_corner") or "").lower()
     cfg["ingame_overlay_corner"] = (

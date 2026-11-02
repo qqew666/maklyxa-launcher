@@ -3,21 +3,24 @@
 """
 MaklyxaLauncher — интерфейс лаунчера (Tkinter).
 
-UI v3 (полный редизайн):
+UI v4 (меню-хаб):
   * своё окно без рамки: перетаскивание за шапку, ресайз за края,
     максимизация двойным кликом, кнопки свернуть/развернуть/закрыть;
-  * боковое меню с группами разделов, акцентной подсветкой активного
-    пункта и статусом Roblox внизу;
-  * новая нейтральная палитра трёх тем, верхняя панель с брендом,
-    версией и быстрым переключением темы;
+  * боковое меню-хаб: поиск по разделам (Ctrl+F), сворачивание до
+    иконок, закреплённая кнопка «Запустить», карточки аккаунта и
+    статуса Roblox внизу;
+  * раздел «Скрипты»: редактор Lua с подсветкой, библиотека файлов и
+    запуск в изолированном интерпретаторе (без доступа к файлам,
+    сети и процессу Roblox);
+  * палитра из шести тем и готовые образы (тема + акцент) в один клик;
   * заголовки страниц-«героев», карточки с акцентной чертой,
-    кнопки с плавной анимацией цвета при наведении;
-  * компактная статусная строка и переработанный экран запуска игры.
+    кнопки с плавной анимацией цвета при наведении.
 
 Ядро (логика) — в core.py.
-Запуск: python launcher.py [--page game|favorites|gallery|ingame|flags|
-                                   cursors|themes|launchstyle|settings|log]
-                            [--theme dark|light|glass]
+Запуск: python launcher.py [--page game|accounts|favorites|gallery|
+                                   scripts|ingame|flags|cursors|themes|
+                                   launchstyle|settings|log]
+                            [--theme dark|night|graphite|neon|glass|light]
                             [--ingame]
         --ingame — служебный режим внутриигрового помощника (оверлей и AFK).
 """
@@ -27,6 +30,7 @@ import ctypes
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -48,6 +52,7 @@ except Exception:  # Pillow не обязателен для запуска
     HAVE_PIL = False
 
 import ingame as ingame_mod
+import luax
 import mascot as mascot_mod
 
 import core
@@ -59,7 +64,8 @@ from core import (
     DEFAULT_CONFIG, DEFAULT_THEME,
     DISCORD_PORTAL_URL, DISCOVER_URL, FPS_CHOICES, FLAG_API, FLAG_FPS, FLAG_QUALITY,
     GRAPHICS_MODES, HTTP_HEADERS, INSTALLER_URL,
-    IMAGE_ONLY_ACCENT, IMAGE_ONLY_PALETTE, LAUNCH_DIR, RELEASES_URL,
+    IMAGE_ONLY_ACCENT, IMAGE_ONLY_PALETTE, LAUNCH_DIR, LOOK_PRESETS,
+    RELEASES_URL, SCRIPTS_DIR,
     THEMES, THEME_ORDER, UPDATE_DIR, VERSION, WINDOW_TITLE,
     ROBLOX_APP_THEMES,
     THEME_SETS_DIR, THEME_TINTS,
@@ -82,17 +88,20 @@ from core import (
     gallery_thumb_path, game_launch_url, hit_test, import_cursor_set,
     import_launch_icon, import_launch_sound, import_theme_set,
     import_ui_font, inspect_ui_font, launch_game, launch_game_as,
-    launch_icon_state, launch_sound_path, list_cursor_sets, list_theme_sets,
-    load_config, load_private_font, load_theme_palette, mb, merge_flags_into,
+    launch_icon_state, launch_sound_path, list_cursor_sets, list_scripts,
+    list_theme_sets, load_config, load_private_font, load_theme_palette, mb,
+    merge_flags_into,
     migrate_old_config, parse_place_id, png_info, player_pids,
     play_launch_sound, probe_protocol, protect_secret, read_json_dict,
-    read_roblox_cookie_store, remove_account, remove_cursor_slot,
+    read_roblox_cookie_store, read_script,
+    remove_account, remove_cursor_slot,
     remove_launch_icon, remove_launch_sound, remove_theme_image,
     remove_ui_font, rename_cursor_set, rename_theme_set, resize_geometry,
     resolve_gallery_places, restore_custom_cursors,
     restore_launch_icon_shortcuts, roblox_deep_link, roblox_status,
     roblox_theme_state, roblox_version_entries, roblox_versions_dir,
     roblox_window_pids,
+    safe_script_name,
     scan_screenshots,
     screenshots_dir, save_config, selected_roblox_exe, set_active_account,
     set_cursor_slot,
@@ -104,7 +113,8 @@ from core import (
     valid_geometry, valid_theme_set_name, version_tuple,
     wait_for_roblox_window, wait_players_gone,
     work_area,
-    write_json_dict, DiscordPresence, discord_activity, discord_frame,
+    write_json_dict, write_script, DiscordPresence, discord_activity,
+    discord_frame,
     download_update, update_file_name, update_file_valid, UpdateCancelled,
 )
 
@@ -112,6 +122,7 @@ ICON_PNG = BUNDLE_DIR / "icon.png"
 
 TITLEBAR_H = 48
 SIDEBAR_W = 216
+SIDEBAR_W_COMPACT = 62
 MIN_W, MIN_H = 960, 640
 BORDER_PX = 6
 DEFAULT_SIZE = (1080, 760)
@@ -173,6 +184,7 @@ NAV_ITEMS = [
     ("accounts", "◉", "Аккаунты"),
     ("favorites", "★", "Избранное"),
     ("gallery", "▦", "Галерея"),
+    ("scripts", "λ", "Скрипты"),
     ("ingame", "◳", "В игре"),
     ("flags", "⚑", "Флаги"),
     ("cursors", "◈", "Курсоры"),
@@ -184,12 +196,13 @@ NAV_ITEMS = [
 
 NAV_GROUPS = [
     ("ЗАПУСК", ("game", "accounts", "favorites")),
-    ("МЕДИА", ("gallery",)),
+    ("БИБЛИОТЕКА", ("gallery", "scripts")),
     ("В ИГРЕ", ("ingame",)),
-    ("ПРЕДУСТАНОВЛЕННЫЕ\nМОДИФИКАЦИИ",
-     ("flags", "cursors", "themes", "launchstyle")),
+    ("МОДИФИКАЦИИ", ("flags", "cursors", "themes", "launchstyle")),
     ("СИСТЕМА", ("settings", "log")),
 ]
+
+SEARCH_PLACEHOLDER = "Поиск разделов…"
 
 DETACHED_PROCESS = 0x00000008
 
@@ -575,13 +588,17 @@ class FramelessWindow:
 
 
 class SidebarItem(tk.Frame):
-    """Пункт бокового меню: полоса, иконка, подпись и подсветка."""
+    """Пункт бокового меню: акцентная пилюля, иконка и подпись."""
 
     def __init__(self, app, parent, key, icon, text):
         self.app = app
         self.key = key
+        self.title = text
+        self.search_text = f"{text} {key}".casefold()
         self._active = False
         self._hover = False
+        self._compact = bool(app.cfg.get("sidebar_compact"))
+        self._shown = True
         c = app.c
         super().__init__(parent, bg=c["panel"], cursor="hand2")
         self.bar = tk.Frame(self, width=3, bg=c["panel"])
@@ -589,15 +606,36 @@ class SidebarItem(tk.Frame):
         self.icon = tk.Label(
             self, text=icon, bg=c["panel"], fg=c["muted"], width=2,
             font=(UI_FONT, 11), cursor="hand2", anchor="center")
-        self.icon.pack(side="left", padx=(11, 6), pady=5)
         self.label = tk.Label(
             self, text=text, bg=c["panel"], fg=c["muted"], anchor="w",
             font=(UI_FONT, 10), cursor="hand2")
-        self.label.pack(side="left", fill="x", expand=True, pady=5)
+        self._layout()
         for widget in (self, self.bar, self.icon, self.label):
             widget.bind("<Button-1>", self._click)
             widget.bind("<Enter>", self._enter)
             widget.bind("<Leave>", self._leave)
+
+    def _layout(self):
+        self.icon.pack_forget()
+        self.label.pack_forget()
+        if self._compact:
+            self.icon.pack(side="left", expand=True, pady=6)
+        else:
+            self.icon.pack(side="left", padx=(11, 6), pady=6)
+            self.label.pack(side="left", fill="x", expand=True, pady=6)
+
+    def set_compact(self, compact):
+        self._compact = bool(compact)
+        self._layout()
+        self._paint()
+
+    def set_shown(self, shown):
+        """Показать/скрыть пункт (фильтр поиска)."""
+        self._shown = bool(shown)
+        if self._shown:
+            self.app._nav_show(self)
+        else:
+            self.app._nav_hide(self)
 
     def _click(self, _event=None):
         self.app.show_page(self.key)
@@ -633,9 +671,10 @@ class SidebarItem(tk.Frame):
     def _paint(self):
         c = self.app.c
         if self._active:
-            bg = self.app._lerp_hex(c["panel"], self.app.accent, 0.16)
+            bg = self.app._lerp_hex(c["panel"], self.app.accent, 0.18)
             self.bar.configure(bg=self.app.accent)
-            self.icon.configure(bg=bg, fg=self.app.accent)
+            self.icon.configure(bg=bg, fg=self.app.accent,
+                                font=(UI_FONT, 11, "bold"))
             self.label.configure(bg=bg, fg=c["text"],
                                  font=(UI_FONT, 10, "bold"))
             self.configure(bg=bg)
@@ -643,7 +682,7 @@ class SidebarItem(tk.Frame):
             bg = c["hover"] if self._hover else c["panel"]
             fg = c["text"] if self._hover else c["muted"]
             self.bar.configure(bg=c["panel"])
-            self.icon.configure(bg=bg, fg=fg)
+            self.icon.configure(bg=bg, fg=fg, font=(UI_FONT, 11))
             self.label.configure(bg=bg, fg=fg, font=(UI_FONT, 10))
             self.configure(bg=bg)
 
@@ -653,8 +692,7 @@ class SidebarItem(tk.Frame):
         self._paint()
 
     def apply_accent(self, _color):
-        if self._active:
-            self._paint()
+        self._paint()
 
 
 def _round_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
@@ -1109,6 +1147,7 @@ class App:
         self._build_page_accounts()
         self._build_page_favorites()
         self._build_page_gallery()
+        self._build_page_scripts()
         self._build_page_ingame()
         self._build_page_flags()
         self._build_page_cursors()
@@ -1357,9 +1396,13 @@ class App:
         body = tk.Frame(root, bg=c["bg"])
         body.pack(fill="both", expand=True)
 
-        sidebar = tk.Frame(body, bg=c["panel"], width=SIDEBAR_W)
+        sidebar = tk.Frame(
+            body, bg=c["panel"],
+            width=(SIDEBAR_W_COMPACT
+                   if self.cfg.get("sidebar_compact") else SIDEBAR_W))
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
+        self.sidebar = sidebar
         tk.Frame(body, bg=c["border"], width=1).pack(side="left", fill="y")
 
         main = tk.Frame(body, bg=c["bg"])
@@ -1411,26 +1454,68 @@ class App:
 
     def _build_sidebar(self, sidebar):
         c = self.c
-        nav = tk.Frame(sidebar, bg=c["panel"])
-        nav.pack(fill="x", padx=12, pady=(18, 0))
-        items = {key: (icon, text) for key, icon, text in NAV_ITEMS}
-        for title, keys in NAV_GROUPS:
-            tk.Label(nav, text=title, bg=c["panel"], fg=c["muted"],
-                     font=(UI_FONT, 8, "bold"), anchor="w",
-                     justify="left").pack(
-                         fill="x", padx=9, pady=(8 if title == "ЗАПУСК"
-                                               else 7, 2))
-            for key in keys:
-                icon, text = items[key]
-                item = SidebarItem(self, nav, key, icon, text)
-                item.pack(fill="x")
-                self.nav_buttons[key] = item
+        compact = bool(self.cfg.get("sidebar_compact"))
 
-        tk.Frame(sidebar, bg=c["panel"]).pack(fill="both", expand=True)
+        # ── шапка: поиск по разделам + переключатель ширины меню
+        top = tk.Frame(sidebar, bg=c["panel"])
+        top.pack(fill="x", padx=12, pady=(14, 0))
+
+        self.sidebar_toggle_btn = tk.Button(
+            top, text="⟨" if compact else "⟩", relief="flat", bd=0,
+            bg=c["surface2"], fg=c["muted"], cursor="hand2", takefocus=False,
+            activebackground=c["hover"], activeforeground=c["text"],
+            highlightthickness=0, width=3, font=(UI_FONT, 9, "bold"),
+            command=self._toggle_sidebar_compact)
+        self.sidebar_toggle_btn.pack(side="right", padx=(8, 0))
+        self._bind_hover(self.sidebar_toggle_btn, "ghost")
+
+        self.sidebar_search_box = tk.Frame(top, bg=c["border"])
+        self.sidebar_search_box.pack(side="left", fill="x", expand=True)
+        search_in = tk.Frame(self.sidebar_search_box, bg=c["entry"],
+                             padx=8, pady=6)
+        search_in.pack(fill="x", padx=1, pady=1)
+        self.sidebar_search_glyph = tk.Label(
+            search_in, text="⌕", bg=c["entry"], fg=self.accent,
+            font=(UI_FONT, 10, "bold"))
+        self.sidebar_search_glyph.pack(side="left")
+        self.accent_fgs.append(self.sidebar_search_glyph)
+        self.sidebar_search_var = tk.StringVar(value=SEARCH_PLACEHOLDER)
+        self._search_placeholder_on = True
+        self.sidebar_search_entry = tk.Entry(
+            search_in, textvariable=self.sidebar_search_var, bd=0,
+            relief="flat", bg=c["entry"], fg=c["muted"], cursor="xterm",
+            insertbackground=c["text"], highlightthickness=0, takefocus=True,
+            font=(UI_FONT, 9))
+        self.sidebar_search_entry.pack(side="left", fill="x", expand=True,
+                                       padx=(7, 0))
+        for widget in (self.sidebar_search_box, search_in):
+            widget.bind("<Button-1>", lambda _e: self._focus_nav_search())
+        self.sidebar_search_entry.bind("<KeyRelease>", self._on_nav_search)
+        self.sidebar_search_entry.bind("<Return>", self._nav_search_open)
+        self.sidebar_search_entry.bind(
+            "<Escape>", lambda _e: self._clear_nav_search())
+        self.sidebar_search_entry.bind("<FocusIn>", self._search_focus_in)
+        self.sidebar_search_entry.bind("<FocusOut>", self._search_focus_out)
+        self.root.bind("<Control-f>", lambda _e: self._focus_nav_search())
+
+        # ── низ: запуск, аккаунт, статус Roblox (всегда виден)
+        bottom = tk.Frame(sidebar, bg=c["panel"])
+        bottom.pack(side="bottom", fill="x", padx=12, pady=(10, 12))
+
+        base, fg, hot = self._btn_colors("primary")
+        self.sidebar_play_btn = tk.Button(
+            bottom, text="▶   Запустить", command=self._sidebar_play,
+            relief="flat", bd=0, bg=base, fg=fg, activebackground=hot,
+            activeforeground=fg, disabledforeground=fg, cursor="hand2",
+            highlightthickness=0, pady=10, takefocus=False,
+            font=(UI_FONT, 11, "bold"))
+        self.sidebar_play_btn.pack(fill="x", pady=(0, 10))
+        self._bind_hover(self.sidebar_play_btn, "primary")
+        self.primary_buttons.append(self.sidebar_play_btn)
 
         # активный аккаунт — быстрый переход к переключателю
-        acc_card = tk.Frame(sidebar, bg=c["border"], cursor="hand2")
-        acc_card.pack(fill="x", padx=12, pady=(10, 0))
+        acc_card = tk.Frame(bottom, bg=c["border"], cursor="hand2")
+        acc_card.pack(fill="x", pady=(0, 8))
         acc_inner = tk.Frame(acc_card, bg=c["surface"], padx=12, pady=8,
                              cursor="hand2")
         acc_inner.pack(fill="x", padx=1, pady=1)
@@ -1459,25 +1544,219 @@ class App:
             widget.bind("<Button-1>",
                         lambda _e: self.show_page("accounts"))
 
-        # статус Roblox внизу сайдбара
-        card = tk.Frame(sidebar, bg=c["border"])
-        card.pack(fill="x", padx=12, pady=(10, 0))
-        inner = tk.Frame(card, bg=c["surface"], padx=12, pady=10)
-        inner.pack(fill="x", padx=1, pady=1)
-        head = tk.Frame(inner, bg=c["surface"])
-        head.pack(fill="x")
+        # статус Roblox
+        status_card = tk.Frame(bottom, bg=c["border"])
+        status_card.pack(fill="x")
+        status_in = tk.Frame(status_card, bg=c["surface"], padx=12, pady=9)
+        status_in.pack(fill="x", padx=1, pady=1)
+        status_head = tk.Frame(status_in, bg=c["surface"])
+        status_head.pack(fill="x")
         self.sidebar_status_dot = tk.Label(
-            head, text="●", bg=c["surface"], fg=self.accent,
+            status_head, text="●", bg=c["surface"], fg=self.accent,
             font=(UI_FONT, 7))
         self.sidebar_status_dot.pack(side="left")
-        tk.Label(head, text="ROBLOX", bg=c["surface"], fg=c["muted"],
+        tk.Label(status_head, text="ROBLOX", bg=c["surface"], fg=c["muted"],
                  font=(UI_FONT, 8, "bold")).pack(side="left", padx=(6, 0))
         self.sidebar_roblox_var = tk.StringVar()
-        tk.Label(inner, textvariable=self.sidebar_roblox_var,
+        tk.Label(status_in, textvariable=self.sidebar_roblox_var,
                  bg=c["surface"], fg=c["text"],
                  font=(UI_FONT, 9, "bold"), anchor="w").pack(
                      fill="x", pady=(4, 0))
+
+        # ── разделы: прокручиваемый список между поиском и нижней секцией
+        nav_holder = tk.Frame(sidebar, bg=c["panel"])
+        nav_holder.pack(fill="both", expand=True, padx=12, pady=(14, 0))
+        self.nav_canvas = tk.Canvas(nav_holder, bg=c["panel"], bd=0,
+                                    highlightthickness=0)
+        nav_bar = self._vscroll(nav_holder, self.nav_canvas.yview,
+                                c["panel"], width=6)
+        self.nav_canvas.configure(yscrollcommand=nav_bar.set)
+        self.nav_canvas.pack(side="left", fill="both", expand=True)
+        nav_bar.pack(side="right", fill="y")
+        nav = tk.Frame(self.nav_canvas, bg=c["panel"])
+        nav.grid_columnconfigure(0, weight=1)
+        self._nav_window = self.nav_canvas.create_window((0, 0), window=nav,
+                                                          anchor="nw")
+        nav.bind("<Configure>", self._on_nav_content_resize)
+        self.nav_canvas.bind(
+            "<Configure>",
+            lambda _e: self.nav_canvas.itemconfigure(
+                self._nav_window, width=self.nav_canvas.winfo_width()))
+        self.nav_empty_lbl = tk.Label(
+            nav, text="Ничего не найдено", bg=c["panel"], fg=c["muted"],
+            font=(UI_FONT, 9), anchor="w")
+        items = {key: (icon, text) for key, icon, text in NAV_ITEMS}
+        row = 0
+        self.nav_group_labels = []
+        for title, keys in NAV_GROUPS:
+            lbl = tk.Label(nav, text=title, bg=c["panel"], fg=c["muted"],
+                           font=(UI_FONT, 8, "bold"), anchor="w",
+                           justify="left")
+            self._nav_grid(lbl, row, padx=9, pady=(9, 3))
+            row += 1
+            self.nav_group_labels.append((lbl, tuple(keys)))
+            for key in keys:
+                icon, text = items[key]
+                item = SidebarItem(self, nav, key, icon, text)
+                self._nav_grid(item, row)
+                row += 1
+                self.nav_buttons[key] = item
+        self._nav_grid(self.nav_empty_lbl, row, padx=9, pady=(9, 3))
+        self.nav_empty_lbl.grid_remove()
+
+        self.frameless.excluded.update({nav_holder, self.nav_canvas, nav})
+        self.sidebar_top = top
+        self.sidebar_acc_card = acc_card
+        self.sidebar_status_card = status_card
+        self.frameless.excluded.update(
+            {self.sidebar_toggle_btn, self.sidebar_search_box, search_in,
+             self.sidebar_search_glyph, self.sidebar_search_entry,
+             self.sidebar_play_btn, acc_card, status_card})
+        if compact:
+            self._apply_sidebar_compact(True)
         self._refresh_sidebar_status()
+        self._on_nav_search()
+
+    # -- сайдбар: поиск и компактный режим ----------------------------------
+
+    def _search_focus_in(self, _event=None):
+        if self._search_placeholder_on:
+            self.sidebar_search_var.set("")
+            self.sidebar_search_entry.configure(fg=self.c["text"])
+            self._search_placeholder_on = False
+
+    def _search_focus_out(self, _event=None):
+        if not self.sidebar_search_var.get().strip():
+            self._search_placeholder_on = True
+            self.sidebar_search_var.set(SEARCH_PLACEHOLDER)
+            self.sidebar_search_entry.configure(fg=self.c["muted"])
+        self._on_nav_search()
+
+    def _focus_nav_search(self):
+        if self.cfg.get("sidebar_compact"):
+            self._toggle_sidebar_compact()
+        try:
+            self.sidebar_search_entry.focus_set()
+        except tk.TclError:
+            pass
+        return "break"
+
+    def _clear_nav_search(self):
+        self.sidebar_search_var.set("")
+        self.sidebar_search_entry.focus_set()
+        self._on_nav_search()
+        return "break"
+
+    def _nav_search_terms(self):
+        if getattr(self, "_search_placeholder_on", True):
+            return ""
+        return str(self.sidebar_search_var.get() or "").strip().casefold()
+
+    def _on_nav_search(self, _event=None):
+        """Фильтр пунктов меню по строке поиска."""
+        term = self._nav_search_terms()
+        visible = []
+        for key, item in self.nav_buttons.items():
+            hit = (not term) or term in item.search_text
+            item.set_shown(hit)
+            if hit:
+                visible.append(key)
+        compact = bool(self.cfg.get("sidebar_compact"))
+        for lbl, keys in self.nav_group_labels:
+            show = (not compact) and (
+                (not term) or any(key in visible for key in keys))
+            if show:
+                self._nav_show(lbl)
+            else:
+                self._nav_hide(lbl)
+        if visible:
+            self._nav_hide(self.nav_empty_lbl)
+        else:
+            self._nav_show(self.nav_empty_lbl)
+        self._nav_scroll_to_top()
+
+    def _nav_scroll_to_top(self):
+        try:
+            self.nav_canvas.yview_moveto(0)
+        except (AttributeError, tk.TclError):
+            pass
+        self._on_nav_content_resize()
+
+    def _nav_grid(self, widget, row, **kw):
+        """Раздел занимает фиксированную строку: фильтр не меняет порядок."""
+        widget._nav_slot = (row, kw)
+        widget.grid(row=row, column=0, sticky="we", **kw)
+
+    def _nav_show(self, widget):
+        if not widget.winfo_manager():
+            row, kw = widget._nav_slot
+            widget.grid(row=row, column=0, sticky="we", **kw)
+
+    def _nav_hide(self, widget):
+        if widget.winfo_manager():
+            widget.grid_remove()
+
+    def _on_nav_content_resize(self, _event=None):
+        """Список разделов изменился — пересчитываем область прокрутки."""
+        try:
+            bbox = self.nav_canvas.bbox("all")
+            self.nav_canvas.configure(
+                scrollregion=bbox if bbox else (0, 0, 0, 0))
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _nav_search_open(self, _event=None):
+        term = self._nav_search_terms()
+        for key, item in self.nav_buttons.items():
+            if not term or term in item.search_text:
+                self.show_page(key)
+                break
+        return "break"
+
+    def _sidebar_play(self):
+        """Запуск из бокового меню: поле «Игра», затем последний Place ID."""
+        text = self.entry_var.get() if hasattr(self, "entry_var") else ""
+        pid = (parse_place_id(text)
+               or parse_place_id(self.cfg.get("default_place_id") or "")
+               or parse_place_id(self.cfg.get("last_place_id") or ""))
+        if not pid:
+            self.show_page("game")
+            self.status_var.set("Введи ссылку или Place ID")
+            return
+        self.play(pid)
+
+    def _toggle_sidebar_compact(self):
+        compact = not bool(self.cfg.get("sidebar_compact"))
+        self.cfg["sidebar_compact"] = compact
+        save_config(self.cfg)
+        self._apply_sidebar_compact(compact)
+        self.log("Меню: только иконки" if compact else
+                 "Меню: полная ширина")
+
+    def _apply_sidebar_compact(self, compact):
+        """Свернуть или развернуть боковое меню без пересборки интерфейса."""
+        compact = bool(compact)
+        try:
+            self.sidebar.configure(
+                width=SIDEBAR_W_COMPACT if compact else SIDEBAR_W)
+            self.sidebar_toggle_btn.configure(text="⟩" if compact else "⟨")
+            if compact:
+                self.sidebar_search_box.pack_forget()
+                self.sidebar_acc_card.pack_forget()
+                self.sidebar_status_card.pack_forget()
+            else:
+                self.sidebar_search_box.pack(side="left", fill="x",
+                                             expand=True)
+                self.sidebar_acc_card.pack(fill="x", pady=(0, 8))
+                self.sidebar_status_card.pack(fill="x")
+            for item in self.nav_buttons.values():
+                item.set_compact(compact)
+            self.sidebar_play_btn.configure(
+                text="▶" if compact else "▶   Запустить")
+            self._on_nav_search()
+            self._nav_scroll_to_top()
+        except (AttributeError, tk.TclError):
+            pass
 
     def _refresh_sidebar_status(self):
         var = getattr(self, "sidebar_roblox_var", None)
@@ -2041,13 +2320,23 @@ class App:
             cls = ""
         if cls in ("Listbox", "Text", "Treeview", "TComboboxListbox"):
             return
-        canvas = self.scroll_canvases.get(self.current_page)
-        if canvas is None:
-            return
         delta = event.delta
         steps = delta // 120 if abs(delta) >= 120 else (1 if delta > 0 else -1)
         if steps:
-            canvas.yview_scroll(-steps, "units")
+            canvas = self._wheel_target(event)
+            if canvas is not None:
+                canvas.yview_scroll(-steps, "units")
+
+    def _wheel_target(self, event):
+        """Колесо крутит тот список, под курсором которое находится."""
+        nav = getattr(self, "nav_canvas", None)
+        if nav is not None:
+            widget = event.widget
+            while widget is not None:
+                if widget is nav:
+                    return nav if nav.winfo_ismapped() else None
+                widget = getattr(widget, "master", None)
+        return self.scroll_canvases.get(self.current_page)
 
     # -- хелперы виджетов -----------------------------------------------------------
 
@@ -3956,6 +4245,52 @@ class App:
 
     # -- страница «Темы» --------------------------------------------------------------
 
+    def _build_looks_card(self, pad):
+        """Готовые образы: тема и акцент одним нажатием."""
+        c = self.c
+        card = self._card(
+            pad, title="Готовые образы", glyph="✦",
+            subtitle="Целиком меняют палитру лаунчера. Акцент и тему можно "
+                     "подобрать отдельно ниже — это только отправная точка.")
+        grid = tk.Frame(card, bg=c["surface"])
+        grid.pack(fill="x", pady=(12, 0))
+        current = (self.theme_name, self.accent.lower())
+        for idx, (theme, accent, label) in enumerate(LOOK_PRESETS):
+            active = (theme, accent) == current
+            base, fg, _hot = self._btn_colors(
+                "primary" if active else "ghost")
+            cell = tk.Frame(grid, bg=c["surface"])
+            cell.grid(row=idx // 2, column=idx % 2, sticky="nsew",
+                      padx=(0, 8) if idx % 2 == 0 else (8, 0), pady=(0, 8))
+            tk.Frame(cell, bg=accent, width=10, height=10).pack(
+                side="left", padx=(0, 8))
+            btn = tk.Button(
+                cell, text=("✓  " if active else "") + label,
+                command=lambda t=theme, a=accent, n=label: self.apply_look(
+                    t, a, n),
+                relief="flat", bd=0, bg=base, fg=fg, cursor="hand2",
+                activebackground=shade(base, 1.12), activeforeground=fg,
+                highlightthickness=0, padx=14, pady=9, takefocus=False,
+                font=(UI_FONT, 10, "bold" if active else "normal"))
+            btn.pack(side="left", fill="x", expand=True)
+            self._bind_hover(btn, "primary" if active else "ghost")
+            if active:
+                self.primary_buttons.append(btn)
+        grid.grid_columnconfigure(0, weight=1)
+        grid.grid_columnconfigure(1, weight=1)
+
+    def apply_look(self, theme, accent, label):
+        """Применить готовый образ (тема + акцент) одной пересборкой."""
+        if theme not in THEMES:
+            return
+        self.cfg["accent"] = accent
+        self.accent = accent
+        self.set_theme(theme, save=False)
+        save_config(self.cfg)
+        self.status_var.set(f"Образ: {label}")
+        self.log(f"Образ оформления: {label} "
+                 f"({THEMES[theme]['label']}, акцент {accent})")
+
     def _build_page_themes(self):
         c = self.c
         pad = self._scroll_page("themes")
@@ -3965,6 +4300,8 @@ class App:
             "Собери оформление из базовых цветов, оттенка и своей картинки. "
             "Картинка становится фоном всего окна, а режим «только картинка» "
             "убирает цвета темы и оставляет фото.")
+
+        self._build_looks_card(pad)
 
         self.roblox_theme_var = tk.StringVar(value="Проверяю…")
         rob = self._card(
@@ -5451,6 +5788,390 @@ class App:
             delay, self._finish_launch_effect)
 
     # -- страница «Галерея» -------------------------------------------------------------
+
+    # -- страница «Скрипты» ------------------------------------------------------
+
+    SCRIPTS_EXAMPLE = '''-- Maklyxa-скрипт. Подмножество Lua: print, local, if, for, while,
+-- функции, таблицы, string/math/table. Файлов, сети и Roblox у скрипта нет.
+
+local place = launcher.place()
+print("Place ID:", place)
+print("Roblox запущен:", launcher.roblox_running())
+
+local favs = launcher.favorites()
+print("избранных мест:", #favs)
+for index, item in ipairs(favs) do
+  print(index, item.id, item.name)
+end
+
+local total = 0
+for i = 1, 20 do
+  if i % 2 == 0 then total = total + i end
+end
+print("сумма чётных до 20 =", total)
+
+if place ~= "" then
+  launcher.status("скрипт подготовил " .. place)
+end
+'''
+
+    LUA_KEYWORDS = (r"\b(?:and|break|do|else|elseif|end|false|for|function|"
+                    r"if|in|local|nil|not|or|repeat|return|then|true|until|"
+                    r"while)\b")
+
+    def _build_page_scripts(self):
+        c = self.c
+        pad = self._scroll_page("scripts")
+
+        self._page_header(
+            pad, "λ", "Скрипты",
+            "Скрипт считается внутри лаунчера и видит только его команды: "
+            "сменить тему, задать акцент, добавить избранное, открыть место. "
+            "Ни файлов, ни сети, ни клиента Roblox скрипт не трогает.")
+
+        card = self._card(
+            pad, title="Редактор", glyph="✎",
+            subtitle="Ctrl+Enter — запустить. Файлы хранятся в "
+                     "%APPDATA%\\MaklyxaLauncher\\Scripts.")
+
+        toolbar = tk.Frame(card, bg=c["surface"])
+        toolbar.pack(fill="x", pady=(12, 8))
+        self._button(toolbar, "Новый", self._scripts_new, side="left")
+        self._button(toolbar, "Пример", lambda: self._scripts_load_text(
+            self.SCRIPTS_EXAMPLE, "пример.lua"), side="left", padx=(8, 0))
+        self._button(toolbar, "⤓  Записать", self._scripts_save,
+                     side="left", padx=(8, 0))
+        self._button(toolbar, "▶  Запустить", self._scripts_run,
+                     kind="primary", side="left", padx=(16, 0))
+        self._button(toolbar, "Очистить вывод", self._scripts_clear,
+                     side="right")
+
+        name_row = tk.Frame(card, bg=c["surface"])
+        name_row.pack(fill="x", pady=(0, 8))
+        tk.Label(name_row, text="Файл", bg=c["surface"], fg=c["muted"],
+                 font=(UI_FONT, 9)).pack(side="left")
+        self.scripts_name_var = tk.StringVar(value="пример.lua")
+        name_entry = tk.Entry(
+            name_row, textvariable=self.scripts_name_var, bd=0, relief="flat",
+            bg=c["entry"], fg=c["text"], insertbackground=c["text"],
+            highlightthickness=1, highlightbackground=c["border"],
+            highlightcolor=self.accent, font=(UI_FONT, 9), width=28)
+        name_entry.pack(side="left", padx=(8, 0), ipady=4)
+        self.frameless.excluded.add(name_entry)
+        self.scripts_state_var = tk.StringVar(value="Готово")
+        state_lbl = tk.Label(name_row, textvariable=self.scripts_state_var,
+                             bg=c["surface"], fg=self.accent,
+                             font=(UI_FONT, 9), anchor="e")
+        state_lbl.pack(side="right")
+        self.accent_fgs.append(state_lbl)
+
+        self.scripts_text = tk.Text(
+            card, height=16, wrap="none", bd=0, relief="flat",
+            bg=c["list"], fg=c["text"], insertbackground=c["text"],
+            highlightthickness=1, highlightbackground=c["border"],
+            highlightcolor=self.accent, selectbackground=c["hover"],
+            font=("Consolas", 10), padx=12, pady=10, undo=True)
+        self.scripts_text.pack(fill="x")
+        self._setup_lua_tags(self.scripts_text)
+        self.scripts_text.bind(
+            "<KeyRelease>", lambda _e: self._scripts_schedule_highlight())
+        self.scripts_text.bind(
+            "<Control-Return>", lambda _e: self._scripts_run())
+        self.scripts_text.bind("<Tab>", self._scripts_tab)
+        self.frameless.excluded.add(self.scripts_text)
+        self._scripts_load_text(
+            getattr(self, "_scripts_draft", None) or self.SCRIPTS_EXAMPLE,
+            self.cfg.get("scripts_last") or "пример.lua", quiet=True)
+
+        lib = self._card(
+            pad, title="Библиотека", glyph="▤",
+            subtitle="Двойной клик — открыть. Файлы лежат одной папкой, их "
+                     "можно переносить между машинами.")
+        box, _scroll = self._make_listbox(lib, height=6)
+        self.scripts_box = box
+        box.bind("<Double-Button-1>", lambda _e: self._scripts_open_selected())
+        actions = tk.Frame(lib, bg=c["surface"])
+        actions.pack(fill="x", pady=(10, 0))
+        self._button(actions, "Обновить", self._scripts_refresh_list,
+                     side="left")
+        self._button(actions, "Удалить", self._scripts_delete, side="left",
+                     padx=(8, 0))
+        self._button(actions, "Открыть папку", self._scripts_reveal_folder,
+                     side="left", padx=(8, 0))
+        self._scripts_refresh_list()
+
+        out_card = self._card(pad, title="Вывод", glyph="≡")
+        self.scripts_out = tk.Text(
+            out_card, height=9, wrap="word", bd=0, relief="flat", state="disabled",
+            bg=c["list"], fg=c["text"], highlightthickness=1,
+            highlightbackground=c["border"], font=("Consolas", 10),
+            padx=12, pady=8)
+        self.scripts_out.pack(fill="x")
+
+        api = self._card(pad, title="Что доступно скрипту", glyph="◈")
+        self._hint(
+            api,
+            "launcher.place() — текущий Place ID строкой\n"
+            "launcher.open(id) — запустить место через лаунчер\n"
+            "launcher.favorites() / launcher.favorite_add(id, имя)\n"
+            "launcher.history() — последние игры\n"
+            "launcher.theme() · launcher.set_theme('night') · "
+            "launcher.set_accent('#ff2d95')\n"
+            "launcher.compact(true) — свернуть или развернуть меню\n"
+            "launcher.status(текст) · launcher.log(текст)\n"
+            "launcher.roblox_running() · launcher.version()\n"
+            "print(...), tostring, tonumber, type, assert, error,\n"
+            "pairs, ipairs, #, string.*, math.*, table.*\n\n"
+            "Скрипт выполняется на нити интерфейса с лимитом шагов, поэтому "
+            "он не может ни блокировать окно, ни зависеть навсегда.",
+            wrap=620)
+
+    def _setup_lua_tags(self, widget):
+        c = self.c
+        widget.tag_configure("lua_comment", foreground=c["muted"],
+                             font=("Consolas", 10, "italic"))
+        widget.tag_configure("lua_kw", foreground=self.accent,
+                             font=("Consolas", 10, "bold"))
+        widget.tag_configure(
+            "lua_str", foreground=self._lerp_hex(c["text"], "#ff9f43", 0.5))
+        widget.tag_configure(
+            "lua_num", foreground=self._lerp_hex(c["text"], "#6cddff", 0.45))
+        widget.tag_configure(
+            "lua_fn", foreground=self._lerp_hex(c["text"], self.accent, 0.35))
+
+    def _scripts_tab(self, event):
+        event.widget.insert("insert", "  ")
+        return "break"
+
+    def _scripts_schedule_highlight(self):
+        self._scripts_draft = self.scripts_text.get("1.0", "end-1c")
+        job = getattr(self, "_scripts_hl_job", None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+        try:
+            self._scripts_hl_job = self.root.after(
+                140, self._scripts_highlight)
+        except tk.TclError:
+            self._scripts_hl_job = None
+
+    def _scripts_highlight(self):
+        widget = getattr(self, "scripts_text", None)
+        if widget is None or self._closing:
+            return
+        self._scripts_hl_job = None
+        try:
+            text = widget.get("1.0", "end-1c")
+            for tag in ("lua_comment", "lua_str", "lua_num", "lua_kw",
+                        "lua_fn"):
+                widget.tag_remove(tag, "1.0", "end")
+        except tk.TclError:
+            return
+        pattern = re.compile(
+            r"(?P<comment>--[^\n]*)"
+            r"|(?P<string>\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*')"
+            r"|(?P<num>\b\d+(?:\.\d+)?\b)"
+            r"|(?P<kw>" + self.LUA_KEYWORDS + r")"
+            r"|(?P<fn>[A-Za-z_][A-Za-z0-9_]*(?=\s*\())")
+        for match in pattern.finditer(text):
+            kind = match.lastgroup
+            tag = {"comment": "lua_comment", "string": "lua_str",
+                   "num": "lua_num", "kw": "lua_kw",
+                   "fn": "lua_fn"}.get(kind)
+            if not tag:
+                continue
+            widget.tag_add(tag, f"1.0+{match.start()}c",
+                           f"1.0+{match.end()}c")
+
+    def _scripts_load_text(self, text, name=None, quiet=False):
+        widget = getattr(self, "scripts_text", None)
+        if widget is None:
+            return
+        widget.delete("1.0", "end")
+        widget.insert("1.0", text)
+        self._scripts_draft = text
+        if name:
+            self.scripts_name_var.set(name)
+        if not quiet:
+            self.scripts_state_var.set(f"Загружен {name or 'скрипт'}")
+        self._scripts_highlight()
+
+    def _scripts_refresh_list(self):
+        box = getattr(self, "scripts_box", None)
+        if box is None:
+            return
+        box.delete(0, "end")
+        for name in list_scripts():
+            box.insert("end", name)
+
+    def _scripts_open_selected(self):
+        box = getattr(self, "scripts_box", None)
+        if box is None or not box.curselection():
+            self.scripts_state_var.set("Сначала выбери файл")
+            return
+        name = box.get(box.curselection()[0])
+        text, error = read_script(name)
+        if error:
+            self.scripts_state_var.set(f"Ошибка: {error}")
+            return
+        self.cfg["scripts_last"] = name
+        save_config(self.cfg)
+        self._scripts_load_text(text, name)
+
+    def _scripts_new(self):
+        self._scripts_load_text("-- новый скрипт\nprint('привет')\n",
+                                "новый.lua")
+        self.scripts_text.focus_set()
+
+    def _scripts_save(self):
+        name = self.scripts_name_var.get()
+        fname, error = write_script(name, self.scripts_text.get(
+            "1.0", "end-1c"))
+        if error:
+            self.scripts_state_var.set(f"Не сохранён: {error}")
+            return
+        self.scripts_name_var.set(fname)
+        self.cfg["scripts_last"] = fname
+        save_config(self.cfg)
+        self._scripts_refresh_list()
+        self.scripts_state_var.set(f"Сохранён {fname}")
+        self.log(f"Скрипт сохранён: {fname}")
+
+    def _scripts_delete(self):
+        box = getattr(self, "scripts_box", None)
+        if box is None or not box.curselection():
+            self.scripts_state_var.set("Сначала выбери файл")
+            return
+        name = box.get(box.curselection()[0])
+        if self.interactive and not messagebox.askyesno(
+                APP_NAME, f"Удалить скрипт {name}?", parent=self.root):
+            return
+        try:
+            fname = safe_script_name(name)
+            (SCRIPTS_DIR / fname).unlink(missing_ok=True)
+        except OSError as exc:
+            self.scripts_state_var.set(f"Не удалён: {exc}")
+            return
+        self._scripts_refresh_list()
+        self.scripts_state_var.set(f"Удалён {name}")
+
+    def _scripts_reveal_folder(self):
+        try:
+            SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(SCRIPTS_DIR))  # noqa: S110 - Windows-открыть
+        except OSError:
+            self.status_var.set(f"Папка: {SCRIPTS_DIR}")
+
+    def _scripts_clear(self):
+        widget = getattr(self, "scripts_out", None)
+        if widget is None:
+            return
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.configure(state="disabled")
+
+    def _scripts_write(self, line):
+        widget = getattr(self, "scripts_out", None)
+        if widget is None:
+            return
+        widget.configure(state="normal")
+        widget.insert("end", str(line) + "\n")
+        widget.see("end")
+        widget.configure(state="disabled")
+
+    def _scripts_env(self):
+        """Белый список функций, которые видит скрипт."""
+        def favorites():
+            return [{"id": item.get("place_id", ""),
+                     "name": item.get("name", "")}
+                    for item in self.cfg.get("favorites", [])]
+
+        def history():
+            return [{"id": item.get("place_id", ""),
+                     "name": item.get("name", "")}
+                    for item in self.cfg.get("history", [])]
+
+        def favorite_add(pid, name=""):
+            pid = str(pid or "").strip()
+            if not pid.isdigit():
+                return False
+            items = self.cfg.setdefault("favorites", [])
+            if any(item.get("place_id") == pid for item in items):
+                return False
+            items.append({"place_id": pid, "name": str(name or ""),
+                          "ts": int(time.time())})
+            self.cfg["favorites"] = items[:40]
+            save_config(self.cfg)
+            self._refresh_lists()
+            return True
+
+        def open_place(pid):
+            pid = str(pid or "").strip()
+            if not pid.isdigit():
+                return False
+            self.play(pid)
+            return True
+
+        def set_theme(name):
+            if str(name) in THEMES:
+                self.set_theme(str(name))
+                return True
+            return False
+
+        def set_accent(color):
+            text = str(color or "").strip().lower()
+            if re.fullmatch(r"#[0-9a-f]{6}", text):
+                self.set_accent(text)
+                return True
+            return False
+
+        def compact(flag=True):
+            wanted = bool(flag)
+            if bool(self.cfg.get("sidebar_compact")) != wanted:
+                self._toggle_sidebar_compact()
+            return wanted
+
+        return {
+            "launcher": {
+                "place": lambda: (self.entry_var.get()
+                                  if hasattr(self, "entry_var") else ""),
+                "open": open_place,
+                "favorites": favorites,
+                "favorite_add": favorite_add,
+                "history": history,
+                "theme": lambda: self.theme_name,
+                "set_theme": set_theme,
+                "set_accent": set_accent,
+                "compact": compact,
+                "status": lambda text: self.status_var.set(str(text)),
+                "log": lambda text: self.log(str(text)),
+                "roblox_running": lambda: bool(player_pids()),
+                "version": lambda: VERSION,
+            },
+        }
+
+    def _scripts_run(self):
+        source = self.scripts_text.get("1.0", "end-1c")
+        if not source.strip():
+            self.scripts_state_var.set("Пустой скрипт")
+            return "break"
+        self._scripts_clear()
+        started = time.time()
+        self._scripts_write("▶ запуск…")
+        error = luax.run_script(
+            source, env=self._scripts_env(),
+            on_print=self._scripts_write,
+            steps=luax.LIMITS["steps"])
+        took = (time.time() - started) * 1000
+        if error:
+            self._scripts_write(f"✕ {error}")
+            self.scripts_state_var.set("Ошибка скрипта")
+        else:
+            self._scripts_write(f"■ готово за {took:.0f} мс")
+            self.scripts_state_var.set("Выполнено")
+        return "break"
 
     def _build_page_gallery(self):
         c = self.c
@@ -9063,6 +9784,13 @@ class App:
         for w in self.accent_fgs:
             try:
                 w.configure(fg=color)
+            except tk.TclError:
+                pass
+        editor = getattr(self, "scripts_text", None)
+        if editor is not None:
+            try:
+                self._setup_lua_tags(editor)
+                self._scripts_highlight()
             except tk.TclError:
                 pass
         for canvas in list(self._header_canvases):
