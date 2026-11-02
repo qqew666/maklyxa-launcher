@@ -586,9 +586,9 @@
   `exec`. Файловой системы, сети, процессов и модулей Python скрипт не
   видит
 - **Что доступно скрипту** — функции `launcher.*`: `place()`, `open(id)`,
-  `favorites()`, `favorite_add(id)`, `history()`, `theme()`, `set_theme(t)`,
-  `set_accent(цвет)`, `compact(да/нет)`, `status(текст)`, `log(текст)`,
-  `roblox_running()`, `version()`
+  `favorites()`, `favorite_add(id, имя)`, `history()`, `theme()`,
+  `set_theme(t)`, `set_accent(цвет)`, `compact(да/нет)`, `status(текст)`,
+  `log(текст)`, `roblox_running()`, `version()`
 - **Лимиты** — останавливаются и пишутся в журнал: слишком много шагов
   (бесконечный цикл), слишком глубокая рекурсия, слишком длинная строка
   или слишком большая таблица
