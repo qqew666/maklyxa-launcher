@@ -126,14 +126,14 @@ from core import (
 
 ICON_PNG = BUNDLE_DIR / "icon.png"
 
-TITLEBAR_H = 48
-SIDEBAR_W = 216
-SIDEBAR_W_COMPACT = 62
+TITLEBAR_H = 46
+SIDEBAR_W = 232
+SIDEBAR_W_COMPACT = 66
 MIN_W, MIN_H = 960, 640
 BORDER_PX = 6
 DEFAULT_SIZE = (1080, 760)
-HEADER_H = 126
-HEADER_H_COMPACT = 76
+HEADER_H = 92
+HEADER_H_COMPACT = 58
 THEME_PREVIEW_H = 148
 GALLERY_TILE_W = 224
 GALLERY_TILE_H = 126
@@ -209,6 +209,25 @@ NAV_GROUPS = [
 ]
 
 SEARCH_PLACEHOLDER = "Поиск разделов…"
+
+# Цвет иконки-плитки раздела: как в System Settings — цветной квадрат с глифом.
+NAV_TINTS = {
+    "game": "#30d158",
+    "accounts": "#0a84ff",
+    "favorites": "#ff9f0a",
+    "gallery": "#5e5ce6",
+    "scripts": "#ff375f",
+    "ingame": "#64d2ff",
+    "flags": "#ff453a",
+    "cursors": "#bf5af2",
+    "themes": "#ffd60a",
+    "launchstyle": "#ac8e68",
+    "settings": "#98989d",
+    "log": "#8e8e93",
+}
+
+# Подпись под именем аккаунта в сайдбаре (в референсе — «Apple Account»).
+SIDEBAR_ACCOUNT_SUB = "Roblox аккаунт"
 
 DETACHED_PROCESS = 0x00000008
 
@@ -609,7 +628,10 @@ class FramelessWindow:
 
 
 class SidebarItem(tk.Frame):
-    """Пункт бокового меню: акцентная пилюля, иконка и подпись."""
+    """Пункт бокового меню: скруглённая пилюля, цветная плитка-иконка, текст."""
+
+    ROW_H = 32
+    TILE = 20
 
     def __init__(self, app, parent, key, icon, text):
         self.app = app
@@ -620,30 +642,24 @@ class SidebarItem(tk.Frame):
         self._hover = False
         self._compact = bool(app.cfg.get("sidebar_compact"))
         self._shown = True
+        self.glyph = icon
+        self.tint = NAV_TINTS.get(key, app.accent)
         c = app.c
         super().__init__(parent, bg=c["panel"], cursor="hand2")
-        self.bar = tk.Frame(self, width=3, bg=c["panel"])
-        self.bar.pack(side="left", fill="y")
-        self.icon = tk.Label(
-            self, text=icon, bg=c["panel"], fg=c["muted"], width=2,
-            font=(UI_FONT, 11), cursor="hand2", anchor="center")
-        self.label = tk.Label(
-            self, text=text, bg=c["panel"], fg=c["muted"], anchor="w",
-            font=(UI_FONT, 10), cursor="hand2")
-        self._layout()
-        for widget in (self, self.bar, self.icon, self.label):
+        self.canvas = tk.Canvas(self, bg=c["panel"], bd=0, height=self.ROW_H,
+                                highlightthickness=0, cursor="hand2")
+        self.canvas.pack(fill="both", expand=True)
+        self.canvas.bind("<Configure>", self._paint)
+        for widget in (self, self.canvas):
             widget.bind("<Button-1>", self._click)
             widget.bind("<Enter>", self._enter)
             widget.bind("<Leave>", self._leave)
 
     def _layout(self):
-        self.icon.pack_forget()
-        self.label.pack_forget()
-        if self._compact:
-            self.icon.pack(side="left", expand=True, pady=6)
-        else:
-            self.icon.pack(side="left", padx=(11, 6), pady=6)
-            self.label.pack(side="left", fill="x", expand=True, pady=6)
+        try:
+            self.canvas.configure(height=self.ROW_H)
+        except tk.TclError:
+            pass
 
     def set_compact(self, compact):
         self._compact = bool(compact)
@@ -689,23 +705,44 @@ class SidebarItem(tk.Frame):
         self._hover = inside
         self._paint()
 
-    def _paint(self):
-        c = self.app.c
+    def _paint(self, _event=None):
+        if self.app._closing:
+            return
+        cv = self.canvas
+        try:
+            w = cv.winfo_width()
+            h = cv.winfo_height()
+        except tk.TclError:
+            return
+        if w <= 2 or h <= 2:
+            return
+        app, c = self.app, self.app.c
+        cv.delete("all")
+        tile = self.TILE
+        fill = (app.accent if self._active
+                else c["hover"] if self._hover else "")
+        if fill:
+            _round_rect(cv, 1, 2, w - 1, h - 2, 7, fill=fill, outline="")
+        tx = (w - tile) / 2.0 if self._compact else 9.0
+        self._tile(cv, tx, (h - tile) / 2.0, tile)
+        if self._compact:
+            return
+        cv.create_text(tx + tile + 9, h / 2.0, text=self.title, anchor="w",
+                       fill=(app.on_accent if self._active else c["text"]),
+                       font=(UI_FONT, 10, "bold" if self._active
+                             else "normal"))
+
+    def _tile(self, cv, x, y, size):
+        """Плитка раздела: цветной квадрат с белым глифом, как в macOS."""
+        app, c = self.app, self.app.c
         if self._active:
-            bg = self.app._lerp_hex(c["panel"], self.app.accent, 0.18)
-            self.bar.configure(bg=self.app.accent)
-            self.icon.configure(bg=bg, fg=self.app.accent,
-                                font=(UI_FONT, 11, "bold"))
-            self.label.configure(bg=bg, fg=c["text"],
-                                 font=(UI_FONT, 10, "bold"))
-            self.configure(bg=bg)
+            bg, glyph = app.on_accent, self.tint
         else:
-            bg = c["hover"] if self._hover else c["panel"]
-            fg = c["text"] if self._hover else c["muted"]
-            self.bar.configure(bg=c["panel"])
-            self.icon.configure(bg=bg, fg=fg, font=(UI_FONT, 11))
-            self.label.configure(bg=bg, fg=fg, font=(UI_FONT, 10))
-            self.configure(bg=bg)
+            bg = self.tint
+            glyph = c["panel"] if c.get("base") == "light" else "#ffffff"
+        _round_rect(cv, x, y, x + size, y + size, 5, fill=bg, outline="")
+        cv.create_text(x + size / 2.0, y + size / 2.0 + 0.5, text=self.glyph,
+                       fill=glyph, font=(UI_FONT, 9, "bold"))
 
     def set_active(self, active):
         self._active = bool(active)
@@ -726,8 +763,51 @@ def _round_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
     return canvas.create_polygon(points, smooth=True, splinesteps=10, **kwargs)
 
 
+def _draw_round_panel(cv, w, h, radius, fill, outline, mask, tags="rp"):
+    """Скруглённая панель на канвасе поверх фрейма: форма + маски углов."""
+    cv.delete(tags + "bg")
+    cv.delete(tags + "fg")
+    r = max(0, min(radius, w / 2.0, h / 2.0))
+    if r <= 1:
+        cv.create_rectangle(0, 0, w, h, fill=fill, outline=outline,
+                            width=1, tags=tags + "bg")
+        return
+    _round_rect(cv, 0, 0, w - 1, h - 1, r, fill=fill, outline=outline,
+                width=1, tags=tags + "bg")
+    cv.tag_lower(tags + "bg")
+    corners = (
+        ((0, 0, r, r), (0, 0, 2 * r, 2 * r), 90),
+        ((w - 1 - r, 0, w - 1, r), (w - 1 - 2 * r, 0, w - 1, 2 * r), 0),
+        ((w - 1 - r, h - 1 - r, w - 1, h - 1),
+         (w - 1 - 2 * r, h - 1 - 2 * r, w - 1, h - 1), 270),
+        ((0, h - 1 - r, r, h - 1), (0, h - 1 - 2 * r, 2 * r, h - 1), 180),
+    )
+    for box, arc_box, start in corners:
+        cv.create_rectangle(box[0], box[1], box[2], box[3],
+                            fill=mask, outline="", tags=tags + "fg")
+        cv.create_arc(arc_box[0], arc_box[1], arc_box[2], arc_box[3],
+                      start=start, extent=90, style="pie", fill=fill,
+                      outline="", tags=tags + "fg")
+    _round_rect(cv, 0, 0, w - 1, h - 1, r, fill="", outline=outline,
+                width=1, tags=tags + "fg")
+    cv.tag_raise(tags + "fg")
+
+
+def _readable_on(color):
+    """Цвет текста на акцентной заливке: тёмный на светлых, белый на прочих."""
+    try:
+        rgb = [int(str(color)[i:i + 2], 16) / 255.0 for i in (1, 3, 5)]
+    except (ValueError, TypeError, IndexError):
+        return "#ffffff"
+    lum = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+    return "#1d1d1f" if lum > 0.62 else "#ffffff"
+
+
 class ThemedCheck(tk.Frame):
-    """Чекбокс в стиле лаунчера: скруглённый квадрат вместо ttk."""
+    """Переключатель в стиле macOS: пилюля с бегунком вместо галочки."""
+
+    W = 40
+    H = 24
 
     def __init__(self, app, parent, text, variable, command=None, bg=None):
         c = app.c
@@ -737,14 +817,14 @@ class ThemedCheck(tk.Frame):
         self.bg = bg or c["surface"]
         self._hover = False
         super().__init__(parent, bg=self.bg, cursor="hand2")
-        self.box = tk.Canvas(self, width=19, height=19, bg=self.bg, bd=0,
-                             highlightthickness=0, cursor="hand2",
+        self.box = tk.Canvas(self, width=self.W, height=self.H, bg=self.bg,
+                             bd=0, highlightthickness=0, cursor="hand2",
                              takefocus=True)
-        self.box.pack(side="left", pady=1)
+        self.box.pack(side="right", padx=(12, 0), pady=1)
         self.label = tk.Label(self, text=text, bg=self.bg, fg=c["text"],
                               font=(UI_FONT, 10), anchor="w",
                               cursor="hand2")
-        self.label.pack(side="left", padx=(9, 0))
+        self.label.pack(side="left", fill="x", expand=True)
         for widget in (self, self.box, self.label):
             widget.bind("<Button-1>", self._click)
         self.box.bind("<Enter>", self._enter)
@@ -778,21 +858,202 @@ class ThemedCheck(tk.Frame):
             self.box.delete("all")
         except tk.TclError:
             return
+        w, h = self.W, self.H
+        r = h / 2.0
         if checked:
             fill = app.accent
-            border = app.accent if not self._hover else c["on_accent"]
+            outline = ""
         else:
             fill = c["surface2"] if self.bg == c["surface"] else self.bg
-            border = c["border"] if not self._hover else app.accent
-        _round_rect(self.box, 1.5, 1.5, 17.5, 17.5, 4,
-                    fill=fill, outline=border, width=1)
-        if checked:
-            self.box.create_line(5, 9.5, 8, 12.8, 14.5, 5.5,
-                                 fill=c["on_accent"], width=2,
-                                 capstyle="round", joinstyle="round")
+            outline = c["border"] if not self._hover else app.accent
+        _round_rect(self.box, 1, 1, w - 1, h - 1, r - 1,
+                    fill=fill, outline=outline, width=1)
+        knob = h - 7
+        kx = (w - r - 1) if checked else (r + 1)
+        self.box.create_oval(kx - knob / 2.0, h / 2.0 - knob / 2.0,
+                             kx + knob / 2.0, h / 2.0 + knob / 2.0,
+                             fill="#ffffff", outline="")
 
     def redraw(self):
         self._draw()
+
+
+class PillButton(tk.Canvas):
+    """Кнопка-пилюля: скругление и плавная подсветка, как в macOS.
+
+    Держит интерфейс tk.Button (text/state/bg через configure), поэтому
+    ставится вместо квадратных кнопок без правок в местах вызова.
+    """
+
+    def __init__(self, app, parent, text, command=None, kind="primary",
+                 height=34, font=None, padx=16, textvariable=None, **kw):
+        self.app = app
+        self.kind = kind
+        self._text = str(text)
+        self._command = command
+        self._hover = False
+        self._disabled = False
+        self._padx = padx
+        self._bg = None
+        self._anim_job = None
+        self._var = textvariable
+        self._font = font or (UI_FONT, 10, "bold" if kind == "primary"
+                              else "normal")
+        super().__init__(parent, bg=parent.cget("bg"), height=height, bd=0,
+                         highlightthickness=0, cursor="hand2",
+                         takefocus=False)
+        self._resize()
+        if textvariable is not None:
+            self._text = str(textvariable.get())
+            textvariable.trace_add("write", self._follow_var)
+            self._resize()
+        self.bind("<Configure>", lambda _e: self._draw())
+        self.bind("<Enter>", self._enter)
+        self.bind("<Leave>", self._leave)
+        self.bind("<Button-1>", self._press)
+        self._draw()
+
+    def _fit(self):
+        try:
+            wide = tkfont.Font(font=self._font).measure(self._text or " ")
+        except tk.TclError:
+            wide = 9 * max(1, len(self._text or " "))
+        return max(44, wide + 2 * self._padx)
+
+    def _resize(self):
+        try:
+            tk.Canvas.configure(self, width=self._fit())
+        except tk.TclError:
+            pass
+
+    def _follow_var(self, *_a):
+        self._text = str(self._var.get())
+        self._resize()
+        self._draw()
+
+    def _target_bg(self):
+        base, _fg, hot = self.app._btn_colors(self.kind)
+        if self._disabled:
+            return self.app.c["surface2"]
+        if self.kind == "primary":
+            return hot if self._hover else base
+        return self.app.c["hover"] if self._hover else base
+
+    def _colors(self):
+        base, fg, hot = self.app._btn_colors(self.kind)
+        if self._disabled:
+            return self.app.c["surface2"], self.app.c["muted"]
+        return (self._bg or base), fg
+
+    def _enter(self, _e=None):
+        self._hover = True
+        self._animate()
+
+    def _leave(self, _e=None):
+        self._hover = False
+        self._animate()
+
+    def _animate(self):
+        """5 шагов по 20 мс — подсветка включается плавно, а не щелчком."""
+        target = self._target_bg()
+        job, self._anim_job = self._anim_job, None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        if self._bg is None or self._bg == target:
+            self._bg = target
+            self._draw()
+            return
+        current = self._bg
+        steps, delay = 5, 20
+
+        def tick(i=1):
+            try:
+                if i >= steps:
+                    self._bg = target
+                    self._draw()
+                    return
+                self._bg = self.app._lerp_hex(current, target, i / steps)
+                self._draw()
+                self._anim_job = self.after(delay, lambda: tick(i + 1))
+            except (tk.TclError, RuntimeError):
+                self._anim_job = None
+
+        self._anim_job = self.after(delay, tick)
+
+    def _press(self, _e=None):
+        if not self._disabled and self._command is not None:
+            self._command()
+
+    def _draw(self):
+        try:
+            w = self.winfo_width()
+            h = self.winfo_height()
+        except tk.TclError:
+            return
+        if w <= 2:
+            return
+        base, fg = self._colors()
+        self.delete("all")
+        _round_rect(self, 0, 1, w - 1, h - 1, min(8.0, h / 2.0 - 1),
+                    fill=base, outline="")
+        self.create_text(w / 2.0, h / 2.0, text=self._text, fill=fg,
+                         font=self._font)
+
+    def redraw(self):
+        self._bg = None
+        self._draw()
+
+    def configure(self, cnf=None, **kw):
+        kw = {**(cnf or {}), **kw}
+        text = kw.pop("text", None)
+        command = kw.pop("command", None)
+        state = kw.pop("state", None)
+        resize = kw.pop("width", None) is not None
+        for opt in ("activebackground", "activeforeground",
+                    "disabledforeground", "relief", "bd", "padx", "pady",
+                    "takefocus", "bg", "fg", "highlightthickness", "cursor",
+                    "font"):
+            kw.pop(opt, None)
+        if state is not None:
+            self._disabled = state == "disabled"
+            self._bg = None
+        if text is not None:
+            self._text = str(text)
+            resize = True
+        if command is not None:
+            self._command = command
+        if resize:
+            self._resize()
+        self._draw()
+        return self
+
+    config = configure
+
+    def cget(self, key):
+        if key == "text":
+            return self._text
+        if key == "state":
+            return "disabled" if self._disabled else "normal"
+        if key in ("fg", "foreground"):
+            return self._colors()[1]
+        if key in ("bg", "background"):
+            return self._colors()[0]
+        return super().cget(key)
+
+    def __getitem__(self, key):
+        return self.cget(key)
+
+    def __setitem__(self, key, value):
+        self.configure(**{key: value})
+
+    def state(self, statespec=None):
+        if statespec and "disabled" in statespec:
+            self._disabled = "disabled" in statespec
+            self._draw()
+        return "disabled" if self._disabled else "normal"
 
 
 class ThinScrollbar(tk.Canvas):
@@ -1170,7 +1431,9 @@ class App:
         self.primary_buttons = []
         self.accent_bgs = []          # виджеты с фоном акцентного цвета
         self.accent_fgs = []          # виджеты с текстом акцентного цвета
-        self._checks = []             # кастомные чекбоксы
+        self._checks = []             # кастомные переключатели
+        self._page_history = []       # назад/вперёд по разделам
+        self._hist_pos = -1
         self._btn_anim_jobs = {}      # анимации наведения кнопок
         self.current_page = start_page or "game"
         self._rpc = None
@@ -1713,6 +1976,14 @@ class App:
                         bordercolor=c["border"], lightcolor=self.accent,
                         darkcolor=self.accent)
 
+    @property
+    def on_accent(self):
+        """Текст на акцентной заливке — как в macOS: белый или графитовый."""
+        forced = self.c.get("on_accent")
+        if self.theme_name in ("dark", "light"):
+            return _readable_on(self.accent)
+        return forced or _readable_on(self.accent)
+
     # -- каркас: шапка, панель вкладок, страницы, статус -------------------------
 
     def _build_shell(self):
@@ -1724,36 +1995,36 @@ class App:
         # alpha сбрасывает exstyle — возвращаем пометку панели задач
         self.root.after_idle(self.frameless._on_map)
 
-        # верхняя панель: бренд, версия, текущий раздел, тема и кнопки окна
-        titlebar = tk.Frame(root, bg=c["titlebar"], height=TITLEBAR_H)
+        # шапка: слева — полоса меню с кнопками окна, справа — тулбар раздела
+        win_controls = self.cfg.get("window_buttons") == "win"
+        titlebar = tk.Frame(root, bg=c["bg"], height=TITLEBAR_H)
         titlebar.pack(fill="x")
         titlebar.pack_propagate(False)
 
-        win_controls = self.cfg.get("window_buttons") == "win"
-        controls = tk.Frame(titlebar, bg=c["titlebar"])
+        strip_w = (SIDEBAR_W_COMPACT if self.cfg.get("sidebar_compact")
+                   else SIDEBAR_W)
+        self.titlebar_side = tk.Frame(titlebar, bg=c["panel"], width=strip_w,
+                                      height=TITLEBAR_H)
+        self.titlebar_side.pack(side="left", fill="y")
+        self.titlebar_side.pack_propagate(False)
+
+        toolbar = tk.Frame(titlebar, bg=c["bg"])
+        toolbar.pack(side="left", fill="both", expand=True)
+        self.toolbar = toolbar
+
         if win_controls:
+            controls = tk.Frame(toolbar, bg=c["bg"])
             controls.pack(side="right", fill="y")
         else:
-            controls.pack(side="left", padx=(14, 4))
-        if ICON_PNG.exists():
-            try:
-                img = tk.PhotoImage(file=str(ICON_PNG))
-                img = img.subsample(12, 12)      # 256 → 21 px
-                self._title_icon = img
-                tk.Label(titlebar, image=img, bg=c["titlebar"],
-                         bd=0).pack(side="left",
-                                     padx=(14, 8) if win_controls else (8, 8))
-            except tk.TclError:
-                pass
-        tk.Label(titlebar, text=APP_NAME, bg=c["titlebar"], fg=c["text"],
-                 font=(UI_FONT, 10, "bold")).pack(side="left")
-        tk.Label(titlebar, text=f"v{VERSION}", bg=c["surface2"],
-                 fg=c["muted"], font=(UI_FONT, 8, "bold"), padx=7,
-                 pady=2).pack(side="left", padx=(9, 0))
+            compact = bool(self.cfg.get("sidebar_compact"))
+            self._light_gap = 5 if compact else 7
+            controls = tk.Frame(self.titlebar_side, bg=c["panel"])
+            controls.pack(side="left", padx=(10 if compact else 18, 0),
+                          pady=(0, 0))
         self.title_crumb = tk.Label(
-            titlebar, text="", bg=c["titlebar"], fg=c["muted"],
+            toolbar, text="", bg=c["bg"], fg=c["muted"],
             font=(UI_FONT, 9))
-        self.title_crumb.pack(side="left", padx=(14, 0))
+        self.title_crumb.pack(side="left", padx=(20, 0))
 
         if win_controls:
             min_btn = self._window_button(
@@ -1771,42 +2042,44 @@ class App:
             max_btn = self._traffic_light(
                 controls, "#28c840", "#0b4a12", "＋",
                 self.frameless.toggle_maximize)
+            self._light_controls = controls
+            self._light_buttons = (close_btn, min_btn, max_btn)
         self.max_button = max_btn
         self.frameless.on_max_change = self._on_max_change
 
         theme_lbl = self.c["label"]
         self.theme_cycle_btn = tk.Button(
-            titlebar, text=f"◐  {theme_lbl}", relief="flat", bd=0,
+            toolbar, text=f"◐  {theme_lbl}", relief="flat", bd=0,
             font=(UI_FONT, 9), cursor="hand2", takefocus=False,
             bg=c["surface2"], fg=c["text"], activebackground=c["hover"],
             activeforeground=c["text"], highlightthickness=0, padx=12,
             command=self._cycle_theme)
-        self.theme_cycle_btn.pack(side="right", padx=(0, 12))
+        self.theme_cycle_btn.pack(side="right", padx=(0, 14), pady=9)
         self._bind_hover(self.theme_cycle_btn, "ghost")
 
         self.account_switch_btn = tk.Menubutton(
-            titlebar, text="◉  Войти", relief="flat", bd=0,
+            toolbar, text="◉  Войти", relief="flat", bd=0,
             font=(UI_FONT, 9), cursor="hand2", takefocus=False,
             bg=c["surface2"], fg=c["text"], activebackground=c["hover"],
             activeforeground=c["text"], highlightthickness=0, padx=12)
         self.account_menu = tk.Menu(
             self.account_switch_btn, tearoff=0, bg=c["surface"],
             fg=c["text"], activebackground=self.accent,
-            activeforeground=c["on_accent"], bd=0, font=(UI_FONT, 9))
+            activeforeground=self.on_accent, bd=0, font=(UI_FONT, 9))
         self.account_switch_btn.configure(menu=self.account_menu)
-        self.account_switch_btn.pack(side="right", padx=(0, 8))
+        self.account_switch_btn.pack(side="right", padx=(0, 8), pady=9)
 
         self.mascot_btn = tk.Button(
-            titlebar, text="☺  Питомец", relief="flat", bd=0,
+            toolbar, text="☺  Питомец", relief="flat", bd=0,
             font=(UI_FONT, 9), cursor="hand2", takefocus=False,
             bg=c["surface2"], fg=c["muted"],
             activebackground=c["hover"], activeforeground=c["text"],
             highlightthickness=0, padx=12, command=self._toggle_mascot)
-        self.mascot_btn.pack(side="right", padx=(0, 8))
+        self.mascot_btn.pack(side="right", padx=(0, 8), pady=9)
         self._bind_hover(self.mascot_btn, "ghost")
 
         self.loader_btn = tk.Button(
-            titlebar, text="⌂  Меню", relief="flat", bd=0,
+            toolbar, text="⌂  Меню", relief="flat", bd=0,
             font=(UI_FONT, 9), cursor="hand2", takefocus=False,
             bg=c["surface2"], fg=c["muted"],
             activebackground=c["hover"], activeforeground=c["text"],
@@ -1820,7 +2093,7 @@ class App:
         if no_loader:
             self.loader_btn.destroy()
         else:
-            self.loader_btn.pack(side="right", padx=(0, 8))
+            self.loader_btn.pack(side="right", padx=(0, 8), pady=9)
             self._bind_hover(self.loader_btn, "ghost")
             excluded.add(self.loader_btn)
 
@@ -1889,9 +2162,27 @@ class App:
         c = self.c
         compact = bool(self.cfg.get("sidebar_compact"))
 
+        # ── бренд: логотип, имя и версия
+        brand = tk.Frame(sidebar, bg=c["panel"])
+        brand.pack(fill="x", padx=17, pady=(13, 0))
+        self.sidebar_brand = brand
+        if ICON_PNG.exists():
+            try:
+                img = tk.PhotoImage(file=str(ICON_PNG)).subsample(13, 13)
+                self._brand_icon = img
+                tk.Label(brand, image=img, bg=c["panel"], bd=0).pack(
+                    side="left")
+            except tk.TclError:
+                pass
+        tk.Label(brand, text=APP_NAME, bg=c["panel"], fg=c["text"],
+                 font=(UI_FONT, 10, "bold")).pack(side="left", padx=(8, 0))
+        tk.Label(brand, text=VERSION, bg=c["surface2"], fg=c["muted"],
+                 font=(UI_FONT, 8, "bold"), padx=6, pady=1).pack(
+                     side="left", padx=(8, 0))
+
         # ── шапка: поиск по разделам + переключатель ширины меню
         top = tk.Frame(sidebar, bg=c["panel"])
-        top.pack(fill="x", padx=12, pady=(14, 0))
+        top.pack(fill="x", padx=12, pady=(12, 0))
 
         self.sidebar_toggle_btn = tk.Button(
             top, text="⟨" if compact else "⟩", relief="flat", bd=0,
@@ -1902,27 +2193,21 @@ class App:
         self.sidebar_toggle_btn.pack(side="right", padx=(8, 0))
         self._bind_hover(self.sidebar_toggle_btn, "ghost")
 
-        self.sidebar_search_box = tk.Frame(top, bg=c["border"])
+        self.sidebar_search_box = tk.Canvas(top, bg=c["panel"], bd=0,
+                                            height=30, cursor="hand2",
+                                            highlightthickness=0)
         self.sidebar_search_box.pack(side="left", fill="x", expand=True)
-        search_in = tk.Frame(self.sidebar_search_box, bg=c["entry"],
-                             padx=8, pady=6)
-        search_in.pack(fill="x", padx=1, pady=1)
-        self.sidebar_search_glyph = tk.Label(
-            search_in, text="⌕", bg=c["entry"], fg=self.accent,
-            font=(UI_FONT, 10, "bold"))
-        self.sidebar_search_glyph.pack(side="left")
-        self.accent_fgs.append(self.sidebar_search_glyph)
         self.sidebar_search_var = tk.StringVar(value=SEARCH_PLACEHOLDER)
         self._search_placeholder_on = True
         self.sidebar_search_entry = tk.Entry(
-            search_in, textvariable=self.sidebar_search_var, bd=0,
-            relief="flat", bg=c["entry"], fg=c["muted"], cursor="xterm",
+            self.sidebar_search_box, textvariable=self.sidebar_search_var,
+            bd=0, relief="flat", bg=c["entry"], fg=c["muted"], cursor="xterm",
             insertbackground=c["text"], highlightthickness=0, takefocus=True,
             font=(UI_FONT, 9))
-        self.sidebar_search_entry.pack(side="left", fill="x", expand=True,
-                                       padx=(7, 0))
-        for widget in (self.sidebar_search_box, search_in):
-            widget.bind("<Button-1>", lambda _e: self._focus_nav_search())
+        self.sidebar_search_box.bind(
+            "<Configure>", lambda _e: self._sync_search_pill())
+        self.sidebar_search_box.bind(
+            "<Button-1>", lambda _e: self._focus_nav_search())
         self.sidebar_search_entry.bind("<KeyRelease>", self._on_nav_search)
         self.sidebar_search_entry.bind("<Return>", self._nav_search_open)
         self.sidebar_search_entry.bind(
@@ -1930,71 +2215,41 @@ class App:
         self.sidebar_search_entry.bind("<FocusIn>", self._search_focus_in)
         self.sidebar_search_entry.bind("<FocusOut>", self._search_focus_out)
         self.root.bind("<Control-f>", lambda _e: self._focus_nav_search())
+        self.root.after_idle(self._sync_search_pill)
 
-        # ── низ: запуск, аккаунт, статус Roblox (всегда виден)
+        # ── строка аккаунта: круглая аватарка, имя и «Roblox аккаунт»
+        self.sidebar_acc_card = tk.Canvas(sidebar, bg=c["panel"], bd=0,
+                                          height=58, cursor="hand2",
+                                          highlightthickness=0)
+        self.sidebar_acc_card.pack(fill="x", padx=12, pady=(8, 2))
+        self._acc_hover = False
+        self.sidebar_acc_card.bind("<Configure>",
+                                   lambda _e: self._paint_account_row())
+        self.sidebar_acc_card.bind(
+            "<Button-1>", lambda _e: self.show_page("accounts"))
+        self.sidebar_acc_card.bind(
+            "<Enter>", lambda _e: self._account_hover(True))
+        self.sidebar_acc_card.bind(
+            "<Leave>", lambda _e: self._account_hover(False))
+        self.root.after_idle(self._paint_account_row)
+
+        # ── низ: запуск и статус Roblox
         bottom = tk.Frame(sidebar, bg=c["panel"])
         bottom.pack(side="bottom", fill="x", padx=12, pady=(10, 12))
 
-        base, fg, hot = self._btn_colors("primary")
-        self.sidebar_play_btn = tk.Button(
-            bottom, text="▶   Запустить", command=self._sidebar_play,
-            relief="flat", bd=0, bg=base, fg=fg, activebackground=hot,
-            activeforeground=fg, disabledforeground=fg, cursor="hand2",
-            highlightthickness=0, pady=10, takefocus=False,
-            font=(UI_FONT, 11, "bold"))
+        self.sidebar_play_btn = PillButton(
+            self, bottom, "▶   Запустить", command=self._sidebar_play,
+            kind="primary", height=40, font=(UI_FONT, 11, "bold"))
         self.sidebar_play_btn.pack(fill="x", pady=(0, 10))
-        self._bind_hover(self.sidebar_play_btn, "primary")
         self.primary_buttons.append(self.sidebar_play_btn)
 
-        # активный аккаунт — быстрый переход к переключателю
-        acc_card = tk.Frame(bottom, bg=c["border"], cursor="hand2")
-        acc_card.pack(fill="x", pady=(0, 8))
-        acc_inner = tk.Frame(acc_card, bg=c["surface"], padx=12, pady=8,
-                             cursor="hand2")
-        acc_inner.pack(fill="x", padx=1, pady=1)
-        acc_head = tk.Frame(acc_inner, bg=c["surface"], cursor="hand2")
-        acc_head.pack(fill="x")
-        acc_dot = tk.Label(acc_head, text="●", bg=c["surface"],
-                           fg=self.accent, font=(UI_FONT, 7),
-                           cursor="hand2")
-        acc_dot.pack(side="left")
-        tk.Label(acc_head, text="АККАУНТ", bg=c["surface"], fg=c["muted"],
-                 font=(UI_FONT, 8, "bold"), cursor="hand2").pack(
-                     side="left", padx=(6, 0))
-        self.sidebar_account_dot = acc_dot
-        acc_name = tk.Label(acc_inner, textvariable=self.account_name_var,
-                            bg=c["surface"], fg=c["text"],
-                            font=(UI_FONT, 9, "bold"), anchor="w",
-                            cursor="hand2")
-        acc_name.pack(fill="x", pady=(4, 0))
-        acc_user = tk.Label(acc_inner, textvariable=self.account_user_var,
-                            bg=c["surface"], fg=c["muted"],
-                            font=(UI_FONT, 8), anchor="w",
-                            cursor="hand2")
-        acc_user.pack(fill="x")
-        for widget in (acc_card, acc_inner, acc_head, acc_dot, acc_name,
-                       acc_user):
-            widget.bind("<Button-1>",
-                        lambda _e: self.show_page("accounts"))
-
-        # статус Roblox
-        status_card = tk.Frame(bottom, bg=c["border"])
-        status_card.pack(fill="x")
-        status_in = tk.Frame(status_card, bg=c["surface"], padx=12, pady=9)
-        status_in.pack(fill="x", padx=1, pady=1)
-        status_head = tk.Frame(status_in, bg=c["surface"])
-        status_head.pack(fill="x")
-        self.sidebar_status_dot = tk.Label(
-            status_head, text="●", bg=c["surface"], fg=self.accent,
-            font=(UI_FONT, 7))
-        self.sidebar_status_dot.pack(side="left")
-        tk.Label(status_head, text="ROBLOX", bg=c["surface"], fg=c["muted"],
-                 font=(UI_FONT, 8, "bold")).pack(side="left", padx=(6, 0))
-        self.sidebar_roblox_var = tk.StringVar()
-        tk.Label(status_in, textvariable=self.sidebar_roblox_var,
-                 bg=c["surface"], fg=c["text"],
-                 font=(UI_FONT, 9, "bold"), anchor="w").pack(
-                     fill="x", pady=(4, 0))
+        self.sidebar_roblox_var = tk.StringVar(value="Проверка Roblox…")
+        self.sidebar_status_card = tk.Canvas(bottom, bg=c["panel"], bd=0,
+                                             height=34, highlightthickness=0)
+        self.sidebar_status_card.pack(fill="x")
+        self.sidebar_status_card.bind(
+            "<Configure>", lambda _e: self._paint_status_row())
+        self.root.after_idle(self._paint_status_row)
 
         # ── разделы: прокручиваемый список между поиском и нижней секцией
         nav_holder = tk.Frame(sidebar, bg=c["panel"])
@@ -2037,18 +2292,154 @@ class App:
         self._nav_grid(self.nav_empty_lbl, row, padx=9, pady=(9, 3))
         self.nav_empty_lbl.grid_remove()
 
-        self.frameless.excluded.update({nav_holder, self.nav_canvas, nav})
+        self.frameless.excluded.update({nav_holder, self.nav_canvas, nav,
+                                        brand, self.sidebar_acc_card,
+                                        self.sidebar_status_card})
         self.sidebar_top = top
-        self.sidebar_acc_card = acc_card
-        self.sidebar_status_card = status_card
         self.frameless.excluded.update(
-            {self.sidebar_toggle_btn, self.sidebar_search_box, search_in,
-             self.sidebar_search_glyph, self.sidebar_search_entry,
-             self.sidebar_play_btn, acc_card, status_card})
+            {self.sidebar_toggle_btn, self.sidebar_search_box,
+             self.sidebar_search_entry, self.sidebar_play_btn})
         if compact:
             self._apply_sidebar_compact(True)
         self._refresh_sidebar_status()
         self._on_nav_search()
+
+    # -- сайдбар: пилюля поиска, строки аккаунта и статуса -------------------
+
+    def _sync_search_pill(self):
+        """Скруглённое поле поиска: пилюля поверх канваса, лупа и строка ввода."""
+        cv = getattr(self, "sidebar_search_box", None)
+        if cv is None or getattr(self, "_closing", False):
+            return
+        try:
+            w = cv.winfo_width()
+            h = max(cv.winfo_height(), 24)
+        except tk.TclError:
+            return
+        if w <= 2:
+            return
+        c = self.c
+        cv.delete("pill")
+        _draw_round_panel(cv, w, h, 8, c["entry"], c["border"], c["panel"],
+                          tags="pill")
+        cv.create_text(15, h / 2.0, text="⌕", fill=c["muted"],
+                       font=(UI_FONT, 11, "bold"), tags="pill")
+        try:
+            self.sidebar_search_entry.place(
+                x=28, y=h / 2.0, anchor="w", height=h - 12,
+                width=max(10, w - 42))
+        except tk.TclError:
+            return
+
+    def _circle_avatar(self, user_id, size):
+        """Круглый аватар аккаунта, как кружок Apple ID в сайдбаре."""
+        path = account_avatar_path(user_id) if user_id else None
+        if path is None or not HAVE_PIL:
+            return None
+        try:
+            stamp = path.stat().st_mtime_ns
+        except OSError:
+            stamp = 0
+        key = ("circle", str(user_id), int(size), stamp)
+        cached = self._avatar_photos.get(key)
+        if cached is not None:
+            return cached
+        photo = None
+        try:
+            img = Image.open(path).convert("RGBA").resize(
+                (size, size), Image.LANCZOS)
+            mask = Image.new("L", (size, size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
+            img.putalpha(mask)
+            photo = ImageTk.PhotoImage(img)
+        except Exception:
+            photo = None
+        if photo is not None:
+            self._avatar_photos[key] = photo
+        return photo
+
+    def _account_hover(self, inside):
+        if getattr(self, "_closing", False):
+            return
+        self._acc_hover = bool(inside)
+        self._paint_account_row()
+
+    def _account_row_text(self):
+        try:
+            active = self._active_account()
+        except Exception:
+            active = None
+        if active is None:
+            return "Войти в аккаунт", SIDEBAR_ACCOUNT_SUB, None
+        display = (active.get("display") or active.get("name") or "Аккаунт")
+        login = f"@{active['name']}" if active.get("name") else ""
+        sub = f"{login} · {SIDEBAR_ACCOUNT_SUB}" if login \
+            else SIDEBAR_ACCOUNT_SUB
+        return trunc(display, 18), trunc(sub, 26), active
+
+    def _paint_account_row(self):
+        """Строка аккаунта в сайдбаре: кружок-аватар, имя и «Roblox аккаунт»."""
+        cv = getattr(self, "sidebar_acc_card", None)
+        if cv is None or getattr(self, "_closing", False):
+            return
+        try:
+            w = cv.winfo_width()
+            h = max(cv.winfo_height(), 40)
+        except tk.TclError:
+            return
+        if w <= 2:
+            return
+        c = self.c
+        cv.delete("acc")
+        if self._acc_hover:
+            _round_rect(cv, 1, 1, w - 1, h - 1, 8, fill=c["hover"],
+                        outline="", tags="acc")
+        size = 34
+        name, sub, active = self._account_row_text()
+        photo = self._circle_avatar((active or {}).get("user_id"), size)
+        cx = 10 + size / 2.0
+        cy = h / 2.0
+        if photo is not None:
+            cv._acc_photo = photo
+            cv.create_image(cx, cy, image=photo, tags="acc")
+        else:
+            cv.create_oval(cx - size / 2.0, cy - size / 2.0,
+                           cx + size / 2.0, cy + size / 2.0,
+                           fill=self.accent, outline="", tags="acc")
+            cv.create_text(cx, cy, text=str(name)[:1].upper(),
+                           fill=self.on_accent,
+                           font=(UI_FONT, 12, "bold"), tags="acc")
+        tx = 10 + size + 10
+        cv.create_text(tx, cy - 8, text=name, anchor="w", fill=c["text"],
+                       font=(UI_FONT, 10, "bold"), tags="acc")
+        cv.create_text(tx, cy + 8, text=sub, anchor="w", fill=c["muted"],
+                       font=(UI_FONT, 8), tags="acc")
+
+    def _paint_status_row(self):
+        """Нижняя строка меню: индикатор и состояние Roblox одной пилюлей."""
+        cv = getattr(self, "sidebar_status_card", None)
+        if cv is None or getattr(self, "_closing", False):
+            return
+        try:
+            w = cv.winfo_width()
+            h = max(cv.winfo_height(), 28)
+        except tk.TclError:
+            return
+        if w <= 2:
+            return
+        c = self.c
+        cv.delete("st")
+        _draw_round_panel(cv, w, h, 8, c["surface"],
+                          c.get("hairline") or c["border"], c["panel"],
+                          tags="st")
+        color = getattr(self, "_status_color", self.accent)
+        cv.create_oval(13, h / 2.0 - 3.5, 20, h / 2.0 + 3.5, fill=color,
+                       outline="", tags="st")
+        cv.create_text(28, h / 2.0, text="Roblox", anchor="w", fill=c["muted"],
+                       font=(UI_FONT, 9, "bold"), tags="st")
+        cv.create_text(w - 12, h / 2.0,
+                       text=self.sidebar_roblox_var.get(), anchor="e",
+                       fill=c["text"], font=(UI_FONT, 9), tags="st")
 
     # -- сайдбар: поиск и компактный режим ----------------------------------
 
@@ -2169,25 +2560,40 @@ class App:
     def _apply_sidebar_compact(self, compact):
         """Свернуть или развернуть боковое меню без пересборки интерфейса."""
         compact = bool(compact)
+        width = SIDEBAR_W_COMPACT if compact else SIDEBAR_W
         try:
-            self.sidebar.configure(
-                width=SIDEBAR_W_COMPACT if compact else SIDEBAR_W)
+            self.sidebar.configure(width=width)
+            side = getattr(self, "titlebar_side", None)
+            if side is not None:
+                side.configure(width=width)
+            gap = 5 if compact else 7
+            self._light_gap = gap
+            controls = getattr(self, "_light_controls", None)
+            if controls is not None:
+                controls.pack_configure(padx=(10 if compact else 18, 0))
+                for light in getattr(self, "_light_buttons", ()):
+                    light.pack_configure(padx=(0, gap))
             self.sidebar_toggle_btn.configure(text="⟩" if compact else "⟨")
             if compact:
+                self.sidebar_brand.pack_forget()
                 self.sidebar_search_box.pack_forget()
                 self.sidebar_acc_card.pack_forget()
                 self.sidebar_status_card.pack_forget()
             else:
+                self.sidebar_brand.pack(fill="x", padx=17, pady=(13, 0))
                 self.sidebar_search_box.pack(side="left", fill="x",
                                              expand=True)
-                self.sidebar_acc_card.pack(fill="x", pady=(0, 8))
+                self.sidebar_acc_card.pack(fill="x", padx=12, pady=(8, 2))
                 self.sidebar_status_card.pack(fill="x")
             for item in self.nav_buttons.values():
                 item.set_compact(compact)
-            self.sidebar_play_btn.configure(
-                text="▶" if compact else "▶   Запустить")
+            self.sidebar_play_btn.configure(text="▶" if compact
+                                            else "▶   Запустить")
             self._on_nav_search()
             self._nav_scroll_to_top()
+            self.root.after_idle(self._sync_search_pill)
+            self.root.after_idle(self._paint_account_row)
+            self.root.after_idle(self._paint_status_row)
         except (AttributeError, tk.TclError):
             pass
 
@@ -2202,15 +2608,14 @@ class App:
             "broken": "файл потерян",
         }.get(kind, "не найден")
         var.set(text)
-        dot = getattr(self, "sidebar_status_dot", None)
-        if dot is not None:
-            if kind in ("installed", "bootstrapper"):
-                color = self.accent
-            elif kind == "broken":
-                color = self._warn_fg()
-            else:
-                color = self.c["muted"]
-            dot.configure(fg=color)
+        if kind in ("installed", "bootstrapper"):
+            color = self.accent
+        elif kind == "broken":
+            color = self._warn_fg()
+        else:
+            color = self.c["muted"]
+        self._status_color = color
+        self._paint_status_row()
 
     def _cycle_theme(self):
         """Быстрая смена темы в верхней панели."""
@@ -2568,7 +2973,7 @@ class App:
         glyph, title, subtitle = spec
         c = self.c
         accent = self.accent
-        compact = height < 100
+        compact = not subtitle
         canvas.delete("all")
         canvas._header_photo = None
         photo = self._ensure_backdrop_master()
@@ -2600,46 +3005,84 @@ class App:
                 canvas.configure(bg=c["bg"])
         else:
             canvas.configure(bg=c["bg"])
+        hist = getattr(self, "_page_history", [])
+        pos = getattr(self, "_hist_pos", -1)
+        hair = c.get("hairline") or c["border"]
+        chev = 26
+        cy = height / 2.0 if compact else 22.0
+        zones = []
+        x = 0.0
+        for mark, delta, ok in (("‹", -1, pos > 0),
+                                ("›", 1, 0 <= pos < len(hist) - 1)):
+            _round_rect(canvas, x, cy - chev / 2.0, x + chev,
+                        cy + chev / 2.0, 8, fill=c["surface2"],
+                        outline=hair, width=1)
+            canvas.create_text(x + chev / 2.0, cy, text=mark,
+                               fill=c["text"] if ok else c["muted"],
+                               font=(UI_FONT, 12, "bold"))
+            zones.append((x, x + chev, delta))
+            x += chev + 5
+        tx = x + 8
+        canvas._header_zones = (zones, cy - chev / 2.0, cy + chev / 2.0)
         if compact:
-            canvas.create_rectangle(0, 10, 16, 12, fill=accent, outline="")
-            canvas.create_text(24, 4, text="M A K L Y X A", anchor="nw",
-                               fill=accent, font=(UI_FONT, 8, "bold"))
-            canvas.create_text(0, 24, text=title, anchor="nw", fill=c["text"],
-                               font=(UI_FONT, 19, "bold"))
-            badge = 44
+            canvas.create_text(tx, cy, text=title, anchor="w", fill=c["text"],
+                               font=(UI_FONT, 15, "bold"))
+            badge = 40
         else:
-            canvas.create_rectangle(0, 18, 18, 20, fill=accent, outline="")
-            canvas.create_text(26, 11, text="M A K L Y X A", anchor="nw",
-                               fill=accent, font=(UI_FONT, 8, "bold"))
-            canvas.create_text(0, 30, text=title, anchor="nw", fill=c["text"],
-                               font=(UI_FONT, 22, "bold"))
-            badge = 56
+            canvas.create_text(tx, cy - 8, text=title, anchor="w",
+                               fill=c["text"], font=(UI_FONT, 15, "bold"))
             if subtitle:
                 canvas.create_text(
-                    0, 72, text=subtitle, anchor="nw", fill=c["muted"],
-                    font=(UI_FONT, 10), width=max(220, width - 130),
+                    tx, cy + 11, text=subtitle, anchor="w", fill=c["muted"],
+                    font=(UI_FONT, 9), width=max(220, width - 190),
                     justify="left")
-        by1 = 8
-        bx2 = width - 8
-        _round_rect(canvas, bx2 - badge, by1, bx2, by1 + badge, 12,
-                    fill=c["surface2"], outline=c["border"], width=1)
-        canvas.create_text(bx2 - badge // 2, by1 + badge // 2, text=glyph,
+            badge = 44
+        by1 = max(6.0, cy - badge / 2.0)
+        bx2 = width - 6
+        _round_rect(canvas, bx2 - badge, by1, bx2, by1 + badge, 11,
+                    fill=c["surface2"], outline=hair, width=1)
+        canvas.create_text(bx2 - badge / 2.0, by1 + badge / 2.0, text=glyph,
                            fill=accent,
-                           font=(UI_FONT, 16 if compact else 20, "bold"))
+                           font=(UI_FONT, 15 if compact else 17, "bold"))
+
+    def _on_header_click(self, canvas, event):
+        zones = getattr(canvas, "_header_zones", None)
+        if not zones:
+            return
+        spans, top, bottom = zones
+        if not (top <= event.y <= bottom):
+            return
+        for x1, x2, delta in spans:
+            if x1 <= event.x <= x2:
+                self._history_go(delta)
+                return
+
+    def _on_header_motion(self, canvas, event):
+        zones = getattr(canvas, "_header_zones", None)
+        try:
+            if not zones:
+                canvas.configure(cursor="")
+                return
+            spans, top, bottom = zones
+            hit = (top <= event.y <= bottom
+                   and any(x1 <= event.x <= x2 for x1, x2, _d in spans))
+            canvas.configure(cursor="hand2" if hit else "")
+        except tk.TclError:
+            pass
 
     def _traffic_light(self, parent, color, glyph_color, glyph, command):
         """Кнопка окна как в macOS: цветной кружок со знаком при наведении."""
-        size = 14
+        size = 13
         canvas = tk.Canvas(
-            parent, width=size, height=size, bg=self.c["titlebar"],
+            parent, width=size, height=size, bg=self.c["panel"],
             highlightthickness=0, bd=0, cursor="hand2", takefocus=0)
-        dot = canvas.create_oval(2, 2, size - 2, size - 2,
+        dot = canvas.create_oval(1, 1, size - 1, size - 1,
                                  fill=color, outline="")
         mark = canvas.create_text(size / 2, size / 2, text="",
                                   fill=glyph_color,
                                   font=(UI_FONT, 7, "bold"))
         canvas.hover_glyph = glyph
-        canvas.pack(side="left", padx=(0, 8))
+        canvas.pack(side="left", padx=(0, getattr(self, "_light_gap", 7)))
 
         def on_enter(_e):
             canvas.itemconfigure(dot, fill=shade(color, 1.14))
@@ -2663,13 +3106,13 @@ class App:
         btn = tk.Button(
             parent, text=glyph, command=command, relief="flat", bd=0,
             font=(UI_FONT, 10), cursor="hand2", takefocus=False,
-            bg=c["titlebar"], fg=c["text"], padx=0, pady=0, width=5,
+            bg=c["bg"], fg=c["text"], padx=0, pady=0, width=5,
             activebackground=hot_bg, activeforeground=hot_fg,
             highlightthickness=0)
         btn.pack(side="left", fill="y")
         btn.bind("<Enter>", lambda _e: btn.configure(bg=hot_bg, fg=hot_fg))
         btn.bind("<Leave>",
-                 lambda _e: btn.configure(bg=c["titlebar"], fg=c["text"]))
+                 lambda _e: btn.configure(bg=c["bg"], fg=c["text"]))
         return btn
 
     def _on_max_change(self, maximized):
@@ -2713,7 +3156,7 @@ class App:
         self.root.after_idle(lambda k=key: self._sync_page_layout(k))
         return pad
 
-    def show_page(self, key):
+    def show_page(self, key, from_history=False):
         page = self.pages.get(key)
         if page is None:
             return
@@ -2721,6 +3164,8 @@ class App:
             self._ingame_hotkey_cancel()
         page.tkraise()
         self.current_page = key
+        if not from_history:
+            self._history_push(key)
         canvas = self.scroll_canvases.get(key)
         if canvas is not None:
             try:
@@ -2731,15 +3176,65 @@ class App:
         crumb = next((text for k, _icon, text in NAV_ITEMS if k == key), "")
         if getattr(self, "title_crumb", None) is not None:
             try:
-                self.title_crumb.configure(text=f"›  {crumb}")
+                self.title_crumb.configure(text=crumb)
             except tk.TclError:
                 pass
         for name, item in self.nav_buttons.items():
             item.set_active(name == key)
+        self.root.after(80, lambda k=key: self._nav_reveal(k))
         if (key == "gallery" and self.interactive
                 and not getattr(self, "_closing", False)):
             try:
                 self.root.after(120, self._gallery_maybe_refresh)
+            except tk.TclError:
+                pass
+
+    def _nav_reveal(self, key):
+        """Подсветка не должна уезжать за край: докрутить список к активному."""
+        canvas = getattr(self, "nav_canvas", None)
+        item = self.nav_buttons.get(key)
+        if canvas is None or item is None:
+            return
+        try:
+            box = canvas.bbox("all")
+            ch = canvas.winfo_height()
+            if not box or ch <= 1 or not item.winfo_ismapped():
+                return
+            total = max(1, box[3])
+            top, h = item.winfo_y(), item.winfo_height()
+            first, last = canvas.yview()
+            if top < first * total:
+                canvas.yview_moveto(max(0.0, (top - 8) / total))
+            elif top + h > last * total:
+                canvas.yview_moveto(min(1.0, (top + h - ch + 8) / total))
+        except tk.TclError:
+            pass
+
+    def _history_push(self, key):
+        """Записать переход в историю, чтобы работали «назад» и «вперёд»."""
+        hist = self._page_history
+        if hist and 0 <= self._hist_pos < len(hist) and \
+                hist[self._hist_pos] == key:
+            return
+        hist = hist[:self._hist_pos + 1]
+        if not hist or hist[-1] != key:
+            hist.append(key)
+        self._page_history = hist[-24:]
+        self._hist_pos = len(self._page_history) - 1
+        self._repaint_headers()
+
+    def _history_go(self, delta):
+        pos = self._hist_pos + delta
+        if pos < 0 or pos >= len(self._page_history):
+            return
+        self._hist_pos = pos
+        self.show_page(self._page_history[pos], from_history=True)
+        self._repaint_headers()
+
+    def _repaint_headers(self):
+        for canvas in list(getattr(self, "_header_canvases", ())):
+            try:
+                self._render_header(canvas)
             except tk.TclError:
                 pass
 
@@ -2787,6 +3282,10 @@ class App:
         self._header_canvases.append(canvas)
         canvas.bind("<Configure>",
                     lambda _e, cv=canvas: self._schedule_header(cv))
+        canvas.bind("<Button-1>",
+                    lambda e, cv=canvas: self._on_header_click(cv, e))
+        canvas.bind("<Motion>",
+                    lambda e, cv=canvas: self._on_header_motion(cv, e))
         self.root.after_idle(lambda cv=canvas: self._render_header(cv))
         return canvas
 
@@ -2805,47 +3304,63 @@ class App:
         except tk.TclError:
             canvas._header_job = None
 
+    def _rounded_shell(self, parent, expand=False, **pack_kw):
+        """Основа карточки: углы собраны полосами цвета страницы, потому что
+        фрейм Tk не умеет скругляться, а перекрывать его канвасом нельзя."""
+        c = self.c
+        outer = tk.Frame(parent, bg=c["bg"])
+        pack_kw.setdefault("pady", (0, 14))
+        outer.pack(**pack_kw)
+        steps = ((4, 4), (4, 1))
+        for h, ins in steps:
+            strip = tk.Frame(outer, bg=c["bg"], height=h)
+            strip.pack(fill="x")
+            strip.pack_propagate(False)
+            tk.Frame(strip, bg=c["surface"]).pack(fill="x", padx=ins)
+        body = tk.Frame(outer, bg=c["surface"])
+        body.pack(fill="both" if expand else "x", expand=expand)
+        for h, ins in reversed(steps):
+            strip = tk.Frame(outer, bg=c["bg"], height=h)
+            strip.pack(fill="x")
+            strip.pack_propagate(False)
+            tk.Frame(strip, bg=c["surface"]).pack(fill="x", padx=ins)
+        return outer, body
+
+    def _card_head(self, inner, title, subtitle=None, glyph=None,
+                   rule_pady=(11, 0)):
+        """Заголовок карточки с полоской-разделителем под ним."""
+        c = self.c
+        hair = c.get("hairline") or c["border"]
+        head = tk.Frame(inner, bg=c["surface"])
+        head.pack(fill="x")
+        if glyph:
+            tk.Label(head, text=glyph, bg=c["surface"], fg=self.accent,
+                     font=(UI_FONT, 11, "bold")).pack(side="left",
+                                                       padx=(0, 8))
+        tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
+                 font=(UI_FONT, 11, "bold"), anchor="w").pack(side="left")
+        if subtitle:
+            tk.Label(inner, text=subtitle, bg=c["surface"],
+                     fg=c["muted"], font=(UI_FONT, 9), anchor="w",
+                     justify="left", wraplength=520).pack(
+                         fill="x", pady=(4, 0))
+        tk.Frame(inner, bg=hair, height=1).pack(fill="x", pady=rule_pady)
+
     def _card(self, parent, title=None, subtitle=None, expand=False,
               glyph=None):
-        """Карточка: акцентная черта заголовка, подпись и разделитель."""
+        """Карточка-группа: скруглённые углы полосами, заголовок и строки."""
         c = self.c
-        outer = tk.Frame(parent, bg=c["border"])
-        outer.pack(fill="both" if expand else "x", expand=expand,
-                   pady=(0, 16))
-        body = tk.Frame(outer, bg=c["surface"])
-        body.pack(fill="both", expand=True, padx=1, pady=1)
-        inner = tk.Frame(body, bg=c["surface"], padx=20, pady=16)
+        _, body = self._rounded_shell(parent, expand=expand)
+        inner = tk.Frame(body, bg=c["surface"], padx=20, pady=13)
         inner.pack(fill="both", expand=True)
         if title:
-            head = tk.Frame(inner, bg=c["surface"])
-            head.pack(fill="x")
-            bar = tk.Frame(head, bg=self.accent, width=3, height=16)
-            bar.pack(side="left", pady=2)
-            self.accent_bgs.append(bar)
-            offset = 10
-            if glyph:
-                glyph_lbl = tk.Label(
-                    head, text=glyph, bg=c["surface"], fg=self.accent,
-                    font=(UI_FONT, 11, "bold"))
-                glyph_lbl.pack(side="left", padx=(10, 7))
-                self.accent_fgs.append(glyph_lbl)
-                offset = 0
-            tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
-                     font=(UI_FONT, 11, "bold"),
-                     anchor="w").pack(side="left", padx=(offset, 0))
-            if subtitle:
-                tk.Label(inner, text=subtitle, bg=c["surface"],
-                         fg=c["muted"], font=(UI_FONT, 9), anchor="w",
-                         justify="left", wraplength=520).pack(
-                             fill="x", pady=(5, 0))
-            tk.Frame(inner, bg=c["border"], height=1).pack(
-                fill="x", pady=(12, 0))
+            self._card_head(inner, title, subtitle, glyph)
         return inner
 
     def _btn_colors(self, kind):
         if kind == "primary":
             base = self.accent
-            fg = self.c["on_accent"]
+            fg = self.on_accent
         elif kind == "slot":
             base = self.c["entry"]
             fg = self.c["text"]
@@ -2909,19 +3424,12 @@ class App:
 
     def _button(self, parent, text, command=None, kind="ghost",
                 side=None, padx=0, **kw):
-        """Своя кнопка с анимацией наведения. kind: primary | ghost."""
-        base, fg, hot = self._btn_colors(kind)
-        btn = tk.Button(
-            parent, text=text, command=command, relief="flat", bd=0,
-            font=(UI_FONT, 10, "bold" if kind == "primary" else "normal"),
-            padx=14, pady=7, cursor="hand2", bg=base, fg=fg,
-            activebackground=hot, activeforeground=fg, takefocus=True,
-            highlightthickness=0, **kw)
+        """Кнопка-пилюля с плавной подсветкой. kind: primary | ghost | slot."""
+        btn = PillButton(self, parent, text, command=command, kind=kind, **kw)
         if side:
             btn.pack(side=side, padx=padx)
         else:
             btn.pack()
-        self._bind_hover(btn, kind)
         if kind == "primary":
             self.primary_buttons.append(btn)
         return btn
@@ -2935,6 +3443,13 @@ class App:
         return lbl
 
     def _checkbox(self, parent, text, variable, command=None):
+        """Строка-переключатель; перед ней рисуется полоска, если сверху
+        тоже переключатель — как строки в System Settings."""
+        siblings = parent.pack_slaves()
+        if siblings and isinstance(siblings[-1], ThemedCheck):
+            tk.Frame(parent,
+                     bg=self.c.get("hairline") or self.c["border"],
+                     height=1).pack(fill="x")
         return ThemedCheck(self, parent, text, variable, command=command)
 
     def _warn_fg(self):
@@ -2990,17 +3505,11 @@ class App:
                  bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
                  anchor="w", justify="left", wraplength=320).pack(
                      fill="x", pady=(0, 10))
-        self.btn_client = tk.Button(
-            left, text="▶   ПРОСТО В ROBLOX", relief="flat", bd=0,
-            cursor="hand2", font=(UI_FONT, 12, "bold"), pady=12,
-            takefocus=True, command=self.launch_client,
-            highlightthickness=0)
+        self.btn_client = PillButton(
+            self, left, "▶   ПРОСТО В ROBLOX", kind="primary", height=46,
+            font=(UI_FONT, 12, "bold"), command=self.launch_client)
         self.btn_client.pack(fill="x")
         self.primary_buttons.append(self.btn_client)
-        base, fg, hot = self._btn_colors("primary")
-        self.btn_client.configure(bg=base, fg=fg, activebackground=hot,
-                                  activeforeground=fg)
-        self._bind_hover(self.btn_client, "primary")
         self._hint(left, "Если клиент открыт, лаунчер выведет его окно "
                          "вперёд.", wrap=320)
 
@@ -3107,16 +3616,11 @@ class App:
         self._button(acc_strip, "Сменить",
                      lambda: self.show_page("accounts"), side="right")
 
-        self.btn_play = tk.Button(
-            inner, text="▶   ИГРАТЬ ПО ID", relief="flat", bd=0,
-            cursor="hand2", font=(UI_FONT, 13, "bold"), pady=12,
-            takefocus=True, command=self.play, highlightthickness=0)
+        self.btn_play = PillButton(
+            self, inner, "▶   ИГРАТЬ ПО ID", kind="primary", height=48,
+            font=(UI_FONT, 13, "bold"), command=self.play)
         self.btn_play.pack(fill="x", pady=(12, 0))
         self.primary_buttons.append(self.btn_play)
-        base, fg, hot = self._btn_colors("primary")
-        self.btn_play.configure(bg=base, fg=fg, activebackground=hot,
-                                activeforeground=fg)
-        self._bind_hover(self.btn_play, "primary")
 
         actions = tk.Frame(pad, bg=c["bg"])
         actions.pack(fill="x")
@@ -3259,12 +3763,7 @@ class App:
             self.active_login_var.set("Добавь аккаунт, чтобы играть под ним")
             self.active_meta_var.set("")
 
-        dot = getattr(self, "sidebar_account_dot", None)
-        if dot is not None:
-            try:
-                dot.configure(fg=self.accent if active else self.c["muted"])
-            except tk.TclError:
-                pass
+        self._paint_account_row()
 
         box = getattr(self, "accounts_box", None)
         if box is not None:
@@ -3644,29 +4143,13 @@ class App:
     def _side_card(self, parent, title, side, glyph=None):
         """Карточка в ряду карточек (side: left/right)."""
         c = self.c
-        outer = tk.Frame(parent, bg=c["border"])
         padx = (0, 8) if side == "left" else (8, 0)
-        outer.pack(side=side, fill="both", expand=True, padx=padx)
-        body = tk.Frame(outer, bg=c["surface"])
-        body.pack(fill="both", expand=True, padx=1, pady=1)
+        _, body = self._rounded_shell(
+            parent, expand=True, side=side, fill="both",
+            padx=padx, pady=(0, 0))
         inner = tk.Frame(body, bg=c["surface"], padx=18, pady=14)
         inner.pack(fill="both", expand=True)
-        head = tk.Frame(inner, bg=c["surface"])
-        head.pack(fill="x", pady=(0, 10))
-        bar = tk.Frame(head, bg=self.accent, width=3, height=14)
-        bar.pack(side="left", pady=2)
-        self.accent_bgs.append(bar)
-        offset = 10
-        if glyph:
-            glyph_lbl = tk.Label(
-                head, text=glyph, bg=c["surface"], fg=self.accent,
-                font=(UI_FONT, 10, "bold"))
-            glyph_lbl.pack(side="left", padx=(10, 6))
-            self.accent_fgs.append(glyph_lbl)
-            offset = 0
-        tk.Label(head, text=title, bg=c["surface"], fg=c["text"],
-                 font=(UI_FONT, 11, "bold")).pack(
-                     side="left", padx=(offset, 0))
+        self._card_head(inner, title, glyph=glyph, rule_pady=(11, 10))
         return inner
 
     def _build_page_favorites(self):
@@ -4690,23 +5173,17 @@ class App:
         current = (self.theme_name, self.accent.lower())
         for idx, (theme, accent, label) in enumerate(LOOK_PRESETS):
             active = (theme, accent) == current
-            base, fg, _hot = self._btn_colors(
-                "primary" if active else "ghost")
             cell = tk.Frame(grid, bg=c["surface"])
             cell.grid(row=idx // 2, column=idx % 2, sticky="nsew",
                       padx=(0, 8) if idx % 2 == 0 else (8, 0), pady=(0, 8))
             tk.Frame(cell, bg=accent, width=10, height=10).pack(
                 side="left", padx=(0, 8))
-            btn = tk.Button(
-                cell, text=("✓  " if active else "") + label,
+            btn = PillButton(
+                self, cell, ("✓  " if active else "") + label,
                 command=lambda t=theme, a=accent, n=label: self.apply_look(
                     t, a, n),
-                relief="flat", bd=0, bg=base, fg=fg, cursor="hand2",
-                activebackground=shade(base, 1.12), activeforeground=fg,
-                highlightthickness=0, padx=14, pady=9, takefocus=False,
-                font=(UI_FONT, 10, "bold" if active else "normal"))
+                kind="primary" if active else "ghost", height=38)
             btn.pack(side="left", fill="x", expand=True)
-            self._bind_hover(btn, "primary" if active else "ghost")
             if active:
                 self.primary_buttons.append(btn)
         grid.grid_columnconfigure(0, weight=1)
@@ -12168,7 +12645,7 @@ def run_selftest():
                         text = str(child.cget("text")).strip().lower()
                     except tk.TclError:
                         text = ""
-                    if isinstance(child, tk.Button) and text.startswith(
+                    if isinstance(child, (tk.Button, PillButton)) and text.startswith(
                             "сохранить"):
                         save_buttons.append(child)
                     _collect_save_buttons(child)
@@ -12708,7 +13185,8 @@ def run_selftest():
                     stack.extend(widget.winfo_children())
                     if widget.winfo_class() in ("TEntry", "Entry"):
                         entries.append(widget)
-                    if widget.winfo_class() == "Button":
+                    if (isinstance(widget, (tk.Button, PillButton))
+                            or widget.winfo_class() == "Button"):
                         buttons.append(str(widget.cget("text")))
                 if entries:
                     failures.append("UI: в диалоге входа остались поля пароля")

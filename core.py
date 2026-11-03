@@ -48,7 +48,7 @@ except ImportError:  # не Windows
 
 APP_NAME = "MaklyxaLauncher"
 WINDOW_TITLE = APP_NAME
-VERSION = "2.1.3"
+VERSION = "2.2.0"
 
 INSTALLER_URL = "https://www.roblox.com/download/client"
 DISCOVER_URL = "https://www.roblox.com/discover"
@@ -136,35 +136,37 @@ else:
 THEMES = {
     "dark": {
         "label": "Тёмная",
-        "bg": "#0f1218",
-        "panel": "#151a22",
-        "surface": "#1a202a",
-        "surface2": "#222a35",
-        "hover": "#2a3441",
-        "entry": "#1d242e",
-        "list": "#12171e",
-        "border": "#2a323d",
-        "text": "#edf1f7",
-        "muted": "#8d98a9",
-        "on_accent": "#071510",
-        "titlebar": "#10151c",
+        "bg": "#1e1f24",
+        "panel": "#26272c",
+        "surface": "#2f3137",
+        "surface2": "#3a3c44",
+        "hover": "#454851",
+        "entry": "#37393f",
+        "list": "#26272b",
+        "border": "#484a52",
+        "text": "#f4f5f7",
+        "muted": "#9b9ba1",
+        "on_accent": "#ffffff",
+        "titlebar": "#26272c",
         "alpha": 1.0,
+        "hairline": "#4a4c54",
     },
     "light": {
         "label": "Светлая",
-        "bg": "#f4f6fa",
-        "panel": "#ffffff",
+        "bg": "#f5f5f7",
+        "panel": "#e9e9ec",
         "surface": "#ffffff",
-        "surface2": "#eef2f8",
-        "hover": "#e3e9f2",
-        "entry": "#f7f9fc",
-        "list": "#f0f3f8",
-        "border": "#d9e0ea",
-        "text": "#17202b",
-        "muted": "#657184",
-        "on_accent": "#071510",
-        "titlebar": "#ffffff",
+        "surface2": "#f0f1f4",
+        "hover": "#e0e1e6",
+        "entry": "#ffffff",
+        "list": "#fafbfc",
+        "border": "#d5d6db",
+        "text": "#1d1d1f",
+        "muted": "#6e6e73",
+        "on_accent": "#ffffff",
+        "titlebar": "#e9e9ec",
         "alpha": 1.0,
+        "hairline": "#dcdce1",
     },
     "glass": {
         "label": "Стекло",
@@ -268,11 +270,17 @@ THEME_ORDER = ["dark", "night", "graphite", "neon", "glass", "white",
 DEFAULT_THEME = "dark"
 
 ACCENT_PRESETS = [
-    ("#00c48c", "Зелёный"),
-    ("#3b9eff", "Синий"),
-    ("#a06bff", "Фиолетовый"),
-    ("#ff9f43", "Оранжевый"),
-    ("#ff5f9e", "Розовый"),
+    ("#0a84ff", "Синий"),
+    ("#bf5af2", "Фиолетовый"),
+    ("#ff375f", "Розовый"),
+    ("#ff453a", "Красный"),
+    ("#ff9f0a", "Оранжевый"),
+    ("#ffd60a", "Жёлтый"),
+    ("#30d158", "Зелёный"),
+    ("#98989d", "Графит"),
+    ("#00c48c", "Изумруд"),
+    ("#3b9eff", "Голубой"),
+    ("#a06bff", "Индиго"),
 ]
 
 # Готовые образы: тема + акцент одним нажатием.
