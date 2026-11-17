@@ -17,6 +17,8 @@ jobs:
       contents: write
     env:
       PYTHONUTF8: '1'
+      TEMP: ${{ runner.temp }}
+      TMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
