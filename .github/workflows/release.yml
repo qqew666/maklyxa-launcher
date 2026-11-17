@@ -1,0 +1,69 @@
+name: Build and publish Windows release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt pyinstaller
+      - name: Compile and test preferences
+        run: |
+          python -m compileall -q launcher.py core.py menu_ui.py
+          python -m unittest discover -s tests -v
+      - name: Run existing Windows self-test
+        run: python launcher.py --selftest
+      - name: Build portable executable
+        shell: cmd
+        run: build.bat
+      - name: Install WiX
+        run: dotnet tool install --global wix --version 5.0.2
+      - name: Build MSI installer
+        shell: cmd
+        run: build_msi.bat
+      - name: Prepare release checksums
+        shell: pwsh
+        run: |
+          $version = python -c 'import core; print(core.VERSION)'
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+          $files = @('dist/MaklyxaLauncher.exe', "dist/MaklyxaLauncher-$version-x64.msi")
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            "$hash  $(Split-Path $file -Leaf)"
+          }
+          $lines | Set-Content dist/SHA256SUMS.txt -Encoding utf8
+      - name: Preserve built files
+        uses: actions/upload-artifact@v4
+        with:
+          name: MaklyxaLauncher-Windows
+          path: |
+            dist/MaklyxaLauncher.exe
+            dist/*.msi
+            dist/SHA256SUMS.txt
+      - name: Publish release after successful build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_VERSION
+          gh release create "$version" dist/MaklyxaLauncher.exe "dist/MaklyxaLauncher-$version-x64.msi" dist/SHA256SUMS.txt --repo "${{ github.repository }}" --target "${{ github.sha }}" --title "MaklyxaLauncher $version — уютное меню" --notes-file "RELEASE_NOTES_$version.md" --draft
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release edit "$version" --repo "${{ github.repository }}" --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
