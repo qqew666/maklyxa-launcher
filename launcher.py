@@ -13147,10 +13147,16 @@ def run_selftest():
                   app._backdrop_master.height()) != (
                       root.winfo_width(), root.winfo_height()):
                 failures.append("UI: фон-картинка не на всё окно")
-            if len(app._header_canvases) != len(NAV_ITEMS):
+            # Settings now owns its illustrated header instead of a photo header.
+            if not isinstance(app.settings_sections, menu_ui.SettingsSections):
+                failures.append("UI: нет нового меню настроек")
+            elif set(app.settings_sections.groups) != {
+                    "general", "appearance", "client", "updates"}:
+                failures.append("UI: потеряны вкладки настроек")
+            if len(app._header_canvases) != len(NAV_ITEMS) - 1:
                 failures.append(
                     f"UI: шапок {len(app._header_canvases)}, "
-                    f"а разделов {len(NAV_ITEMS)}")
+                    f"а разделов со стандартной шапкой {len(NAV_ITEMS) - 1}")
             for canvas in app._header_canvases:
                 if "image" not in {canvas.type(item)
                                    for item in canvas.find_all()}:
