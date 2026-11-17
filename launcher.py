@@ -56,6 +56,7 @@ except Exception:  # Pillow не обязателен для запуска
 
 import ingame as ingame_mod
 import loader_ui
+import menu_ui
 import luax
 import mascot as mascot_mod
 
@@ -1395,6 +1396,8 @@ class _LoaderApi:
 
 
 class App:
+    font_family = UI_FONT
+
     def __init__(self, root, interactive=True, start_page=None):
         self.root = root
         self.interactive = interactive
@@ -3491,70 +3494,39 @@ class App:
         pad = self._scroll_page("game")
 
         self._page_header(
-            pad, "▶", "Запуск",
-            "Просто открой клиент Roblox или запусти игру по ссылке "
-            "или Place ID.")
+            pad, "✦", "Твой мир. Твои правила.",
+            "Главная / Roblox — выбери игру и начни приключение.")
+
+        self.menu_companion = menu_ui.CompanionCard(
+            pad, self, CONFIG_DIR / "menu_ui.json")
 
         # быстрый запуск клиента и недавние
         top = tk.Frame(pad, bg=c["bg"])
         top.pack(fill="x", pady=(0, 16))
 
-        left = self._side_card(top, "Клиент Roblox", "left", glyph="◉")
+        left = self._side_card(top, "Начать играть", "left", glyph="◉")
         tk.Label(left, text="Открыть клиент без игры — игру можно выбрать "
                             "позже.",
                  bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
                  anchor="w", justify="left", wraplength=320).pack(
                      fill="x", pady=(0, 10))
         self.btn_client = PillButton(
-            self, left, "▶   ПРОСТО В ROBLOX", kind="primary", height=46,
+            self, left, "▶   ОТКРЫТЬ ROBLOX", kind="primary", height=46,
             font=(UI_FONT, 12, "bold"), command=self.launch_client)
         self.btn_client.pack(fill="x")
         self.primary_buttons.append(self.btn_client)
         self._hint(left, "Если клиент открыт, лаунчер выведет его окно "
                          "вперёд.", wrap=320)
 
-        right = self._side_card(top, "Недавние", "right", glyph="◷")
+        right = self._side_card(top, "Продолжить приключение", "right", glyph="◷")
         self.recent_box, _ = self._make_listbox(right, height=4)
         self.recent_box.bind("<Double-Button-1>", self._recent_activate)
         self._hint(right, "Enter или двойной клик — запустить игру.",
                    wrap=270)
 
-        # выбор установленной версии клиента
-        version_card = self._card(
-            pad, title="Версия Roblox", glyph="◈",
-            subtitle="Если новая версия что-то сломала, запусти другую "
-                     "установленную сборку. «Авто» — самая новая.")
-        ver_row = tk.Frame(version_card, bg=c["surface"])
-        ver_row.pack(fill="x", pady=(10, 0))
-        self.roblox_version_var = tk.StringVar()
-        self.roblox_version_box = ttk.Combobox(
-            ver_row, textvariable=self.roblox_version_var,
-            state="readonly", width=54)
-        self.roblox_version_box.pack(side="left", fill="x", expand=True)
-        self.roblox_version_box.bind(
-            "<<ComboboxSelected>>", self._roblox_version_pick)
-        self._button(ver_row, "Обновить", self._refresh_roblox_versions,
-                     side="left", padx=(8, 0))
-        self._button(ver_row, "Папка", self._open_roblox_versions_dir,
-                     side="left")
-        self.roblox_version_note_var = tk.StringVar(value="")
-        ver_note = tk.Label(
-            version_card, textvariable=self.roblox_version_note_var,
-            bg=c["surface"], fg=self.accent, font=(UI_FONT, 9, "bold"),
-            anchor="w", justify="left", wraplength=560)
-        ver_note.pack(fill="x", pady=(8, 0))
-        self.accent_fgs.append(ver_note)
-        self._hint(
-            version_card,
-            "Выбранная сборка запускается напрямую — без бутстрапера и "
-            "автообновления. Вход в аккаунт, FastFlags и оверлей работают "
-            "как обычно. Если папку версии удалят, лаунчер сам вернётся "
-            "к самой новой.", wrap=560)
-        self._refresh_roblox_versions()
-
         # запуск игры по ссылке или Place ID
         inner = self._card(pad)
-        tk.Label(inner, text="ВЫБРАННАЯ ИГРА", bg=c["surface"],
+        tk.Label(inner, text="ТВОЁ СЛЕДУЮЩЕЕ ПРИКЛЮЧЕНИЕ", bg=c["surface"],
                  fg=c["muted"], font=(UI_FONT, 8, "bold"),
                  anchor="w").pack(fill="x")
 
@@ -3621,6 +3593,39 @@ class App:
             font=(UI_FONT, 13, "bold"), command=self.play)
         self.btn_play.pack(fill="x", pady=(12, 0))
         self.primary_buttons.append(self.btn_play)
+
+        # выбор установленной версии клиента
+        version_card = self._card(
+            pad, title="Версия Roblox", glyph="◈",
+            subtitle="Если новая версия что-то сломала, запусти другую "
+                     "установленную сборку. «Авто» — самая новая.")
+        ver_row = tk.Frame(version_card, bg=c["surface"])
+        ver_row.pack(fill="x", pady=(10, 0))
+        self.roblox_version_var = tk.StringVar()
+        self.roblox_version_box = ttk.Combobox(
+            ver_row, textvariable=self.roblox_version_var,
+            state="readonly", width=54)
+        self.roblox_version_box.pack(side="left", fill="x", expand=True)
+        self.roblox_version_box.bind(
+            "<<ComboboxSelected>>", self._roblox_version_pick)
+        self._button(ver_row, "Обновить", self._refresh_roblox_versions,
+                     side="left", padx=(8, 0))
+        self._button(ver_row, "Папка", self._open_roblox_versions_dir,
+                     side="left")
+        self.roblox_version_note_var = tk.StringVar(value="")
+        ver_note = tk.Label(
+            version_card, textvariable=self.roblox_version_note_var,
+            bg=c["surface"], fg=self.accent, font=(UI_FONT, 9, "bold"),
+            anchor="w", justify="left", wraplength=560)
+        ver_note.pack(fill="x", pady=(8, 0))
+        self.accent_fgs.append(ver_note)
+        self._hint(
+            version_card,
+            "Выбранная сборка запускается напрямую — без бутстрапера и "
+            "автообновления. Вход в аккаунт, FastFlags и оверлей работают "
+            "как обычно. Если папку версии удалят, лаунчер сам вернётся "
+            "к самой новой.", wrap=560)
+        self._refresh_roblox_versions()
 
         actions = tk.Frame(pad, bg=c["bg"])
         actions.pack(fill="x")
@@ -8808,15 +8813,16 @@ end
     # -- страница «Настройки» ----------------------------------------------------------
 
     def _build_page_settings(self):
-        c = self.c
+        skin = menu_ui.SettingsSkin(self, CONFIG_DIR / "settings_look.json")
+        c = skin.c
         pad = self._scroll_page("settings")
 
-        self._page_header(
-            pad, "⚙", "Настройки",
-            "Поведение лаунчера, оформление и управление Roblox на этом ПК")
+        self.settings_sections = menu_ui.SettingsSections(pad, self, skin)
+        groups = self.settings_sections.groups
+        self.menu_companion.build_settings(groups["appearance"], skin)
 
         # поведение
-        inner = self._card(pad, title="Поведение", glyph="☑")
+        inner = skin._card(groups["general"], title="Как тебе удобнее?", glyph="☑")
         self.var_auto_close = tk.BooleanVar(value=self.cfg["auto_close"])
         self.var_save_history = tk.BooleanVar(value=self.cfg["save_history"])
         self.var_remember = tk.BooleanVar(value=self.cfg["remember_last"])
@@ -8830,12 +8836,12 @@ end
              self.var_remember),
             ("Показывать меню-лоадер при запуске", self.var_loader_screen),
         ):
-            self._checkbox(inner, text, var,
+            skin._checkbox(inner, text, var,
                            command=self._save_settings).pack(
                 anchor="w", pady=(4, 4))
 
         # игра по умолчанию
-        inner2 = self._card(pad, title="Игра по умолчанию",
+        inner2 = skin._card(groups["general"], title="Любимый мир",
                             subtitle="Place ID, который подставится при "
                                      "запуске",
                             glyph="▶")
@@ -8849,15 +8855,15 @@ end
                  font=(UI_FONT, 8)).pack(side="left", padx=10)
 
         # Discord Rich Presence
-        inner_d = self._card(
-            pad, title="Discord",
+        inner_d = skin._card(
+            groups["general"], title="Discord",
             subtitle="Статус MaklyxaLauncher в профиле Discord",
             glyph="◍")
         self.var_discord_rpc = tk.BooleanVar(
             value=bool(self.cfg.get("discord_rpc", True)))
         self.var_discord_id = tk.StringVar(
             value=self.cfg.get("discord_app_id") or "")
-        self._checkbox(
+        skin._checkbox(
             inner_d, "Показывать статус лаунчера в Discord",
             self.var_discord_rpc).pack(anchor="w", pady=(4, 8))
         tk.Label(inner_d, text="Application ID", bg=c["surface"],
@@ -8871,28 +8877,28 @@ end
                  font=(UI_FONT, 8), anchor="w").pack(fill="x", pady=(4, 0))
         row_d2 = tk.Frame(inner_d, bg=c["surface"])
         row_d2.pack(fill="x", pady=(8, 0))
-        self._button(row_d2, "Создать приложение",
+        skin._button(row_d2, "Создать приложение",
                      self.open_discord_portal, side="left")
         tk.Label(inner_d, textvariable=self.discord_status_var,
                  bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
                  anchor="w").pack(fill="x", pady=(8, 0))
-        self._hint(
+        skin._hint(
             inner_d,
             "Application ID берётся у приложения с именем MaklyxaLauncher "
             "на discord.com/developers/applications. Для статуса нужен "
             "запущенный Discord для ПК.", wrap=540)
 
         # Roblox на этом ПК
-        inner3 = self._card(pad, title="Roblox на этом ПК", glyph="◉")
+        inner3 = skin._card(groups["client"], title="Roblox на этом ПК", glyph="◉")
         tk.Label(inner3, textvariable=self.proto_var, bg=c["surface"],
                  fg=c["text"], font=(UI_FONT, 11), anchor="w",
                  wraplength=520, justify="left").pack(fill="x", pady=(6, 0))
         row3 = tk.Frame(inner3, bg=c["surface"])
         row3.pack(fill="x", pady=(10, 0))
-        self._button(row3, "Проверить снова", self.recheck, side="left")
-        self.btn_dl = self._button(row3, "Скачать Roblox", self.start_download,
+        skin._button(row3, "Проверить снова", self.recheck, side="left")
+        self.btn_dl = skin._button(row3, "Скачать Roblox", self.start_download,
                                    kind="primary", side="left", padx=8)
-        self.btn_dl_cancel = self._button(row3, "Отмена",
+        self.btn_dl_cancel = skin._button(row3, "Отмена",
                                           self.cancel_download, side="left")
         self.dl_bar = ttk.Progressbar(inner3, maximum=100,
                                        style="green.Horizontal.TProgressbar")
@@ -8904,28 +8910,32 @@ end
         self.dl_label.pack_forget()
 
         # оформление
-        inner4 = self._card(pad, title="Оформление",
+        inner4 = skin._card(groups["appearance"], title="Твой маленький гардероб",
                             subtitle="Тема и акцентный цвет интерфейса",
                             glyph="◐")
         theme_row = tk.Frame(inner4, bg=c["surface"])
         theme_row.pack(fill="x", pady=(8, 0))
         self.theme_buttons = {}
-        for name in THEME_ORDER:
+        theme_line = None
+        for index, name in enumerate(THEME_ORDER):
+            if index % 4 == 0:
+                theme_line = tk.Frame(theme_row, bg=c["surface"])
+                theme_line.pack(fill="x", pady=(0, 6))
             kind = "primary" if name == self.theme_name else "ghost"
-            btn = self._button(theme_row, THEMES[name]["label"],
+            btn = skin._button(theme_line, THEMES[name]["label"],
                                lambda n=name: self.set_theme(n), kind=kind,
                                side="left", padx=(0, 8))
             self.theme_buttons[name] = btn
         custom = self._custom_theme_available()
         if custom:
             kind = "primary" if self.theme_name == "custom" else "ghost"
-            self.theme_buttons["custom"] = self._button(
-                theme_row, f"◐ {trunc(custom, 14)}",
+            self.theme_buttons["custom"] = skin._button(
+                theme_line, f"◐ {trunc(custom, 14)}",
                 lambda n=custom: self.set_theme("custom", custom_name=n),
                 kind=kind, side="left", padx=(0, 8))
         themes_row = tk.Frame(inner4, bg=c["surface"])
         themes_row.pack(fill="x", pady=(8, 0))
-        self._button(themes_row, "Свои темы и картинка",
+        skin._button(themes_row, "Свои темы и картинка",
                      lambda: self.show_page("themes"), side="left")
         tk.Label(themes_row, text="цвета и фон в разделе «Темы»",
                  bg=c["surface"], fg=c["muted"],
@@ -8959,17 +8969,17 @@ end
         current_style = self.cfg.get("window_buttons", "mac")
         for key, label in (("mac", "macOS"), ("win", "Windows")):
             kind = "primary" if current_style == key else "ghost"
-            self.window_style_buttons[key] = self._button(
+            self.window_style_buttons[key] = skin._button(
                 style_btns, label,
                 lambda v=key: self.set_window_buttons(v),
                 kind=kind, side="left",
                 padx=(8, 0) if key == "win" else 0)
-        self._hint(inner4, "macOS — цветные кружки слева, Windows — "
+        skin._hint(inner4, "macOS — цветные кружки слева, Windows — "
                     "кнопки свернуть, развернуть и закрыть справа.", wrap=540)
 
         # питомец
-        inner_pet = self._card(
-            pad, title="Питомец",
+        inner_pet = skin._card(
+            groups["appearance"], title="Кто сидит на окошке?",
             subtitle="Роблоксер на верхней кромке окна или своя картинка",
             glyph="☺")
         tk.Label(inner_pet, textvariable=self.mascot_state_var,
@@ -8978,13 +8988,13 @@ end
                      fill="x", pady=(6, 0))
         pet_row = tk.Frame(inner_pet, bg=c["surface"])
         pet_row.pack(fill="x", pady=(10, 0))
-        self.btn_mascot_load = self._button(
+        self.btn_mascot_load = skin._button(
             pet_row, "Загрузить картинку…", self.choose_mascot_image,
             kind="primary", side="left")
-        self.btn_mascot_reset = self._button(
+        self.btn_mascot_reset = skin._button(
             pet_row, "Вернуть роблоксера", self.reset_mascot_image,
             side="left", padx=8)
-        self._hint(
+        skin._hint(
             inner_pet,
             "PNG, GIF, JPG или WEBP. Прозрачный фон и анимация GIF "
             "поддерживаются: картинка подгоняется под размер питомца и так "
@@ -8992,27 +9002,27 @@ end
             "в папку настроек.", wrap=540)
 
         # обновления
-        inner_upd = self._card(
-            pad, title="Обновления",
+        inner_upd = skin._card(
+            groups["updates"], title="Свеженькое для тебя",
             subtitle="Проверка и скачивание новых версий с GitHub",
             glyph="⟳")
         upd_row = tk.Frame(inner_upd, bg=c["surface"])
         upd_row.pack(fill="x", pady=(8, 0))
         tk.Label(upd_row, text=f"Установлена версия {VERSION}",
                  bg=c["surface"], fg=c["text"],
-                 font=(UI_FONT, 10, "bold")).pack(side="left")
+                 font=(UI_FONT, 10, "bold")).pack(anchor="w")
         upd_btns = tk.Frame(upd_row, bg=c["surface"])
-        upd_btns.pack(side="right")
-        self.btn_update = self._button(
+        upd_btns.pack(side="bottom", fill="x", pady=(10, 0))
+        self.btn_update = skin._button(
             upd_btns, "Проверить обновления", self.check_updates,
             side="left")
-        self.btn_update_get = self._button(
+        self.btn_update_get = skin._button(
             upd_btns, "Скачать обновление", self.start_update_download,
             kind="primary", side="left", padx=(8, 0))
-        self.btn_update_install = self._button(
+        self.btn_update_install = skin._button(
             upd_btns, "Установить и перезапустить", self.install_update,
             kind="primary", side="left", padx=(8, 0))
-        self.btn_update_cancel = self._button(
+        self.btn_update_cancel = skin._button(
             upd_btns, "Отмена", self.cancel_update_download,
             side="left", padx=(8, 0))
         self.btn_update_get.pack_forget()
@@ -9031,7 +9041,7 @@ end
                                   font=(UI_FONT, 9), anchor="w")
         self.upd_bar.pack_forget()
         self.upd_label.pack_forget()
-        self._hint(
+        skin._hint(
             inner_upd,
             "Лаунчер сам скачает файл обновления с GitHub и проверит размер "
             "и контрольную сумму. «Установить» заменит файл лаунчера и "
@@ -9040,23 +9050,23 @@ end
             self._show_update_install()
 
         # эта сборка: портативный exe можно установить как программу
-        inner_inst = self._card(pad, title="Эта сборка", glyph="▣")
+        inner_inst = skin._card(groups["updates"], title="Эта сборка", glyph="▣")
         tk.Label(inner_inst, textvariable=self.app_install_status_var,
                  bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
                  anchor="w", wraplength=540, justify="left").pack(
                      fill="x", pady=(8, 0))
         inst_row = tk.Frame(inner_inst, bg=c["surface"])
         inst_row.pack(fill="x", pady=(10, 0))
-        self.btn_app_install = self._button(
+        self.btn_app_install = skin._button(
             inst_row, "Установить как программу", self.install_app,
             kind="primary", side="left")
-        self.btn_app_install_cancel = self._button(
+        self.btn_app_install_cancel = skin._button(
             inst_row, "Отмена", self.cancel_app_install,
             side="left", padx=(8, 0))
         self.btn_app_install_cancel.pack_forget()
         self.app_install_bar = ttk.Progressbar(
             inner_inst, maximum=100, style="green.Horizontal.TProgressbar")
-        self._hint(
+        skin._hint(
             inner_inst,
             "Кнопка есть у портативного exe: лаунчер скачает MSI своей "
             "версии с GitHub, проверит размер и контрольную сумму и "
@@ -9066,7 +9076,7 @@ end
         self._sync_app_install_ui()
 
         # о программе
-        inner5 = self._card(pad, title="О программе", glyph="ⓘ")
+        inner5 = skin._card(groups["updates"], title="О программе", glyph="ⓘ")
         tk.Label(
             inner5, bg=c["surface"], fg=c["muted"], font=(UI_FONT, 9),
             justify="left", anchor="w", wraplength=540, text=(
@@ -9082,10 +9092,12 @@ end
                  wraplength=540, justify="left").pack(fill="x", pady=(6, 0))
         row4 = tk.Frame(inner5, bg=c["surface"])
         row4.pack(fill="x", pady=(10, 0))
-        self._button(row4, "Открыть папку настроек", self.open_config_dir,
+        skin._button(row4, "Открыть папку настроек", self.open_config_dir,
                      side="left")
-        self._button(row4, "Сбросить настройки", self.reset_settings,
+        skin._button(row4, "Сбросить настройки", self.reset_settings,
                      side="left", padx=8)
+
+        self.settings_sections.finish()
 
     # -- страница «Журнал» ---------------------------------------------------------------
 
@@ -10994,6 +11006,9 @@ end
             name = next((n for col, n in ACCENT_PRESETS if col == color),
                         color)
             name_lbl.configure(text=name)
+        sections = getattr(self, "settings_sections", None)
+        if sections is not None:
+            sections.restyle()
 
     # -- цикл очереди ------------------------------------------------------------------------------
 
